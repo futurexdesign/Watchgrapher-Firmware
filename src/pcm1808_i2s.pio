@@ -1,0 +1,66 @@
+;
+; PCM1808 I²S RX — ADC is BCK/LRCK master; RP2350 samples DOUT only.
+;
+; Wiring (baked into wait gpio immediates — must match board_config.h defaults):
+;   BCK  = GPIO2
+;   LRCK = GPIO3
+;   DOUT = GPIO4  (set as PIO in_base from C)
+;
+; I²S: after each LRCK edge, skip one BCK period, then capture 32 bits MSB-first
+; on rising BCK. Autopush every 32 bits → DMA sees [left_slot32, right_slot32, ...].
+;
+
+.program pcm1808_i2s_rx
+
+.define public BCK_GPIO  2
+.define public LRCK_GPIO 3
+
+.wrap_target
+public entry_point:
+    ; Align to start of left (LRCK falling)
+    wait 1 gpio LRCK_GPIO
+    wait 0 gpio LRCK_GPIO
+    ; One-bit I²S delay
+    wait 0 gpio BCK_GPIO
+    wait 1 gpio BCK_GPIO
+
+    set x, 31
+left_bits:
+    wait 0 gpio BCK_GPIO
+    wait 1 gpio BCK_GPIO
+    in pins, 1
+    jmp x-- left_bits
+
+    ; Start of right (LRCK rising) + one-bit delay
+    wait 1 gpio LRCK_GPIO
+    wait 0 gpio BCK_GPIO
+    wait 1 gpio BCK_GPIO
+
+    set x, 31
+right_bits:
+    wait 0 gpio BCK_GPIO
+    wait 1 gpio BCK_GPIO
+    in pins, 1
+    jmp x-- right_bits
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+
+static inline void pcm1808_i2s_rx_program_init(PIO pio, uint sm, uint offset,
+                                               uint dout_gpio) {
+  pio_sm_config c = pcm1808_i2s_rx_program_get_default_config(offset);
+
+  sm_config_set_in_pins(&c, dout_gpio);
+  sm_config_set_in_shift(&c, false /* shift left / MSB first */, true /* autopush */,
+                         32);
+  sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+  /* Free-run at clk_sys; WAIT instructions pace on BCK edges. */
+  sm_config_set_clkdiv(&c, 1.0f);
+
+  pio_gpio_init(pio, dout_gpio);
+  pio_sm_set_consecutive_pindirs(pio, sm, dout_gpio, 1, false);
+
+  pio_sm_init(pio, sm, offset + pcm1808_i2s_rx_offset_entry_point, &c);
+}
+%}
