@@ -1,6 +1,6 @@
 /**
  * @file control_api.h
- * @brief Transport-agnostic DSP control plane (CDC CLI now; WebHID later).
+ * @brief Transport-agnostic DSP control plane (CDC CLI + WebHID).
  *
  * All DSP enable/param/meter/event access from hosts should go through this
  * façade rather than calling {@link dsp_graph} directly. Handlers must not
@@ -79,6 +79,12 @@ void control_api_get_metrics(dsp_metrics_t *out);
 
 /** Copies the current beat-rate estimate. */
 void control_api_get_beat_rate(dsp_beat_rate_t *out);
+
+/** Copies last spectrum peak list. */
+void control_api_get_spectrum(dsp_spectrum_t *out);
+
+/** Copies matched-filter state. */
+void control_api_get_matched(dsp_matched_t *out);
 
 /**
  * Copies up to {@code max_n} recent analysis events (newest first).

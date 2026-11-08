@@ -138,7 +138,7 @@ flowchart LR
   Feed --> TU["TinyUSB EP IN + flow control"]
   TU --> Host["Host UAC2 mic S24LE"]
   CLI["CDC serial_cli → control_api"] --> DSP["dsp_graph"]
-  HID["HID WebHID JSON (spec) → control_api"] -.-> DSP
+  HID["HID WebHID JSON → control_api"] --> DSP
   PCM --> DSP
   Main["loop: TinyUSB / source / usb_audio / CLI / diag / LED"]
 ```
@@ -285,9 +285,9 @@ Implemented in [`dsp_graph.cpp`](../src/dsp_graph.cpp) / [`dsp_types.h`](../incl
 
 ```text
 PCM1808 left24 → float FS (/8388608)
-  → analysis (meters, noise, event detect, beat rate)   [never mutates PCM]
-  → process  (notch → filter → soft_gate → gain → AGC → limiter)
-                                                      [only if bypass off]
+  → analysis (meters, noise, match, event, beat, spectrum)  [never mutates PCM]
+  → process  (notch → IIR filter → FIR → soft_gate → gain → AGC → limiter)
+                                                            [only if bypass off]
   → quantize to signed PCM24 (int32)
   → optional PCM1808_OUTPUT_UPSAMPLE repeat
   → audio_ring
@@ -295,7 +295,7 @@ PCM1808 left24 → float FS (/8388608)
 
 Master **bypass** defaults **on**: process path is identity; analysis may still run. When bypass is on, optional `PCM1808_PCM_GAIN` is applied at quantize. When bypass is off, loudness is the **gain** / **AGC** blocks.
 
-CMSIS-DSP kernels used today: `arm_power_f32`, `arm_biquad_cascade_df1_*`.
+CMSIS-DSP kernels: `arm_power_f32`, `arm_biquad_cascade_df1_*`, `arm_fir_f32`, `arm_dot_prod_f32`, `arm_rfft_fast_f32` (512).
 
 ### 8.2 Blocks
 
@@ -313,8 +313,11 @@ CMSIS-DSP kernels used today: `arm_power_f32`, `arm_biquad_cascade_df1_*`.
 | `gain` | Process | off | Fixed make-up gain from `db` param |
 | `agc` | Process | off | Slow peak follower toward `target` FS (τ seconds; ±12 dB) |
 | `limiter` | Process | on | Hard clamp at ±1.0 FS before PCM24 quantize |
+| `matched_filter` | Analysis | off | 64-sample learned template + correlation gate for event opens |
+| `fir_bank` | Process | off | 64-tap Hamming FIR bandpass (same presets as filter_bank) |
+| `spectrum` | Analysis | off | 512-point RFFT; top-8 tonal peaks (`dsp spectrum`) |
 
-Enabling process blocks (**notch / filter / soft_gate / gain / agc / limiter**) **clears master bypass** and arms the USB continuity watchdog.
+Enabling process blocks (**notch / filter / fir / soft_gate / gain / agc / limiter**) **clears master bypass** and arms the USB continuity watchdog.
 
 CLI: `dsp help <block>` prints a short description and params; aliases include `on`/`off`, `gate`, `filter`, `event`, `dsp set gain 12`, `dsp set notch 60`.
 
@@ -334,10 +337,9 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 
 ### 8.5 What is *not* in the DSP path yet
 
-- Matched filter / FFT analysis
+- Phase 4 STFT spectral denoising (deferred)
 - Multicore offload (core 1 parked)
 - ADC / SYNTHETIC producers calling `dsp_graph_process`
-- Firmware HID transport (spec complete — see §9.1; CDC CLI is the live control path)
 
 ---
 
@@ -348,7 +350,8 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 | `serial_cli` | Main-loop glue: watchdog, async errors, `Cli::coreTick` |
 | `cli_core` | Line editor, tokenize, dispatch (no history) |
 | `cli_commands` | `help`, `version`/`ver`, `status`, `diag`, `dsp …` |
-| `control_api` | Transport-agnostic façade over `dsp_graph` (CDC now; HID later) |
+| `control_api` | Transport-agnostic façade over `dsp_graph` (CDC + HID) |
+| `hid_control` | Vendor HID JSON framer / RPC (WebHID) |
 
 Useful `dsp` subcommands: `list`, `status`/`bypass`, `on`/`off`/`enable`/`disable`, `get`/`set`, `events`, `beat`/`rate`, `metrics`, `errors` [`clear`], `help` [`block`].
 
@@ -371,7 +374,7 @@ Locked model:
 - JS-facing ops: `hello`, `getState`, `patchState`, `subscribe`, plus one-shot metrics/beat/events/errors.
 - Firmware HID codec (when implemented) calls **`control_api` only**, same as the CLI.
 
-Implementation phases H1–H4 are listed in [`HID_CONTROL_PLANE.md`](HID_CONTROL_PLANE.md) §10. H0 (this documentation) is done; `CFG_TUD_HID` remains **0** until H1.
+Firmware: `CFG_TUD_HID=1`, Usage Page `0xFFA0` / Usage `0x0001` / Report ID `0x01`. Smoke UI: [`hid/example.html`](hid/example.html) (localhost/HTTPS + user gesture).
 
 ---
 
@@ -445,7 +448,7 @@ Periodic print ~every **2 s** when `DIAG_CDC=1` (default) and/or `DIAG_UART=1`. 
 | CMake / no Arduino | PlatformIO + Arduino-Pico |
 | RP2040 envs | **Removed** (RP2350-only matrix) |
 | PCM1808 24→16 truncate | **No** 16-bit truncate; float hop only inside DSP |
-| Audio-only function set | Composite **CDC + UAC2 mic** (HID planned per [`HID_CONTROL_PLANE.md`](HID_CONTROL_PLANE.md)) |
+| Audio-only function set | Composite **CDC + UAC2 mic + vendor HID** ([`HID_CONTROL_PLANE.md`](HID_CONTROL_PLANE.md)) |
 
 Functional goals that **are** implemented: UAC2 mono 48 kHz S24 mic, DMA ADC path, PCM1808 capture, PCM24 ring, stream FSM with suspend/power hooks, DSP Phase-1 analysis/process + watchdog, six RP2350 envs, host conversion tests, host analyze script (16- or 24-bit WAV).
 
@@ -493,6 +496,7 @@ Hardware soak / codec quality acceptance remain per [`acceptance_results.md`](ac
 | `pcm1808_capture.cpp` | PIO+DMA → DSP → ring (PCM1808 builds) |
 | `dsp_graph.cpp` | Float analysis/process, PCM24 quantize, watchdog |
 | `control_api.cpp` | Transport-agnostic DSP façade |
+| `hid_control.cpp` | WebHID JSON control (vendor HID) |
 | `serial_cli.cpp` / `cli/*` | CDC CLI |
 | `diagnostics.cpp` | Counters / CDC|UART dump |
 | `tick_tock_pcm.h` | Synthetic S16 payload |

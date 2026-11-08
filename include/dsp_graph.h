@@ -7,11 +7,9 @@
  * {@code audio_ring}. USB never sees float; it only packs PCM24.
  *
  * Per-block order inside {@link dsp_graph_process}:
- *   1. Analysis (meters / noise / event detect / beat rate) — no PCM mutate
- *   2. Process (filter → gain → limiter) — skipped while master bypass is on
+ *   1. Analysis (meters / noise / match / event / beat / spectrum)
+ *   2. Process (notch → IIR → FIR → soft_gate → gain → AGC → limiter)
  *   3. Quantize to signed 24-bit (int32 container)
- *
- * Soft gate is reserved and cannot be enabled yet.
  *
  * @see dsp_types.h, control_api.h, pcm1808_capture.cpp
  */
@@ -88,6 +86,12 @@ void dsp_graph_get_metrics(dsp_metrics_t *out);
 /** Copies the latest beat-rate estimate (may be unlocked / zeroed). */
 void dsp_graph_get_beat(dsp_beat_rate_t *out);
 
+/** Copies last spectrum peak list ({@link DSP_BLOCK_SPECTRUM}). */
+void dsp_graph_get_spectrum(dsp_spectrum_t *out);
+
+/** Copies matched-filter learning / score state. */
+void dsp_graph_get_matched(dsp_matched_t *out);
+
 /**
  * Copies up to {@code max_n} recent events, newest first.
  * @return Number of events written to {@code out}.
@@ -109,18 +113,17 @@ void dsp_graph_set_bypass(bool on);
 bool dsp_graph_block_enabled(dsp_block_id_t id);
 
 /**
- * Enables or disables one block. Enabling gain / limiter / filter_bank clears
- * master bypass and arms the continuity watchdog. Soft gate cannot be enabled.
+ * Enables or disables one block. Enabling process blocks clears master bypass
+ * and arms the continuity watchdog.
  *
- * @return {@code false} for invalid / reserved ids.
+ * @return {@code false} for invalid ids.
  */
 bool dsp_graph_set_block_enabled(dsp_block_id_t id, bool on);
 
 /**
  * Writes a named parameter on {@code id}.
- * Supported today: gain {@code db}; filter_bank {@code preset} (0..3);
- * event_detect {@code threshold}, {@code preroll_ms}, {@code tail_ms}.
- * Gain / filter writes also enable that block and clear bypass.
+ * See CLI {@code dsp help <block>} / HID docs for names (gain db, fir preset,
+ * matched threshold/learn, spectrum stride, etc.).
  *
  * @return {@code false} if the id/param pair is unknown or out of range.
  */

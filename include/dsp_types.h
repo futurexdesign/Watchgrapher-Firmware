@@ -5,7 +5,7 @@
  * Two paths share one sample stream:
  *   - Analysis blocks observe only (meters, event detect, beat rate). They
  *     never mutate PCM delivered to USB.
- *   - Process blocks may mutate PCM (notch, filter, soft_gate, gain, AGC,
+ *   - Process blocks may mutate PCM (notch, filter/fir, soft_gate, gain, AGC,
  *     limiter), and only when enabled with master bypass off.
  *
  * Event / beat timestamps use absolute source sample indices from capture,
@@ -65,6 +65,9 @@ typedef enum {
   DSP_BLOCK_SOFT_GATE,
   DSP_BLOCK_NOTCH,
   DSP_BLOCK_AGC,
+  DSP_BLOCK_MATCHED_FILTER,
+  DSP_BLOCK_FIR_BANK,
+  DSP_BLOCK_SPECTRUM,
   DSP_BLOCK_COUNT
 } dsp_block_id_t;
 
@@ -122,9 +125,28 @@ typedef struct {
   float post_rms;
   float noise_floor;      /**< Event-detect noise EMA (float full-scale). */
   float agc_gain_db;      /**< Current slow-AGC gain in dB (0 if AGC off). */
+  float match_score;      /**< Latest matched-filter peak score (0 if unused). */
   uint32_t clip_count;    /**< Hard clamps at PCM24 full scale. */
   uint32_t limiter_count; /**< Soft clamps at ±1.0 in the limiter block. */
 } dsp_metrics_t;
+
+/** Last 512-point real-FFT peak list ({@link DSP_BLOCK_SPECTRUM}). */
+typedef struct {
+  float peak_hz[8];
+  float peak_mag[8];
+  uint32_t n_peaks;
+  uint32_t fft_n; /**< Always 512 when valid. */
+  uint32_t source_hz;
+  bool valid;
+} dsp_spectrum_t;
+
+/** Matched-filter learning / score state. */
+typedef struct {
+  float score;         /**< Last block peak correlation (normalized). */
+  float template_peak; /**< Peak |sample| in learned template. */
+  uint32_t template_len;
+  bool learned;
+} dsp_matched_t;
 
 /** Why a process block was auto-ejected (or a fault was logged). */
 typedef enum {

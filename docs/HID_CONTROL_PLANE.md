@@ -1,10 +1,10 @@
 # HID control plane (WebHID / JS-first)
 
-**Status:** Spec (H0). Firmware HID transport is **not** implemented yet; CDC CLI remains the live control path. This document is normative for H1+.
+**Status:** Implemented (H1–H3 in firmware; H4 example page). CDC CLI remains available alongside HID. This document is normative for hosts and firmware.
 
 **Goal:** Expose the same DSP surface as [`control_api`](../include/control_api.h) to a browser via [WebHID](https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API), without parsing CLI text or C enums. Audio stays on UAC2; HID carries control JSON only.
 
-**Related:** TypeScript types in [`hid/timegrapher_hid.d.ts`](hid/timegrapher_hid.d.ts), browser sketch in [`hid/webhid_example.md`](hid/webhid_example.md), as-built overview in [`AS_BUILT_ARCHITECTURE.md`](AS_BUILT_ARCHITECTURE.md).
+**Related:** TypeScript types in [`hid/timegrapher_hid.d.ts`](hid/timegrapher_hid.d.ts), browser sketch in [`hid/webhid_example.md`](hid/webhid_example.md), smoke page [`hid/example.html`](hid/example.html), as-built overview in [`AS_BUILT_ARCHITECTURE.md`](AS_BUILT_ARCHITECTURE.md).
 
 ---
 
@@ -442,31 +442,30 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
 
 ---
 
-## 9. Firmware architecture (H1+)
-
-Not implemented in H0. Planned modules:
+## 9. Firmware architecture
 
 | Module | Role |
 |---|---|
-| `hid_control.cpp` / `.h` | Framer, JSON encode/decode, op dispatch → `control_api_*` |
-| USB descriptors | Vendor HID report descriptor (Usage Page `0xFFA0`) beside UAC2 + CDC |
-| Main loop | `hid_control_task()` peer to `serial_cli_task` |
+| [`hid_control.cpp`](../src/hid_control.cpp) / [`hid_control.h`](../include/hid_control.h) | Framer, JSON encode/decode, op dispatch → `control_api_*` |
+| `Adafruit_USBD_HID` in `hid_control_usb_begin()` | Vendor report descriptor (Usage Page `0xFFA0`), Input+Output EP |
+| [`usb_audio_init`](../src/usb_audio.cpp) | Calls `hid_control_usb_begin()` before re-enumeration |
+| [`TimegrapherStand_main`](../src/TimegrapherStand_main.cpp) | `hid_control_task()` each loop |
 
-JSON on device: fixed-schema decoder (hand-rolled or jsmn) for known keys only; encoder via `snprintf` into a scratch buffer. Max concurrent reassembly: one inbound host message.
+JSON on device: fixed-schema decoder for known keys; encoder via `snprintf`. One inbound reassembly buffer; TX fragments pumped when `hid.ready()`.
 
-CDC CLI remains fully supported and shares `control_api`.
+CDC CLI remains fully supported and shares `control_api`. Enable with `-DCFG_TUD_HID=1` ([`platformio.ini`](../platformio.ini)).
 
 ---
 
 ## 10. Implementation phases
 
-| Phase | Scope |
-|---|---|
-| **H0** | This spec + TS types + WebHID example docs (no firmware HID yet) |
-| **H1** | Enable HID; framing; `hello` / `ping` / `getState` / `getMetrics` |
-| **H2** | `patchState`, validation errors, enable/set parity with CLI |
-| **H3** | `subscribe` pushes + rate caps; structured eject notifies |
-| **H4** | Browser smoke page; confirm UAC2 remains stable under HID traffic |
+| Phase | Scope | Status |
+|---|---|---|
+| **H0** | Spec + TS types + WebHID docs | done |
+| **H1** | HID interface; framing; `hello` / `ping` / `getState` / `getMetrics` | done |
+| **H2** | `patchState`, events/errors ops, enable/set parity | done |
+| **H3** | `subscribe` pushes + rate caps; structured error notifies | done |
+| **H4** | Browser smoke page [`hid/example.html`](hid/example.html) | done (host A/B soak still manual) |
 
 ---
 
@@ -477,7 +476,7 @@ CDC CLI remains fully supported and shares `control_api`.
 - Protobuf / CBOR wire bodies
 - Authenticated or encrypted HID
 - Feature-report-based RPC
-- Phase-3 DSP algorithms (matched filter / FFT) — extend via new `blocks` keys and `hello.caps`
+- Phase-4 STFT spectral denoising — extend via new `blocks` keys and `hello.caps` when added
 
 ---
 

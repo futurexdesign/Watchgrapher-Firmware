@@ -75,6 +75,12 @@ const char *control_api_block_name(dsp_block_id_t id) {
     return "notch";
   case DSP_BLOCK_AGC:
     return "agc";
+  case DSP_BLOCK_MATCHED_FILTER:
+    return "matched_filter";
+  case DSP_BLOCK_FIR_BANK:
+    return "fir_bank";
+  case DSP_BLOCK_SPECTRUM:
+    return "spectrum";
   default:
     return "unknown";
   }
@@ -111,6 +117,15 @@ dsp_block_id_t control_api_block_from_name(const char *name) {
   if (name_eq(name, "limit")) {
     return DSP_BLOCK_LIMITER;
   }
+  if (name_eq(name, "match") || name_eq(name, "matched")) {
+    return DSP_BLOCK_MATCHED_FILTER;
+  }
+  if (name_eq(name, "fir")) {
+    return DSP_BLOCK_FIR_BANK;
+  }
+  if (name_eq(name, "fft") || name_eq(name, "spec")) {
+    return DSP_BLOCK_SPECTRUM;
+  }
   return DSP_BLOCK_COUNT;
 }
 
@@ -126,6 +141,14 @@ void control_api_get_metrics(dsp_metrics_t *out) { dsp_graph_get_metrics(out); }
 
 void control_api_get_beat_rate(dsp_beat_rate_t *out) {
   dsp_graph_get_beat(out);
+}
+
+void control_api_get_spectrum(dsp_spectrum_t *out) {
+  dsp_graph_get_spectrum(out);
+}
+
+void control_api_get_matched(dsp_matched_t *out) {
+  dsp_graph_get_matched(out);
 }
 
 uint32_t control_api_copy_events(dsp_event_t *out, uint32_t max_n) {

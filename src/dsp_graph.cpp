@@ -82,6 +82,38 @@ float g_gate_floor_lin = 0.25f; /* -12 dB between ticks */
 float g_gate_attack_ms = 1.0f;
 float g_gate_release_ms = 40.0f;
 
+/* Phase-3 matched filter (analysis). */
+constexpr uint32_t kMatchLen = 64u;
+float g_match_tmpl[kMatchLen];
+float g_match_hist[kMatchLen];
+float g_match_score = 0.f;
+float g_match_threshold = 0.35f;
+bool g_match_learned = false;
+bool g_match_learn = true;
+float g_match_tmpl_energy = 1.f;
+float g_match_tmpl_peak = 0.f;
+float g_event_wave[kMatchLen];
+uint32_t g_event_wave_n = 0;
+
+/* Phase-3 FIR bank (process). */
+constexpr uint32_t kFirTaps = 64u;
+arm_fir_instance_f32 g_fir;
+float g_fir_coeffs[kFirTaps];
+float g_fir_state[kFirTaps + DSP_MAX_BLOCK];
+bool g_fir_active = false;
+dsp_filter_preset_t g_fir_preset = DSP_FILTER_BYPASS;
+
+/* Phase-3 spectrum (analysis). */
+constexpr uint32_t kFftN = 512u;
+arm_rfft_fast_instance_f32 g_rfft;
+float g_fft_acc[kFftN];
+float g_fft_work[kFftN];
+uint32_t g_fft_fill = 0;
+uint32_t g_fft_stride = 1;
+uint32_t g_fft_stride_i = 0;
+bool g_rfft_ok = false;
+dsp_spectrum_t g_spectrum = {};
+
 float g_noise = 1e-4f;
 float g_tick_peak_ema = 0.05f; /* EMA of accepted event peaks (for min-peak gate) */
 float g_pre_peak = 0.f;
@@ -162,6 +194,15 @@ void push_error(dsp_block_id_t block, dsp_error_reason_t reason, uint64_t sample
     break;
   case DSP_BLOCK_AGC:
     name = "agc";
+    break;
+  case DSP_BLOCK_MATCHED_FILTER:
+    name = "matched_filter";
+    break;
+  case DSP_BLOCK_FIR_BANK:
+    name = "fir_bank";
+    break;
+  case DSP_BLOCK_SPECTRUM:
+    name = "spectrum";
     break;
   default:
     break;
@@ -314,6 +355,211 @@ void design_notch(void) {
   g_notch_active = true;
 }
 
+/** Hamming-window FIR bandpass (linear phase), unity-ish midband gain. */
+void design_fir(dsp_filter_preset_t preset) {
+  g_fir_active = false;
+  if (preset == DSP_FILTER_BYPASS) {
+    return;
+  }
+  float hp = 160.f, lp = 16000.f;
+  if (preset == DSP_FILTER_MEDIUM) {
+    hp = 400.f;
+    lp = 12000.f;
+  } else if (preset == DSP_FILTER_NARROW) {
+    hp = 800.f;
+    lp = 8000.f;
+  }
+  const float fs = (float)g_source_hz;
+  const float ny = 0.5f * fs;
+  if (lp > ny * 0.98f) {
+    lp = ny * 0.98f;
+  }
+  if (hp < 1.f) {
+    hp = 1.f;
+  }
+  if (hp >= lp) {
+    return;
+  }
+  const float fc1 = hp / fs;
+  const float fc2 = lp / fs;
+  const int M = (int)kFirTaps;
+  const float mid = 0.5f * (float)(M - 1);
+  float sum = 0.f;
+  for (int n = 0; n < M; n++) {
+    float k = (float)n - mid;
+    float ideal;
+    if (fabsf(k) < 1e-6f) {
+      ideal = 2.f * (fc2 - fc1);
+    } else {
+      const float twopi = 2.f * 3.14159265f;
+      ideal = (sinf(twopi * fc2 * k) - sinf(twopi * fc1 * k)) /
+              (3.14159265f * k);
+    }
+    const float w =
+        0.54f - 0.46f * cosf(2.f * 3.14159265f * (float)n / (float)(M - 1));
+    g_fir_coeffs[n] = ideal * w;
+    sum += g_fir_coeffs[n];
+  }
+  /* Prefer peak-normalize for bandpass (DC gain may be ~0). */
+  float peak = 0.f;
+  for (uint32_t i = 0; i < kFirTaps; i++) {
+    float a = fabsf(g_fir_coeffs[i]);
+    if (a > peak) {
+      peak = a;
+    }
+  }
+  if (peak > 1e-9f) {
+    float s = 1.f / (peak * (float)kFirTaps * 0.25f + 1e-9f);
+    /* Scale so midband impulse energy is moderate. */
+    float energy = 0.f;
+    for (uint32_t i = 0; i < kFirTaps; i++) {
+      energy += g_fir_coeffs[i] * g_fir_coeffs[i];
+    }
+    s = 1.f / sqrtf(fmaxf(energy, 1e-12f));
+    for (uint32_t i = 0; i < kFirTaps; i++) {
+      g_fir_coeffs[i] *= s;
+    }
+  }
+  (void)sum;
+  memset(g_fir_state, 0, sizeof(g_fir_state));
+  arm_fir_init_f32(&g_fir, kFirTaps, g_fir_coeffs, g_fir_state, DSP_MAX_BLOCK);
+  g_fir_active = true;
+}
+
+void match_update_hist(const float *x, uint32_t n) {
+  if (n >= kMatchLen) {
+    memcpy(g_match_hist, x + (n - kMatchLen), kMatchLen * sizeof(float));
+    return;
+  }
+  memmove(g_match_hist, g_match_hist + n, (kMatchLen - n) * sizeof(float));
+  memcpy(g_match_hist + (kMatchLen - n), x, n * sizeof(float));
+}
+
+float match_score_block(const float *x, uint32_t n) {
+  if (!g_match_learned || g_match_tmpl_energy < 1e-12f) {
+    return 0.f;
+  }
+  float best = 0.f;
+  float window[kMatchLen];
+  /* Build contiguous view: hist tail + block (cap work). */
+  const uint32_t total = kMatchLen + n;
+  for (uint32_t i = 0; i + kMatchLen <= total; i++) {
+    for (uint32_t k = 0; k < kMatchLen; k++) {
+      uint32_t idx = i + k;
+      window[k] = (idx < kMatchLen) ? g_match_hist[idx] : x[idx - kMatchLen];
+    }
+    float dot = 0.f;
+    arm_dot_prod_f32(g_match_tmpl, window, kMatchLen, &dot);
+    float sc = fabsf(dot) / g_match_tmpl_energy;
+    if (sc > best) {
+      best = sc;
+    }
+  }
+  return best;
+}
+
+void match_learn_from_wave(void) {
+  if (!g_match_learn || g_event_wave_n < (kMatchLen / 4u)) {
+    return;
+  }
+  float tmp[kMatchLen];
+  memset(tmp, 0, sizeof(tmp));
+  uint32_t n = g_event_wave_n < kMatchLen ? g_event_wave_n : kMatchLen;
+  /* Center on peak inside wave. */
+  uint32_t peak_i = 0;
+  float peak = 0.f;
+  for (uint32_t i = 0; i < n; i++) {
+    float a = fabsf(g_event_wave[i]);
+    if (a > peak) {
+      peak = a;
+      peak_i = i;
+    }
+  }
+  int32_t start = (int32_t)peak_i - (int32_t)(kMatchLen / 2u);
+  for (uint32_t i = 0; i < kMatchLen; i++) {
+    int32_t src = start + (int32_t)i;
+    tmp[i] = (src >= 0 && src < (int32_t)n) ? g_event_wave[src] : 0.f;
+  }
+  float energy = 0.f;
+  arm_power_f32(tmp, kMatchLen, &energy);
+  energy = sqrtf(fmaxf(energy, 1e-12f));
+  for (uint32_t i = 0; i < kMatchLen; i++) {
+    tmp[i] /= energy;
+  }
+  if (!g_match_learned) {
+    memcpy(g_match_tmpl, tmp, sizeof(tmp));
+    g_match_learned = true;
+  } else {
+    for (uint32_t i = 0; i < kMatchLen; i++) {
+      g_match_tmpl[i] = 0.9f * g_match_tmpl[i] + 0.1f * tmp[i];
+    }
+  }
+  arm_power_f32(g_match_tmpl, kMatchLen, &g_match_tmpl_energy);
+  g_match_tmpl_energy = sqrtf(fmaxf(g_match_tmpl_energy, 1e-12f));
+  g_match_tmpl_peak = 0.f;
+  for (uint32_t i = 0; i < kMatchLen; i++) {
+    float a = fabsf(g_match_tmpl[i]);
+    if (a > g_match_tmpl_peak) {
+      g_match_tmpl_peak = a;
+    }
+  }
+}
+
+void spectrum_push(const float *x, uint32_t n) {
+  if (!g_en[DSP_BLOCK_SPECTRUM] || !g_rfft_ok) {
+    return;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    g_fft_acc[g_fft_fill++] = x[i];
+    if (g_fft_fill < kFftN) {
+      continue;
+    }
+    g_fft_fill = 0;
+    g_fft_stride_i++;
+    if ((g_fft_stride_i % g_fft_stride) != 0u) {
+      continue;
+    }
+    /* Hann window into work buffer, then RFFT in-place. */
+    for (uint32_t k = 0; k < kFftN; k++) {
+      float w = 0.5f - 0.5f * cosf(2.f * 3.14159265f * (float)k /
+                                   (float)(kFftN - 1u));
+      g_fft_work[k] = g_fft_acc[k] * w;
+    }
+    arm_rfft_fast_f32(&g_rfft, g_fft_work, g_fft_work, 0);
+    /* Magnitudes: DC at [0], Nyquist at [1], then pairs. */
+    float mags[kFftN / 2];
+    mags[0] = fabsf(g_fft_work[0]);
+    mags[kFftN / 2u - 1u] = fabsf(g_fft_work[1]);
+    for (uint32_t k = 1; k < kFftN / 2u - 1u; k++) {
+      float re = g_fft_work[2u * k];
+      float im = g_fft_work[2u * k + 1u];
+      mags[k] = sqrtf(re * re + im * im);
+    }
+    g_spectrum = {};
+    g_spectrum.fft_n = kFftN;
+    g_spectrum.source_hz = g_source_hz;
+    g_spectrum.valid = true;
+    for (uint32_t p = 0; p < 8; p++) {
+      uint32_t best = 1; /* skip DC */
+      float bestm = -1.f;
+      for (uint32_t k = 1; k < kFftN / 2u - 1u; k++) {
+        if (mags[k] > bestm) {
+          bestm = mags[k];
+          best = k;
+        }
+      }
+      if (bestm <= 0.f) {
+        break;
+      }
+      g_spectrum.peak_hz[p] =
+          (float)best * (float)g_source_hz / (float)kFftN;
+      g_spectrum.peak_mag[p] = bestm;
+      g_spectrum.n_peaks = p + 1u;
+      mags[best] = 0.f; /* suppress for next peak */
+    }
+  }
+}
+
 /**
  * Analysis path: meters, noise EMA, event windows, beat-rate feed.
  *
@@ -338,6 +584,13 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
   float rms = sqrtf(power / (float)n);
   g_pre_peak = fmaxf(g_pre_peak * 0.95f, peak);
   g_pre_rms_ema = 0.9f * g_pre_rms_ema + 0.1f * rms;
+
+  if (g_en[DSP_BLOCK_MATCHED_FILTER]) {
+    g_match_score = match_score_block(x, n);
+  } else {
+    g_match_score = 0.f;
+  }
+  spectrum_push(x, n);
 
   if (g_en[DSP_BLOCK_NOISE_FLOOR] || g_en[DSP_BLOCK_EVENT_DETECT] ||
       g_en[DSP_BLOCK_BEAT_RATE]) {
@@ -367,19 +620,31 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
   uint32_t tail = (uint32_t)(g_tail_ms * 0.001f * (float)g_source_hz);
   uint32_t max_event = (uint32_t)(0.080f * (float)g_source_hz); /* 80 ms */
 
+  const bool match_gate = g_en[DSP_BLOCK_MATCHED_FILTER] && g_match_learned;
   for (uint32_t i = 0; i < n; i++) {
     float a = fabsf(x[i]);
     uint64_t idx = base + i;
     if (!g_in_event) {
-      if (a > thr_open) {
+      bool open_ok = a > thr_open;
+      if (open_ok && match_gate && g_match_score < g_match_threshold) {
+        open_ok = false;
+      }
+      if (open_ok) {
         g_in_event = true;
         g_event_start = (idx > preroll) ? (idx - preroll) : 0;
         g_event_peak_idx = idx;
         g_event_peak = a;
         g_event_energy = a * a;
         g_below_count = 0;
+        g_event_wave_n = 0;
+        if (g_event_wave_n < kMatchLen) {
+          g_event_wave[g_event_wave_n++] = x[i];
+        }
       }
     } else {
+      if (g_event_wave_n < kMatchLen) {
+        g_event_wave[g_event_wave_n++] = x[i];
+      }
       g_event_energy += a * a;
       if (a > g_event_peak) {
         g_event_peak = a;
@@ -406,17 +671,25 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
           ev.snr_db = 20.f * log10f(fmaxf(g_event_peak, 1e-9f) /
                                     fmaxf(g_noise, 1e-9f));
           ev.energy = g_event_energy;
-          ev.confidence =
-              fminf(1.f, g_event_peak / (thr_open + 1e-9f) / 4.f);
+          float conf = fminf(1.f, g_event_peak / (thr_open + 1e-9f) / 4.f);
+          if (g_en[DSP_BLOCK_MATCHED_FILTER] && g_match_learned) {
+            conf = fminf(1.f, 0.5f * conf + 0.5f * g_match_score);
+          }
+          ev.confidence = conf;
           push_event(ev);
           g_tick_peak_ema = 0.9f * g_tick_peak_ema + 0.1f * g_event_peak;
+          if (g_en[DSP_BLOCK_MATCHED_FILTER]) {
+            match_learn_from_wave();
+          }
         }
         g_in_event = false;
         g_below_count = 0;
         g_event_energy = 0.f;
+        g_event_wave_n = 0;
       }
     }
   }
+  match_update_hist(x, n);
 }
 
 /**
@@ -438,6 +711,9 @@ void process_path(float *x, uint32_t n) {
   }
   if (g_en[DSP_BLOCK_FILTER_BANK] && g_bq_active) {
     arm_biquad_cascade_df1_f32(&g_bq, x, x, n);
+  }
+  if (g_en[DSP_BLOCK_FIR_BANK] && g_fir_active) {
+    arm_fir_f32(&g_fir, x, x, n);
   }
   if (g_en[DSP_BLOCK_SOFT_GATE]) {
     const float fs = (float)g_source_hz;
@@ -523,8 +799,21 @@ void dsp_graph_init(void) {
   g_gate_lin = 1.0f;
   g_notch_hz = 60.f;
   g_filter = DSP_FILTER_BYPASS;
+  g_fir_preset = DSP_FILTER_BYPASS;
   design_biquad_pair(g_filter);
   design_notch();
+  design_fir(g_fir_preset);
+  g_rfft_ok = (arm_rfft_fast_init_f32(&g_rfft, 512) == ARM_MATH_SUCCESS);
+  g_fft_fill = 0;
+  g_fft_stride = 1;
+  g_fft_stride_i = 0;
+  g_spectrum = {};
+  memset(g_match_tmpl, 0, sizeof(g_match_tmpl));
+  memset(g_match_hist, 0, sizeof(g_match_hist));
+  g_match_learned = false;
+  g_match_learn = true;
+  g_match_score = 0.f;
+  g_match_threshold = 0.35f;
   g_noise = 1e-4f;
   g_tick_peak_ema = 0.05f;
   g_event_energy = 0.f;
@@ -552,6 +841,9 @@ void dsp_graph_set_source_rate(uint32_t hz) {
   } else {
     g_notch_active = false;
   }
+  design_fir(g_en[DSP_BLOCK_FIR_BANK] ? g_fir_preset : DSP_FILTER_BYPASS);
+  g_rfft_ok = (arm_rfft_fast_init_f32(&g_rfft, 512) == ARM_MATH_SUCCESS);
+  g_fft_fill = 0;
 }
 
 uint32_t dsp_graph_source_rate(void) { return g_source_hz; }
@@ -624,6 +916,9 @@ void dsp_graph_watchdog_poll(void) {
   if (g_last_enabled == DSP_BLOCK_FILTER_BANK) {
     g_bq_active = false;
   }
+  if (g_last_enabled == DSP_BLOCK_FIR_BANK) {
+    g_fir_active = false;
+  }
   if (g_last_enabled == DSP_BLOCK_NOTCH) {
     g_notch_active = false;
   }
@@ -653,8 +948,26 @@ void dsp_graph_get_metrics(dsp_metrics_t *out) {
       (g_en[DSP_BLOCK_AGC] && !g_bypass)
           ? (20.f * log10f(fmaxf(g_agc_lin, 1e-9f)))
           : 0.f;
+  out->match_score = g_match_score;
   out->clip_count = g_clip;
   out->limiter_count = g_lim;
+}
+
+void dsp_graph_get_spectrum(dsp_spectrum_t *out) {
+  if (!out) {
+    return;
+  }
+  *out = g_spectrum;
+}
+
+void dsp_graph_get_matched(dsp_matched_t *out) {
+  if (!out) {
+    return;
+  }
+  out->score = g_match_score;
+  out->template_peak = g_match_tmpl_peak;
+  out->template_len = kMatchLen;
+  out->learned = g_match_learned;
 }
 
 void dsp_graph_get_beat(dsp_beat_rate_t *out) {
@@ -699,6 +1012,9 @@ bool dsp_graph_set_block_enabled(dsp_block_id_t id, bool on) {
   if (id == DSP_BLOCK_FILTER_BANK) {
     design_biquad_pair(on ? g_filter : DSP_FILTER_BYPASS);
   }
+  if (id == DSP_BLOCK_FIR_BANK) {
+    design_fir(on ? g_fir_preset : DSP_FILTER_BYPASS);
+  }
   if (id == DSP_BLOCK_NOTCH) {
     if (on) {
       design_notch();
@@ -712,11 +1028,16 @@ bool dsp_graph_set_block_enabled(dsp_block_id_t id, bool on) {
   if (id == DSP_BLOCK_AGC && on) {
     g_agc_lin = 1.0f;
   }
+  if (id == DSP_BLOCK_SPECTRUM && on) {
+    g_fft_fill = 0;
+    g_spectrum = {};
+  }
   if (on) {
     /* Process-path enables imply leaving master bypass. */
     if (id == DSP_BLOCK_GAIN || id == DSP_BLOCK_LIMITER ||
         id == DSP_BLOCK_FILTER_BANK || id == DSP_BLOCK_SOFT_GATE ||
-        id == DSP_BLOCK_NOTCH || id == DSP_BLOCK_AGC) {
+        id == DSP_BLOCK_NOTCH || id == DSP_BLOCK_AGC ||
+        id == DSP_BLOCK_FIR_BANK) {
       g_bypass = false;
     }
     dsp_graph_note_enable(id);
@@ -745,6 +1066,39 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     design_biquad_pair(g_filter);
     g_bypass = false;
     dsp_graph_note_enable(DSP_BLOCK_FILTER_BANK);
+    return true;
+  }
+  if (id == DSP_BLOCK_FIR_BANK && strcmp(param, "preset") == 0) {
+    int p = (int)value;
+    if (p < 0 || p > (int)DSP_FILTER_NARROW) {
+      return false;
+    }
+    g_fir_preset = (dsp_filter_preset_t)p;
+    g_en[DSP_BLOCK_FIR_BANK] = (g_fir_preset != DSP_FILTER_BYPASS);
+    design_fir(g_fir_preset);
+    g_bypass = false;
+    dsp_graph_note_enable(DSP_BLOCK_FIR_BANK);
+    return true;
+  }
+  if (id == DSP_BLOCK_MATCHED_FILTER) {
+    if (strcmp(param, "threshold") == 0) {
+      if (value < 0.f || value > 2.f) {
+        return false;
+      }
+      g_match_threshold = value;
+      return true;
+    }
+    if (strcmp(param, "learn") == 0) {
+      g_match_learn = value >= 0.5f;
+      return true;
+    }
+  }
+  if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
+    int s = (int)value;
+    if (s < 1 || s > 16) {
+      return false;
+    }
+    g_fft_stride = (uint32_t)s;
     return true;
   }
   if (id == DSP_BLOCK_EVENT_DETECT) {
@@ -826,6 +1180,28 @@ bool dsp_graph_get_param(dsp_block_id_t id, const char *param, float *out) {
   }
   if (id == DSP_BLOCK_FILTER_BANK && strcmp(param, "preset") == 0) {
     *out = (float)g_filter;
+    return true;
+  }
+  if (id == DSP_BLOCK_FIR_BANK && strcmp(param, "preset") == 0) {
+    *out = (float)g_fir_preset;
+    return true;
+  }
+  if (id == DSP_BLOCK_MATCHED_FILTER) {
+    if (strcmp(param, "threshold") == 0) {
+      *out = g_match_threshold;
+      return true;
+    }
+    if (strcmp(param, "learn") == 0) {
+      *out = g_match_learn ? 1.f : 0.f;
+      return true;
+    }
+    if (strcmp(param, "score") == 0) {
+      *out = g_match_score;
+      return true;
+    }
+  }
+  if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
+    *out = (float)g_fft_stride;
     return true;
   }
   if (id == DSP_BLOCK_EVENT_DETECT) {

@@ -38,7 +38,10 @@ export type DspBlockKey =
   | 'eventLog'
   | 'softGate'
   | 'notch'
-  | 'agc';
+  | 'agc'
+  | 'matchedFilter'
+  | 'firBank'
+  | 'spectrum';
 
 /** filterBank.preset: 0=off, 1=wide, 2=medium, 3=narrow. */
 export type FilterPreset = 0 | 1 | 2 | 3;
@@ -87,6 +90,17 @@ export interface AgcParams {
   gainDb?: number;
 }
 
+export interface MatchedFilterParams {
+  threshold: number;
+  learn: number;
+  /** Latest score; read-only. */
+  score?: number;
+}
+
+export interface SpectrumParams {
+  stride: number;
+}
+
 export interface DspBlocksState {
   levelMeter?: BlockState;
   gain?: BlockState<GainParams>;
@@ -99,6 +113,9 @@ export interface DspBlocksState {
   softGate?: BlockState<SoftGateParams>;
   notch?: BlockState<NotchParams>;
   agc?: BlockState<AgcParams>;
+  matchedFilter?: BlockState<MatchedFilterParams>;
+  firBank?: BlockState<FilterBankParams>;
+  spectrum?: BlockState<SpectrumParams>;
 }
 
 /** Full DSP snapshot from getState / patchState result. */
@@ -125,8 +142,29 @@ export interface DspMetrics {
   postRms: number;
   noiseFloor: number;
   agcGainDb: number;
+  matchScore: number;
   clipCount: number;
   limiterCount: number;
+}
+
+export interface DspSpectrumPeak {
+  hz: number;
+  mag: number;
+}
+
+export interface DspSpectrum {
+  valid: boolean;
+  fftN: number;
+  sourceHz: number;
+  nPeaks: number;
+  peaks: DspSpectrumPeak[];
+}
+
+export interface DspMatched {
+  score: number;
+  templatePeak: number;
+  templateLen: number;
+  learned: boolean;
 }
 
 export interface DspBeatRate {
@@ -193,6 +231,8 @@ export type HidOp =
   | 'patchState'
   | 'getMetrics'
   | 'getBeat'
+  | 'getSpectrum'
+  | 'getMatched'
   | 'getEvents'
   | 'getErrors'
   | 'clearErrors'

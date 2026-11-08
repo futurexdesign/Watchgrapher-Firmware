@@ -2,7 +2,7 @@
  * @file TimegrapherStand_main.cpp
  * @brief Arduino entry: power default-OFF, USB audio loop, CDC CLI.
  *
- * Loop order: TinyUSB → audio_source → usb_audio → CLI → diagnostics → LED.
+ * Loop order: TinyUSB → audio_source → usb_audio → CLI → HID → diagnostics → LED.
  */
 
 #include "app_config.h"
@@ -10,6 +10,7 @@
 #include "board_config.h"
 #include "diagnostics.h"
 #include "dsp_graph.h"
+#include "hid_control.h"
 #include "power_control.h"
 #include "serial_cli.h"
 #include "usb_audio.h"
@@ -61,6 +62,7 @@ void loop() {
   audio_source_process();
   usb_audio_task();
   serial_cli_tick();
+  hid_control_task();
   diagnostics_poll();
 
 #if STATUS_LED_GPIO >= 0

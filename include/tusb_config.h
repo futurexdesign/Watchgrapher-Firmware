@@ -47,15 +47,19 @@ extern "C" {
 #define CFG_TUD_ENDPOINT0_SIZE 64
 #endif
 
-/* Class drivers: audio only. */
+/* Class drivers: UAC2 + CDC (Arduino) + vendor HID control. */
 #define CFG_TUD_AUDIO   1
-#define CFG_TUD_CDC     0
+#define CFG_TUD_CDC     1
 #define CFG_TUD_MSC     0
-#define CFG_TUD_HID     0
+#define CFG_TUD_HID     1
 #define CFG_TUD_MIDI    0
 #define CFG_TUD_VENDOR  0
 #define CFG_TUD_VIDEO   0
 #define CFG_TUD_VIDEO_STREAMING 0
+
+#ifndef CFG_TUD_HID_EP_BUFSIZE
+#define CFG_TUD_HID_EP_BUFSIZE 64
+#endif
 
 //--------------------------------------------------------------------
 // AUDIO (UAC2 mono mic @ 48 kHz)

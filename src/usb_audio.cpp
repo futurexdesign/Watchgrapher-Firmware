@@ -15,6 +15,7 @@
 #include "audio_ring.h"
 #include "audio_source.h"
 #include "diagnostics.h"
+#include "hid_control.h"
 
 #include <Adafruit_TinyUSB.h>
 #include <string.h>
@@ -101,6 +102,11 @@ bool usb_audio_init(void) {
   TinyUSBDevice.setProductDescriptor(kUsbProduct);
 
   if (!usb_audio_register_interface()) {
+    return false;
+  }
+
+  /* Vendor HID control (WebHID) beside CDC + UAC2. */
+  if (!hid_control_usb_begin()) {
     return false;
   }
 

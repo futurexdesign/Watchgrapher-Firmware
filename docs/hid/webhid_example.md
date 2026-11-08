@@ -2,7 +2,7 @@
 
 Minimal browser-side sketch for the HID control plane. Normative details: [`../HID_CONTROL_PLANE.md`](../HID_CONTROL_PLANE.md). Types: [`timegrapher_hid.d.ts`](timegrapher_hid.d.ts).
 
-**Requires:** Chromium-based browser, HTTPS or `localhost`, user gesture for `requestDevice`. Firmware HID (H1+) must be present — H0 is spec-only.
+**Requires:** Chromium-based browser, HTTPS or `localhost`, user gesture for `requestDevice`. Firmware with `CFG_TUD_HID=1` (current builds). Interactive page: [`example.html`](example.html).
 
 ---
 
