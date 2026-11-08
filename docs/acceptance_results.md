@@ -1,14 +1,11 @@
 # Acceptance results
 
-**Status:** Firmware builds on all nine PlatformIO envs. Host conversion unit tests pass. **PCM1808 oscilloscope / USB soak and ADC hardware quality are NOT verified** (no board measurement claimed in this environment).
+**Status:** Firmware builds on all six RP2350/RP2354 PlatformIO envs (RP2040 `pico*` envs removed). Host conversion unit tests pass. **PCM1808 oscilloscope / USB soak and ADC hardware quality are NOT verified** (no board measurement claimed in this environment).
 
 ## Build
 
 | Env | Result |
 |---|---|
-| `pico` | SUCCESS — UF2 produced (RP2040) |
-| `pico_synthetic` | SUCCESS — UF2 produced (RP2040) |
-| `pico_pcm1808` | SUCCESS — UF2 produced (RP2040 @ 150 MHz); **MCLK hardware-checked** |
 | `pico2` | SUCCESS — UF2 produced |
 | `pico2_synthetic` | SUCCESS — UF2 produced |
 | `kiwi` | SUCCESS — UF2 produced |
@@ -46,7 +43,7 @@
 - [x] MCLK starts at boot on PCM1808 envs (scope without USB stream)
 - [x] PIO + DMA ping-pong `2×240` stereo frames; left → mono PCM16
 - [x] Diagnostics counters per P3.0 §7
-- [x] Gate B: GP21 ≈ 12.288 MHz average — **measured on `pico_pcm1808` (RP2040): 12.288199 MHz**, stable over a 3.4 s gate
+- [x] Gate B: GP21 ≈ 12.288 MHz average — **historically measured on RP2040 `pico_pcm1808` (removed): 12.288199 MHz**, stable over a 3.4 s gate; re-verify on `pico2_pcm1808` / `kiwi_pcm1808`
 - [ ] Gate B: BCK ≈ 3.072 MHz, LRCK ≈ 48 kHz with module powered — **not hardware-tested**
 - [ ] USB record from PCM1808 — **not hardware-tested**
 

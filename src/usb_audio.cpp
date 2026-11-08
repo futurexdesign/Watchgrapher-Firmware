@@ -2,9 +2,9 @@
  * @file usb_audio.cpp
  * @brief UAC2 mic data path and TinyUSB audio control callbacks.
  *
- * Pushes one software 1 ms frame (48 mono samples) per millisecond into
- * TinyUSB; EP IN flow control selects the on-wire 47/48/49 size. Mute is
- * honored; volume is tracked for compliance only (not applied to PCM).
+ * Pushes one software 1 ms frame (48 mono PCM24 samples) per millisecond into
+ * TinyUSB as 3-byte little-endian; EP IN flow control selects 47/48/49.
+ * Mute is honored; volume is tracked for compliance only (not applied to PCM).
  *
  * @see usb_audio.h, usb_descriptors.cpp
  */
@@ -32,24 +32,16 @@ static const char *kUsbManufacturer = "TimegrapherStand";
 static const char *kUsbProduct = "Watch Timing Microphone (Prototype)";
 
 static audio_control_range_4_n_t(1) g_sample_freq_rng;
-static int16_t g_pkt_buf[APP_PKT_SAMPLES_NOM];
-static int16_t g_last_sample;
+static audio_sample_t g_samp_buf[APP_PKT_SAMPLES_NOM];
+static uint8_t g_pkt_bytes[APP_PKT_SAMPLES_NOM * APP_BYTES_PER_SAMPLE];
+static audio_sample_t g_last_sample;
 static uint32_t g_feed_ms;
 
 bool usb_audio_streaming(void) { return g_streaming; }
 
 /**
- * Pops up to 48 samples from the ring, holds the last sample on short
- * underrun (avoids zipper noise from zeros), applies mute, and
- * {@code tud_audio_write}s one frame.
- *
- * During {@code STREAM_PREFILL} the ring is not drained — silence is sent
- * until ~10–20 ms of PCM accumulates. Feeding immediately on alt-set open
- * kept occupancy near 0 and produced ~5 ms held-sample plateaus.
- *
- * Must not burst multiple frames from a single call site without pacing —
- * flooding the TinyUSB FIFO forced every ISO packet to wMaxPacketSize and
- * caused pitch/warp distortion on the host.
+ * Pops up to 48 PCM24 samples, packs to 3-byte LE, holds last sample on
+ * short underrun, applies mute, and {@code tud_audio_write}s one frame.
  */
 static void usb_audio_feed_frame(void) {
   if (!g_streaming || !tud_audio_mounted()) {
@@ -58,29 +50,27 @@ static void usb_audio_feed_frame(void) {
 
   stream_state_t st = audio_source_state();
   if (st != STREAM_STATE_STREAM_ACTIVE) {
-    /* Host expects ISO once alt≠0; silence until ring is prefilled. */
-    memset(g_pkt_buf, 0, sizeof(g_pkt_buf));
+    memset(g_samp_buf, 0, sizeof(g_samp_buf));
   } else {
-    /*
-     * Drain whenever ACTIVE. Do not hold at a high watermark — with 5 ms DMA
-     * blocks that caused ~50% duty frozen plateaus (241-sample holds) while
-     * CDC still reported und=0 / healthy ring occupancy.
-     */
-    uint32_t got = audio_ring_pop(g_pkt_buf, APP_PKT_SAMPLES_NOM, false);
+    uint32_t got = audio_ring_pop(g_samp_buf, APP_PKT_SAMPLES_NOM, false);
     for (uint32_t i = got; i < APP_PKT_SAMPLES_NOM; i++) {
-      g_pkt_buf[i] = g_last_sample;
+      g_samp_buf[i] = g_last_sample;
     }
     if (got > 0) {
-      g_last_sample = g_pkt_buf[got - 1];
+      g_last_sample = g_samp_buf[got - 1];
     }
   }
 
   if (g_mute[0] || g_mute[1]) {
-    memset(g_pkt_buf, 0, sizeof(g_pkt_buf));
+    memset(g_samp_buf, 0, sizeof(g_samp_buf));
+  }
+
+  for (uint32_t i = 0; i < APP_PKT_SAMPLES_NOM; i++) {
+    audio_pcm24_pack_le(&g_pkt_bytes[i * APP_BYTES_PER_SAMPLE], g_samp_buf[i]);
   }
 
   uint16_t bytes = (uint16_t)(APP_PKT_SAMPLES_NOM * APP_BYTES_PER_SAMPLE);
-  uint16_t written = tud_audio_write(g_pkt_buf, bytes);
+  uint16_t written = tud_audio_write(g_pkt_bytes, bytes);
   diag_counters_t *d = diagnostics_get();
   d->usb_in_packet_count++;
   d->usb_in_sample_count += APP_PKT_SAMPLES_NOM;
@@ -127,6 +117,9 @@ void usb_audio_task(void) {
   if (!g_streaming) {
     return;
   }
+  if (audio_source_state() == STREAM_STATE_USB_SUSPENDED) {
+    return;
+  }
   uint32_t now = millis();
   if (now == g_feed_ms) {
     return;
@@ -167,18 +160,21 @@ void tud_suspend_cb(bool remote_wakeup_en) {
   audio_source_on_suspend();
 }
 
-void tud_resume_cb(void) { audio_source_on_resume(); }
+void tud_resume_cb(void) {
+  diagnostics_get()->usb_resume_count++;
+  audio_source_on_resume();
+}
 
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *req) {
   (void)rhport;
   /* SET_INTERFACE: wValue low byte = alternate setting (not high byte). */
   uint8_t const alt = tu_u16_low(req->wValue);
   if (alt != 0) {
-    g_streaming = true;
     g_feed_ms = 0;
     g_last_sample = 0;
     diagnostics_get()->usb_audio_stream_open_count++;
     audio_source_on_stream_open();
+    g_streaming = (audio_source_state() != STREAM_STATE_STREAM_ERROR);
   }
   return true;
 }

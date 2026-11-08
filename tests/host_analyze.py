@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze a mono S16LE WAV from the timegrapher USB mic."""
+"""Analyze a mono S24LE or S16LE WAV from the timegrapher USB mic."""
 
 from __future__ import annotations
 
@@ -10,24 +10,38 @@ import sys
 import wave
 
 
-def load_mono_s16(path: str):
+def load_mono(path: str):
     with wave.open(path, "rb") as w:
         ch = w.getnchannels()
         sw = w.getsampwidth()
         rate = w.getframerate()
         n = w.getnframes()
         raw = w.readframes(n)
-    if sw != 2:
-        raise SystemExit(f"expected 16-bit samples, got {sw * 8}-bit")
-    samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
+    if sw == 3:
+        # Pack 3-byte LE into signed int32
+        samples = []
+        for i in range(0, len(raw), 3):
+            b0, b1, b2 = raw[i], raw[i + 1], raw[i + 2]
+            v = b0 | (b1 << 8) | (b2 << 16)
+            if v & 0x800000:
+                v |= ~0xFFFFFF
+            samples.append(v)
+        full_scale = 8388608.0
+        clip_lo, clip_hi = -8388608, 8388607
+    elif sw == 2:
+        samples = list(struct.unpack("<" + "h" * (len(raw) // 2), raw))
+        full_scale = 32768.0
+        clip_lo, clip_hi = -32768, 32767
+    else:
+        raise SystemExit(f"expected 16- or 24-bit samples, got {sw * 8}-bit")
     if ch == 2:
         samples = samples[0::2]
     elif ch != 1:
         raise SystemExit(f"unsupported channel count {ch}")
-    return rate, list(samples)
+    return rate, samples, full_scale, clip_lo, clip_hi
 
 
-def stats(samples):
+def stats(samples, full_scale: float, clip_lo: int, clip_hi: int):
     n = len(samples)
     if n == 0:
         return {}
@@ -37,8 +51,8 @@ def stats(samples):
     peak = max(abs(x) for x in samples)
     mn = min(samples)
     mx = max(samples)
-    clipped = sum(1 for x in samples if x <= -32768 or x >= 32767)
-    dbfs = 20 * math.log10(rms / 32768.0) if rms > 0 else float("-inf")
+    clipped = sum(1 for x in samples if x <= clip_lo or x >= clip_hi)
+    dbfs = 20 * math.log10(rms / full_scale) if rms > 0 else float("-inf")
     return {
         "n": n,
         "mean": mean,
@@ -76,26 +90,24 @@ def main():
     p.add_argument("--expect-hz", type=float, default=None)
     args = p.parse_args()
 
-    rate, samples = load_mono_s16(args.wav)
-    st = stats(samples)
-    tone = estimate_tone_hz(samples, rate)
-
-    print(f"file: {args.wav}")
-    print(f"rate: {rate} Hz  samples: {st['n']}  duration: {st['n']/rate:.3f}s")
-    print(f"mean: {st['mean']:.2f}  stdev: {st['stdev']:.2f}")
-    print(f"rms: {st['rms']:.2f} ({st['rms_dbfs']:.1f} dBFS)")
-    print(f"min/max: {st['min']} / {st['max']}  peak-to-peak: {st['peak_to_peak']}")
-    print(f"clipped: {st['clipped_pct']:.4f}%")
-    if tone is not None:
-        print(f"approx tone (ZCR): {tone:.2f} Hz")
-        if args.expect_hz is not None:
-            err = abs(tone - args.expect_hz)
-            print(f"expect {args.expect_hz} Hz  abs err {err:.2f} Hz")
-            if err > 20:
-                print("WARNING: tone far from expected (check format/resampling)")
-                return 1
+    rate, samples, full_scale, clip_lo, clip_hi = load_mono(args.wav)
+    st = stats(samples, full_scale, clip_lo, clip_hi)
+    print(f"rate={rate} n={st.get('n')}")
+    for k in ("mean", "stdev", "rms", "rms_dbfs", "min", "max", "peak",
+              "peak_to_peak", "clipped_pct"):
+        if k in st:
+            print(f"  {k}={st[k]}")
+    hz = estimate_tone_hz(samples, rate)
+    if hz is not None:
+        print(f"  tone_est_hz={hz:.2f}")
+    if args.expect_hz is not None and hz is not None:
+        err = abs(hz - args.expect_hz) / args.expect_hz
+        if err > 0.02:
+            print(f"tone mismatch: got {hz:.2f} expect {args.expect_hz}",
+                  file=sys.stderr)
+            sys.exit(1)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

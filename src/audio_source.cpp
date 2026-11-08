@@ -1,8 +1,6 @@
 /**
  * @file audio_source.cpp
- * @brief Stream state machine and backend dispatch (ADC / PCM1808 / synthetic).
- *
- * @see audio_source.h
+ * @brief Stream FSM, capture deferral, and preamp warm-up gating.
  */
 
 #include "audio_source.h"
@@ -10,38 +8,31 @@
 #include "adc_capture.h"
 #include "app_config.h"
 #include "audio_ring.h"
+#include "board_config.h"
 #include "diagnostics.h"
 #include "pcm1808_capture.h"
 #include "pcm1808_clock.h"
+#include "power_control.h"
 
+#include <Arduino.h>
 #include <stdint.h>
 
 static stream_state_t g_state = STREAM_STATE_USB_UNCONFIGURED;
-
-/**
- * Capture start/stop is deferred to the main loop. Calling
- * {@code dma_channel_abort} / {@code adc_run} from a TinyUSB control callback
- * can hang the USB stack on RP2040/RP2350.
- */
 static volatile bool g_capture_request;
+static volatile bool g_stream_armed;
+static bool g_awaiting_preamp;
 
 #if AUDIO_SOURCE == SYNTHETIC
 #include "tick_tock_pcm.h"
-
 static uint32_t g_pcm_index;
 
-/**
- * Fills the ring with {@code count} samples from the looping tick-tock asset.
- *
- * @param count Number of PCM16 samples to produce (may be chunked internally).
- */
 static void synthetic_generate(uint32_t count) {
-  int16_t tmp[64];
+  audio_sample_t tmp[64];
   while (count > 0) {
     uint32_t n = count > 64 ? 64 : count;
     for (uint32_t i = 0; i < n; i++) {
-      tmp[i] = kTickTockPcm[g_pcm_index];
-      g_pcm_index++;
+      /* S16 source → MSB-aligned PCM24 for USB. */
+      tmp[i] = ((audio_sample_t)kTickTockPcm[g_pcm_index++]) << 8;
       if (g_pcm_index >= TICK_TOCK_PCM_LEN) {
         g_pcm_index = 0;
       }
@@ -52,10 +43,14 @@ static void synthetic_generate(uint32_t count) {
 }
 #endif
 
-/**
- * Applies {@code g_capture_request}: start capture if requested and idle, or
- * stop + reset the ring if request cleared while running.
- */
+static bool uses_preamp(void) {
+#if AUDIO_SOURCE == SYNTHETIC
+  return false;
+#else
+  return BOOST_SWITCH_PRESENT != 0;
+#endif
+}
+
 static void capture_service_request(void) {
 #if AUDIO_SOURCE == ADC
   if (g_capture_request) {
@@ -78,15 +73,61 @@ static void capture_service_request(void) {
 #endif
 }
 
+static void power_down(void) {
+  g_capture_request = false;
+  g_awaiting_preamp = false;
+  power_control_abort_preamp(millis());
+}
+
+static void enter_prefill(void) {
+  audio_ring_reset();
+  diagnostics_reset_adc_stats();
+#if AUDIO_SOURCE == SYNTHETIC
+  g_pcm_index = 0;
+#endif
+  g_awaiting_preamp = false;
+  g_capture_request = (AUDIO_SOURCE != SYNTHETIC);
+  g_state = STREAM_STATE_STREAM_PREFILL;
+}
+
+static void arm_recording(void) {
+#if AUDIO_SOURCE == PCM1808
+  if (!pcm1808_clock_is_ok() || g_state == STREAM_STATE_STREAM_ERROR) {
+    g_stream_armed = false;
+    power_down();
+    g_state = STREAM_STATE_STREAM_ERROR;
+    return;
+  }
+#endif
+  g_stream_armed = true;
+  g_capture_request = false;
+  audio_ring_reset();
+  diagnostics_reset_adc_stats();
+#if AUDIO_SOURCE == SYNTHETIC
+  g_pcm_index = 0;
+#endif
+  if (uses_preamp()) {
+    g_awaiting_preamp = true;
+    g_state = STREAM_STATE_STREAM_PREFILL;
+    power_control_begin_preamp_warmup(millis());
+  } else {
+    power_control_abort_preamp(millis());
+    enter_prefill();
+  }
+}
+
 void audio_source_init(void) {
   g_state = STREAM_STATE_USB_UNCONFIGURED;
   g_capture_request = false;
+  g_stream_armed = false;
+  g_awaiting_preamp = false;
   audio_ring_init();
 #if AUDIO_SOURCE == ADC
   adc_capture_init();
 #elif AUDIO_SOURCE == PCM1808
   if (!pcm1808_clock_start()) {
     g_state = STREAM_STATE_STREAM_ERROR;
+    power_down();
   }
   pcm1808_capture_init();
 #elif AUDIO_SOURCE == SYNTHETIC
@@ -101,7 +142,8 @@ void audio_source_set_configured(bool configured) {
       g_state = STREAM_STATE_USB_CONFIGURED_IDLE;
     }
   } else {
-    g_capture_request = false;
+    g_stream_armed = false;
+    power_down();
 #if AUDIO_SOURCE == ADC
     adc_capture_stop();
 #elif AUDIO_SOURCE == PCM1808
@@ -112,37 +154,49 @@ void audio_source_set_configured(bool configured) {
   }
 }
 
-void audio_source_on_stream_open(void) {
-  audio_ring_reset();
-  diagnostics_reset_adc_stats();
-#if AUDIO_SOURCE == SYNTHETIC
-  g_pcm_index = 0;
-#endif
-  g_capture_request = true;
-  g_state = STREAM_STATE_STREAM_PREFILL;
-}
+void audio_source_on_stream_open(void) { arm_recording(); }
 
 void audio_source_on_stream_close(void) {
-  g_capture_request = false;
+  g_stream_armed = false;
+  power_down();
   g_state = STREAM_STATE_USB_CONFIGURED_IDLE;
 }
 
 void audio_source_on_suspend(void) {
-  g_capture_request = false;
+  power_down();
   g_state = STREAM_STATE_USB_SUSPENDED;
 }
 
 void audio_source_on_resume(void) {
-  if (g_state == STREAM_STATE_USB_SUSPENDED) {
+  if (g_state != STREAM_STATE_USB_SUSPENDED) {
+    return;
+  }
+  if (g_stream_armed) {
+    arm_recording();
+  } else {
     g_state = STREAM_STATE_USB_CONFIGURED_IDLE;
   }
 }
 
 void audio_source_process(void) {
+  uint32_t now = millis();
+  if (g_awaiting_preamp) {
+    (void)power_control_poll(now);
+    if (power_control_preamp_ready()) {
+      enter_prefill();
+    }
+  }
   capture_service_request();
 
+  if (g_state == STREAM_STATE_STREAM_ERROR) {
+    power_down();
+    return;
+  }
   if (g_state != STREAM_STATE_STREAM_PREFILL &&
       g_state != STREAM_STATE_STREAM_ACTIVE) {
+    return;
+  }
+  if (g_awaiting_preamp) {
     return;
   }
 

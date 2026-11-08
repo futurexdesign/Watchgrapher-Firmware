@@ -27,12 +27,14 @@ bool pcm1808_clock_start(void) {
 
   uint32_t sys_hz = clock_get_hz(clk_sys);
   uint32_t usb_hz = clock_get_hz(clk_usb);
+  d->pcm1808_clk_sys_hz = sys_hz;
+  d->pcm1808_clk_usb_hz = usb_hz;
   g_ok = (sys_hz == PCM1808_EXPECT_SYS_HZ) && (usb_hz == PCM1808_EXPECT_USB_HZ);
   d->pcm1808_clock_config_ok = g_ok ? 1u : 0u;
   d->pcm1808_mclk_nominal_hz = PCM1808_MCLK_NOMINAL_HZ;
 
   if (!g_ok) {
-    /* Fail-fast diagnostic: do not reprogram PLL_SYS at runtime. */
+    /* Fail-fast: wrong F_CPU leaves GP21 silent (need board_build.f_cpu=150M). */
     g_started = false;
     return false;
   }

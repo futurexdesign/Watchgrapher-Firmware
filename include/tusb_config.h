@@ -68,14 +68,14 @@ extern "C" {
 #define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP            0
 #define CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP           0
 
-#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX  2
+#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX  3
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX          1
 
 /*
- * Max packet = 49 samples * 2 bytes (allows 47/48/49 scheduling).
+ * Max packet = 49 samples * 3 bytes (24-bit; allows 47/48/49 scheduling).
  * Hardcoded: TUD_AUDIO_EP_SIZE is not available when this header is parsed.
  */
-#define CFG_TUD_AUDIO_EP_SZ_IN                      98
+#define CFG_TUD_AUDIO_EP_SZ_IN                      147
 #define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX           CFG_TUD_AUDIO_EP_SZ_IN
 #define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ        (4 * CFG_TUD_AUDIO_EP_SZ_IN)
 

@@ -22,8 +22,12 @@
 
 #define APP_SAMPLE_RATE_HZ          48000u
 #define APP_CHANNELS                1u
-#define APP_BYTES_PER_SAMPLE        2u
+/** USB / ring sample width: signed 24-bit PCM in a 32-bit container (USB packs 3 LE bytes). */
+#define APP_BYTES_PER_SAMPLE        3u
 #define APP_SAMPLES_PER_MS          (APP_SAMPLE_RATE_HZ / 1000u) /* 48 */
+/** Full-scale positive peak for signed 24-bit PCM. */
+#define APP_PCM24_FULL_SCALE        8388607
+#define APP_PCM24_MIN               (-8388608)
 
 #define APP_RING_CAPACITY           8192u
 #define APP_RING_PREFILL_SAMPLES    960u  /* ~20 ms cushion before USB drain */
@@ -52,9 +56,10 @@
 #define APP_PCM1808_DMA_BUF_COUNT   2u
 
 /**
- * Extra digital gain after 24→16 conversion on the PCM1808 path (integer
- * multiply + clamp). 1 = unity. Does not affect the bit-exact format helper
- * used by host unit tests. Override: {@code -DPCM1808_PCM_GAIN=N}.
+ * Extra digital gain on the PCM1808 path when DSP bypass is enabled (float
+ * full-scale × gain before PCM24 quantize). 1 = unity. Does not affect the
+ * bit-exact format helper used by host unit tests.
+ * Override: {@code -DPCM1808_PCM_GAIN=N}.
  */
 #ifndef PCM1808_PCM_GAIN
 #define PCM1808_PCM_GAIN            1
@@ -95,9 +100,10 @@
 #endif
 
 /**
- * Multiplier from centered ADC counts to PCM16 (no AGC).
- * 16 maps the full ±2048 ADC span onto ±32768 (unity). Values &gt; 16 boost
- * quiet ticks but clip earlier. Override: {@code -DADC_PCM_SCALE=N}.
+ * Multiplier from centered ADC counts in the historical 16-bit domain (no AGC).
+ * Applied then left-shifted 8 bits into PCM24. 16 maps ±2048 onto ±32768
+ * before the shift (unity into 24-bit). Values &gt; 16 boost quiet ticks but
+ * clip earlier. Override: {@code -DADC_PCM_SCALE=N}.
  */
 #ifndef ADC_PCM_SCALE
 #define ADC_PCM_SCALE               48
@@ -133,7 +139,19 @@
 #define DIAG_UART_BAUD              115200
 #endif
 
-/** USB CDC (Serial) diagnostic dump; on by default for bench bring-up. */
+/**
+ * Compile-time: allow CDC ({@code Serial}) diagnostic dump lines when the
+ * runtime print flag is on ({@code diag on} in the CLI). Prints start
+ * disabled; counters still accumulate either way.
+ */
 #ifndef DIAG_CDC
 #define DIAG_CDC                    1
+#endif
+
+/**
+ * Nonblocking TL071 / 8 V rail warm-up after TPS22918 enable (milliseconds).
+ * Provisional — measure rails before treating as final.
+ */
+#ifndef PREAMP_SETTLE_MS
+#define PREAMP_SETTLE_MS            50u
 #endif

@@ -16,8 +16,8 @@
 #include "audio_ring.h"
 #include "board_config.h"
 #include "diagnostics.h"
+#include "dsp_graph.h"
 #include "pcm1808_clock.h"
-#include "pcm1808_format.h"
 #include "pcm1808_i2s.pio.h"
 
 #include <hardware/dma.h>
@@ -48,17 +48,18 @@ static PIO g_pio = pio0;
 static uint g_sm;
 static uint g_offset;
 static bool g_inited;
+static uint64_t g_source_index;
 
 /**
  * Tracks absolute PCM peak for {@code pcm1808_sample_peak_abs}.
  *
- * @param s One mono PCM16 sample after left-slot conversion.
+ * @param s One mono PCM24 sample (int32 container) after DSP.
  */
-static void pcm1808_note_peak(int16_t s) {
+static void pcm1808_note_peak(int32_t s) {
   diag_counters_t *d = diagnostics_get();
   uint32_t abs_v;
-  if (s == (int16_t)0x8000) {
-    abs_v = 32768u;
+  if (s == (int32_t)0xFF800000) {
+    abs_v = 8388608u;
   } else if (s < 0) {
     abs_v = (uint32_t)(-s);
   } else {
@@ -104,6 +105,9 @@ static void __isr pcm1808_dma_handler(void) {
 static void capture_hw_start(void) {
   memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
   g_active = 0;
+
+  /* Re-apply after control_api/dsp_graph_init (runs later in setup than capture_init). */
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / (uint32_t)PCM1808_OUTPUT_UPSAMPLE);
 
   g_pio->fdebug = (1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm));
 
@@ -175,6 +179,12 @@ bool pcm1808_capture_init(void) {
   irq_set_exclusive_handler(DMA_IRQ_0, pcm1808_dma_handler);
   irq_set_enabled(DMA_IRQ_0, true);
 
+  /*
+   * DSP sees pre-upsample mono frames. With UPSAMPLE=2 the codec LRCK is
+   * typically ~24 kHz — beat/event timing must use that rate, not USB 48 kHz.
+   */
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / (uint32_t)PCM1808_OUTPUT_UPSAMPLE);
+
   g_inited = true;
   return true;
 }
@@ -229,30 +239,37 @@ void pcm1808_capture_process(void) {
     g_buf_ready[i] = false;
     restore_interrupts(irq);
 
-    int16_t pcm[APP_PCM1808_DMA_FRAMES * (uint32_t)PCM1808_OUTPUT_UPSAMPLE];
+    audio_sample_t pcm[APP_PCM1808_DMA_FRAMES * (uint32_t)PCM1808_OUTPUT_UPSAMPLE];
     uint32_t out_n = 0;
+    float in_fs[APP_PCM1808_DMA_FRAMES];
+    audio_sample_t mono[APP_PCM1808_DMA_FRAMES];
+
+    diag_counters_t *d = diagnostics_get();
     for (uint32_t f = 0; f < APP_PCM1808_DMA_FRAMES; f++) {
       uint32_t left = local[f * 2u];
       uint32_t right = local[f * 2u + 1u];
-      (void)right;
-
       int32_t left24 = (int32_t)left >> 8;
+      int32_t right24 = (int32_t)right >> 8;
+      uint32_t labs = (left24 < 0) ? (uint32_t)(-left24) : (uint32_t)left24;
+      uint32_t rabs = (right24 < 0) ? (uint32_t)(-right24) : (uint32_t)right24;
+      if (labs > d->pcm1808_raw_left_peak_abs) {
+        d->pcm1808_raw_left_peak_abs = labs;
+      }
+      if (rabs > d->pcm1808_raw_right_peak_abs) {
+        d->pcm1808_raw_right_peak_abs = rabs;
+      }
       if (left24 == 0x7FFFFF || left24 == (int32_t)0xFF800000) {
-        diagnostics_get()->pcm1808_saturated_count++;
+        d->pcm1808_saturated_count++;
       }
-
-      int32_t gained =
-          (int32_t)pcm1808_left_slot_to_pcm16(left) * (int32_t)PCM1808_PCM_GAIN;
-      if (gained > 32767) {
-        gained = 32767;
-      }
-      if (gained < -32768) {
-        gained = -32768;
-      }
-      int16_t s = (int16_t)gained;
-      pcm1808_note_peak(s);
+      in_fs[f] = dsp_sample_from_pcm1808_left24(left24);
+    }
+    uint64_t base = g_source_index;
+    dsp_graph_process(in_fs, APP_PCM1808_DMA_FRAMES, base, mono);
+    g_source_index += APP_PCM1808_DMA_FRAMES;
+    for (uint32_t f = 0; f < APP_PCM1808_DMA_FRAMES; f++) {
+      pcm1808_note_peak(mono[f]);
       for (uint32_t u = 0; u < (uint32_t)PCM1808_OUTPUT_UPSAMPLE; u++) {
-        pcm[out_n++] = s;
+        pcm[out_n++] = mono[f];
       }
     }
 

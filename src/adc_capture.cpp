@@ -63,14 +63,18 @@ static uint16_t adc_extract_code(uint16_t fifo_word) {
 /**
  * Centers, scales, optionally low-passes, and clamps one averaged ADC code.
  *
+ * {@code ADC_PCM_SCALE} is applied in the historical 16-bit domain, then the
+ * result is left-shifted 8 bits into a signed 24-bit container so USB keeps
+ * full native width without changing relative loudness.
+ *
  * Updates {@code adc_*} diagnostic peaks. LPF state is per-stream (reset on
  * start). Peak stats use the pre-LPF magnitude so CDC {@code pcm_pk} still
  * reflects converter headroom when a filter is enabled.
  *
  * @param code 12-bit ADC code (typically an oversample average).
- * @return PCM16 sample for the ring.
+ * @return PCM24 sample (int32 container) for the ring.
  */
-static int16_t adc_code_to_pcm(uint16_t code) {
+static int32_t adc_code_to_pcm(uint16_t code) {
   diag_counters_t *d = diagnostics_get();
   diagnostics_note_adc_code(code);
 
@@ -80,17 +84,17 @@ static int16_t adc_code_to_pcm(uint16_t code) {
   int32_t dc = 0;
 #endif
   int32_t centered = (int32_t)code - dc;
-  int32_t pcm = centered * (int32_t)ADC_PCM_SCALE;
-  if (pcm > 32767) {
-    pcm = 32767;
+  int32_t pcm = (centered * (int32_t)ADC_PCM_SCALE) << 8;
+  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
+    pcm = (int32_t)APP_PCM24_FULL_SCALE;
   }
-  if (pcm < -32768) {
-    pcm = -32768;
+  if (pcm < (int32_t)APP_PCM24_MIN) {
+    pcm = (int32_t)APP_PCM24_MIN;
   }
 
   uint32_t abs_pcm;
-  if (pcm == -32768) {
-    abs_pcm = 32768u;
+  if (pcm == (int32_t)APP_PCM24_MIN) {
+    abs_pcm = 8388608u;
   } else if (pcm < 0) {
     abs_pcm = (uint32_t)(-pcm);
   } else {
@@ -116,18 +120,18 @@ static int16_t adc_code_to_pcm(uint16_t code) {
     g_lpf_y += (pcm - g_lpf_y) >> ADC_LPF_SHIFT;
   }
   pcm = g_lpf_y;
-  if (pcm > 32767) {
-    pcm = 32767;
+  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
+    pcm = (int32_t)APP_PCM24_FULL_SCALE;
   }
-  if (pcm < -32768) {
-    pcm = -32768;
+  if (pcm < (int32_t)APP_PCM24_MIN) {
+    pcm = (int32_t)APP_PCM24_MIN;
   }
 #endif
 
-  return (int16_t)pcm;
+  return pcm;
 }
 
-int16_t adc_convert_sample(uint16_t fifo_word) {
+int32_t adc_convert_sample(uint16_t fifo_word) {
   return adc_code_to_pcm(adc_extract_code(fifo_word));
 }
 
@@ -294,7 +298,7 @@ void adc_capture_process(void) {
     }
 #endif
 
-    int16_t pcm[APP_ADC_DMA_BUF_SAMPLES];
+    audio_sample_t pcm[APP_ADC_DMA_BUF_SAMPLES];
     for (uint32_t s = 0; s < APP_ADC_DMA_BUF_SAMPLES; s++) {
       uint32_t sum = 0;
       uint32_t base = s * (uint32_t)ADC_OVERSAMPLE;
@@ -311,17 +315,17 @@ void adc_capture_process(void) {
 
 #else /* AUDIO_SOURCE != ADC */
 
-int16_t adc_convert_sample(uint16_t fifo_word) {
+int32_t adc_convert_sample(uint16_t fifo_word) {
   uint16_t code = (uint16_t)(fifo_word & 0x0FFFu);
   int32_t centered = (int32_t)code - (int32_t)ADC_DC_OFFSET_COUNTS;
-  int32_t pcm = centered * (int32_t)ADC_PCM_SCALE;
-  if (pcm > 32767) {
-    pcm = 32767;
+  int32_t pcm = (centered * (int32_t)ADC_PCM_SCALE) << 8;
+  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
+    pcm = (int32_t)APP_PCM24_FULL_SCALE;
   }
-  if (pcm < -32768) {
-    pcm = -32768;
+  if (pcm < (int32_t)APP_PCM24_MIN) {
+    pcm = (int32_t)APP_PCM24_MIN;
   }
-  return (int16_t)pcm;
+  return pcm;
 }
 
 bool adc_capture_init(void) { return true; }

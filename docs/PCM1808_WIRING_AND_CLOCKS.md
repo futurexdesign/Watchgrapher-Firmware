@@ -1,8 +1,8 @@
 # PCM1808 wiring and clocks (Gate B)
 
-Comimark LY451-style **PCM1808** module in master I²S mode, clocked by RP2040/RP2350 GPOUT0.
+Comimark LY451-style **PCM1808** module in master I²S mode, clocked by RP2350 GPOUT0.
 
-Supported PlatformIO envs: `pico_pcm1808` (RP2040 Pico @ **150 MHz** `f_cpu`), `pico2_pcm1808`, `kiwi_pcm1808`.
+Supported PlatformIO envs (RP2350-only; RP2040 `pico_pcm1808` removed): `pico2_pcm1808`, `kiwi_pcm1808`.
 
 ## Expected clocks (software-configured)
 
@@ -18,18 +18,12 @@ Fractional GPOUT divider math:
 ```text
 # RP2350 (16-bit frac field):
 f_out = 150_000_000 / (12 + 0x3500/65536)   # 0x3500/65536 = 53/256
-
-# RP2040 (8-bit frac field; SDK uses frac16>>8 from the same API call):
-f_out = 150_000_000 / (12 + 0x35/256)       # identical 12.20703125 ratio
-
       ≈ 12_288_000 Hz average
 ```
 
 **Edge jitter is expected** with a fractional divider. A frequency counter averaging many periods should read ~12.288 MHz. Oscilloscope period-to-period variation does **not** by itself mean misconfiguration.
 
 Software checks `clock_get_hz(clk_sys)==150e6` and `clock_get_hz(clk_usb)==48e6` at boot. That validates configured rates only — **not** a substitute for probing GP21.
-
-`pico_pcm1808` sets `board_build.f_cpu = 150000000L` so Arduino-Pico raises VREG and calls `set_sys_clock_khz(150000)` (default Pico board is 133 MHz).
 
 MCLK starts in `audio_source_init()` on PCM1808 builds so GP21 toggles **without** opening a USB stream.
 
@@ -61,7 +55,7 @@ If GP21 is unavailable, RP2350 also routes GPOUT0 to **GP13** — change `PCM180
 
 1. Straps MD1=H, MD0=H, FMT=L **before** applying module power.
 2. Power module; verify 5 V analog / 3.3 V digital rails; no MCU pin backfeed.
-3. Flash `pico_pcm1808`, `pico2_pcm1808`, or `kiwi_pcm1808`; measure **GP21** ≈ 12.288 MHz average.
+3. Flash `pico2_pcm1808` or `kiwi_pcm1808`; measure **GP21** ≈ 12.288 MHz average.
 4. With module clocked: **BCK ≈ 3.072 MHz**, **LRCK ≈ 48 kHz**.
 5. Only then proceed to USB recording / capture soak.
 
@@ -71,6 +65,6 @@ BCK/LRCK appear only after the module is powered with correct straps and receive
 
 | Check | Board / env | Result |
 |---|---|---|
-| GP21 SCKI average | Raspberry Pi Pico / `pico_pcm1808` | **12.288199 MHz** (2026-11-04); stable over a **3.4 s** counter gate |
+| GP21 SCKI average | Historical RP2040 `pico_pcm1808` (env removed) | **12.288199 MHz** (2026-11-04); stable over a **3.4 s** counter gate |
 
 BCK/LRCK with module powered and USB capture remain unchecked.

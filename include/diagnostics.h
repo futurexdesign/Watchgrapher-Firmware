@@ -2,15 +2,16 @@
  * @file diagnostics.h
  * @brief Runtime counters and optional CDC/UART status lines for bench bring-up.
  *
- * Counters are process-wide (not reset on every stream open except ADC window
- * stats). {@link diagnostics_poll} prints a single line about every 2 s when
- * {@code DIAG_CDC} and/or {@code DIAG_UART} is enabled; ADC min/max/mean/peaks
- * and ring occupancy extrema are cleared after each print so each line reflects
- * the last window.
+ * Counters always accumulate. Periodic status lines print only when the
+ * runtime print flag is on ({@link diagnostics_set_print_enabled}, CLI
+ * {@code diag on}) and {@code DIAG_CDC} / {@code DIAG_UART} compile flags
+ * allow the transport. ADC min/max/mean/peaks and ring occupancy extrema are
+ * cleared after each print so each line reflects the last window.
  */
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -27,6 +28,13 @@ typedef struct {
   uint32_t usb_audio_stream_open_count;
   uint32_t usb_audio_stream_close_count;
   uint32_t usb_suspend_count;
+  uint32_t usb_resume_count;
+  uint32_t boost_on_count;
+  uint32_t boost_off_count;
+  uint32_t preamp_settle_start_count;
+  uint32_t preamp_settle_done_count;
+  uint32_t preamp_start_aborted_count;
+  uint32_t usb_suspend_duration_ms;
   uint32_t adc_total_sample_count;
   uint32_t adc_conversion_error_count;
   uint32_t dma_complete_count;
@@ -49,11 +57,13 @@ typedef struct {
   uint32_t adc_dc_counts;
   /** Max |code − dc| in the current window (pre-scale). */
   uint32_t adc_ac_peak_counts;
-  /** Max |PCM16| after scale (and before optional LPF) in the window. */
+  /** Max |PCM24| after scale (and before optional LPF) in the window. */
   uint32_t adc_pcm_peak_abs;
 
   /* PCM1808 backend (compile-time exclusive with ADC capture). */
   uint32_t pcm1808_clock_config_ok;
+  uint32_t pcm1808_clk_sys_hz;
+  uint32_t pcm1808_clk_usb_hz;
   uint32_t pcm1808_mclk_nominal_hz;
   uint32_t pcm1808_startup_wait_count;
   uint32_t pcm1808_dma_blocks;
@@ -65,13 +75,25 @@ typedef struct {
   uint32_t pcm1808_resync_count;
   uint32_t pcm1808_sample_peak_abs;
   uint32_t pcm1808_saturated_count;
+  /** Max |left24| / |right24| in the current diag window (raw I²S, pre-DSP). */
+  uint32_t pcm1808_raw_left_peak_abs;
+  uint32_t pcm1808_raw_right_peak_abs;
 } diag_counters_t;
 
 /**
- * Zeroes counters and opens CDC/UART diag streams when enabled.
- * Prints a one-line board / {@code AUDIO_SOURCE} banner.
+ * Zeroes counters, opens {@code Serial} for the CDC CLI, and optionally
+ * opens Serial1 when {@code DIAG_UART=1}. Does not enable periodic prints.
  */
 void diagnostics_init(void);
+
+/**
+ * Enables or disables the ~2 s periodic status dump (CDC and/or UART).
+ * Counters keep updating either way. Default after init is off.
+ */
+void diagnostics_set_print_enabled(bool on);
+
+/** @return {@code true} when periodic diagnostic prints are enabled. */
+bool diagnostics_print_enabled(void);
 
 /**
  * @return Pointer to the global counter block (never null). Callers may
@@ -101,8 +123,9 @@ void diagnostics_note_adc_code(uint16_t code);
 void diagnostics_reset_adc_stats(void);
 
 /**
- * If ≥2 s since the last dump, prints one status line to CDC and/or UART and
- * clears windowed ADC/ring fields. Safe to call every main-loop iteration.
+ * Tracks suspend duration. When prints are enabled and ≥2 s since the last
+ * dump, prints one status line to CDC and/or UART and clears windowed
+ * ADC/ring fields. Safe to call every main-loop iteration.
  */
 void diagnostics_poll(void);
 

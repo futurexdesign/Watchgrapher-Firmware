@@ -2,10 +2,10 @@
  * @file board_config.h
  * @brief Board identity, pin map, and PCM1808 clock expectations.
  *
+ * RP2350/RP2354 only (Pico 2 / Kiwi). RP2040 PlatformIO envs removed.
  * Pin selection is driven by {@code platformio.ini} build flags:
  * | Env family | MCU | Default ADC |
  * |------------|-----|-------------|
- * | pico*      | RP2040 | GPIO26 / ch0 |
  * | pico2*     | RP2350A | GPIO26 / ch0 |
  * | kiwi*      | RP2350B | GPIO40 / ch0 |
  *
@@ -26,14 +26,12 @@
 #error "ADC_CHANNEL must be defined (see platformio.ini)"
 #endif
 
-#if defined(BOARD_PICO)
-#define BOARD_NAME "Pico"
-#elif defined(BOARD_PICO2)
+#if defined(BOARD_PICO2)
 #define BOARD_NAME "Pico2"
 #elif defined(BOARD_KIWI)
 #define BOARD_NAME "KiwiBoard"
 #else
-#define BOARD_NAME "RP2xxx"
+#define BOARD_NAME "RP2350"
 #endif
 
 #if AUDIO_SOURCE == SYNTHETIC
@@ -46,10 +44,10 @@
 
 /**
  * Onboard status LED GPIO, or −1 if none.
- * Pico / Pico 2 / Kiwi use GPIO25.
+ * Pico 2 / Kiwi use GPIO25.
  */
 #ifndef STATUS_LED_GPIO
-#if defined(BOARD_PICO) || defined(BOARD_PICO2) || defined(BOARD_KIWI)
+#if defined(BOARD_PICO2) || defined(BOARD_KIWI)
 #define STATUS_LED_GPIO 25
 #else
 #define STATUS_LED_GPIO (-1)
@@ -58,7 +56,7 @@
 
 /**
  * PCM1808 MCLK math assumes PLL_SYS / clk_sys at 150 MHz with GPOUT
- * div 12+0x3500. {@code pico_pcm1808} sets {@code board_build.f_cpu=150000000}.
+ * div 12+0x3500 (Pico 2 / Kiwi board default).
  */
 #ifndef PCM1808_EXPECT_SYS_HZ
 #define PCM1808_EXPECT_SYS_HZ 150000000u
@@ -73,6 +71,19 @@
 #endif
 #ifndef DIAG_UART_RX_GPIO
 #define DIAG_UART_RX_GPIO 1
+#endif
+
+/**
+ * TPS22918 BOOST_EN (active HIGH). Pin unassigned until Kiwi Rev B spare
+ * GPIO is validated. Default OFF ({@code BOOST_SWITCH_PRESENT=0}).
+ */
+#ifndef BOOST_SWITCH_PRESENT
+#define BOOST_SWITCH_PRESENT 0
+#endif
+#if BOOST_SWITCH_PRESENT
+#ifndef BOOST_EN_GPIO
+#error "BOOST_EN_GPIO must be assigned when BOOST_SWITCH_PRESENT=1"
+#endif
 #endif
 
 /** PCM1808 I²S + MCLK defaults (P3.0); overridable via {@code -D}. */

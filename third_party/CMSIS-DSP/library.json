@@ -1,0 +1,18 @@
+{
+  "name": "CMSIS-DSP",
+  "version": "1.16.2",
+  "description": "Minimal vendored Arm CMSIS-DSP subset (biquad DF1 f32, rms, power, max) for RP2350 / Cortex-M33",
+  "license": "Apache-2.0",
+  "frameworks": "arduino",
+  "build": {
+    "srcDir": "Source",
+    "includeDir": "Include",
+    "libArchive": false,
+    "flags": [
+      "-DARM_MATH_CM33",
+      "-DARM_MATH_LOOPUNROLL",
+      "-Wno-unused-parameter",
+      "-Wno-sign-conversion"
+    ]
+  }
+}

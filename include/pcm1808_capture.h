@@ -1,10 +1,10 @@
 /**
  * @file pcm1808_capture.h
- * @brief External PCM1808 I²S capture (PIO RX + DMA → mono PCM16 ring).
+ * @brief External PCM1808 I²S capture (PIO RX + DMA → mono PCM24 ring).
  *
  * Active when {@code AUDIO_SOURCE == PCM1808}. Expects board-generated MCLK
  * ({@link pcm1808_clock_start}) and codec-driven BCK/LRCK into the PIO program.
- * Left channel only is converted via {@link pcm1808_left_slot_to_pcm16}.
+ * Left channel only is kept as native signed 24-bit (via the DSP graph).
  */
 
 #pragma once
@@ -48,7 +48,7 @@ bool pcm1808_capture_is_running(void);
 bool pcm1808_capture_is_ready(void);
 
 /**
- * Converts completed DMA stereo blocks to mono PCM16 and pushes the ring.
+ * Converts completed DMA stereo blocks to mono PCM24 and pushes the ring.
  * Call from the main loop while streaming.
  */
 void pcm1808_capture_process(void);

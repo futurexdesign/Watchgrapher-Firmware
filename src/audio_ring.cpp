@@ -1,8 +1,6 @@
 /**
  * @file audio_ring.cpp
- * @brief Mono PCM16 ring buffer implementation.
- *
- * @see audio_ring.h
+ * @brief Mono PCM24 (int32 container) ring buffer implementation.
  */
 
 #include "audio_ring.h"
@@ -12,7 +10,7 @@
 #include <limits.h>
 #include <string.h>
 
-static int16_t g_ring[APP_RING_CAPACITY];
+static audio_sample_t g_ring[APP_RING_CAPACITY];
 static volatile uint32_t g_write;
 static volatile uint32_t g_read;
 
@@ -27,10 +25,6 @@ void audio_ring_reset(void) {
   d->ring_max_occupancy = 0;
 }
 
-/**
- * Occupancy from free-running write/read indices (capacity must be 2^n).
- * Unsigned wrap makes {@code write - read} correct across uint32 rollover.
- */
 static uint32_t occupancy_raw(void) {
   return (uint32_t)(g_write - g_read);
 }
@@ -42,14 +36,14 @@ uint32_t audio_ring_free(void) {
   if (occ >= APP_RING_CAPACITY) {
     return 0;
   }
-  return APP_RING_CAPACITY - 1u - occ; /* leave one slot empty to distinguish full/empty */
+  return APP_RING_CAPACITY - 1u - occ;
 }
 
 bool audio_ring_is_prefilled(void) {
   return occupancy_raw() >= APP_RING_PREFILL_SAMPLES;
 }
 
-uint32_t audio_ring_push(const int16_t *samples, uint32_t count) {
+uint32_t audio_ring_push(const audio_sample_t *samples, uint32_t count) {
   uint32_t written = 0;
   for (uint32_t i = 0; i < count; i++) {
     if (audio_ring_free() == 0) {
@@ -64,7 +58,7 @@ uint32_t audio_ring_push(const int16_t *samples, uint32_t count) {
   return written;
 }
 
-uint32_t audio_ring_pop(int16_t *out, uint32_t count, bool pad_silence) {
+uint32_t audio_ring_pop(audio_sample_t *out, uint32_t count, bool pad_silence) {
   uint32_t read = 0;
   for (uint32_t i = 0; i < count; i++) {
     if (occupancy_raw() == 0) {
@@ -89,12 +83,11 @@ uint32_t audio_ring_packet_samples(void) {
   return APP_PKT_SAMPLES_NOM;
 #else
   uint32_t occ = occupancy_raw();
-  /* Target ~10 ms prefill; steer packet size by occupancy. */
   if (occ > (APP_RING_PREFILL_SAMPLES + APP_PKT_SAMPLES_NOM * 4u)) {
-    return APP_PKT_SAMPLES_MAX; /* drain faster */
+    return APP_PKT_SAMPLES_MAX;
   }
   if (occ < (APP_RING_PREFILL_SAMPLES / 2u)) {
-    return APP_PKT_SAMPLES_MIN; /* slow down */
+    return APP_PKT_SAMPLES_MIN;
   }
   return APP_PKT_SAMPLES_NOM;
 #endif

@@ -7,7 +7,7 @@
 
 #define CAP 16
 
-static int16_t ring[CAP];
+static int32_t ring[CAP];
 static uint32_t wr, rd;
 
 static uint32_t occ(void) { return wr - rd; }
@@ -16,7 +16,7 @@ static uint32_t free_slots(void) {
   return o >= CAP ? 0 : (CAP - 1 - o);
 }
 
-static uint32_t push(const int16_t *s, uint32_t n) {
+static uint32_t push(const int32_t *s, uint32_t n) {
   uint32_t w = 0;
   for (uint32_t i = 0; i < n; i++) {
     if (free_slots() == 0) {
@@ -29,7 +29,7 @@ static uint32_t push(const int16_t *s, uint32_t n) {
   return w;
 }
 
-static uint32_t pop(int16_t *o, uint32_t n, bool pad) {
+static uint32_t pop(int32_t *o, uint32_t n, bool pad) {
   uint32_t r = 0;
   for (uint32_t i = 0; i < n; i++) {
     if (occ() == 0) {
@@ -48,8 +48,8 @@ static uint32_t pop(int16_t *o, uint32_t n, bool pad) {
 }
 
 int main(void) {
-  int16_t in[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-  int16_t out[8];
+  int32_t in[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  int32_t out[8];
   assert(push(in, 8) == 8);
   assert(occ() == 8);
   assert(pop(out, 8, false) == 8);
@@ -57,9 +57,9 @@ int main(void) {
   assert(occ() == 0);
 
   /* Fill to capacity-1 */
-  int16_t bulk[CAP];
+  int32_t bulk[CAP];
   for (int i = 0; i < CAP; i++) {
-    bulk[i] = (int16_t)i;
+    bulk[i] = (int32_t)i;
   }
   assert(push(bulk, CAP) == CAP - 1);
   assert(free_slots() == 0);

@@ -1,6 +1,6 @@
 # Timegrapher Stand — USB Microphone Firmware
 
-PlatformIO firmware for an RP2350/RP2354 board that enumerates as a **USB Audio Class 2 mono microphone** and streams 48 kHz signed 16-bit PCM from either:
+PlatformIO firmware for an RP2350/RP2354 board (RP2040 / original Pico envs removed) that enumerates as a **USB Audio Class 2 mono microphone** and streams 48 kHz signed 16-bit PCM from either:
 
 - **ADC** — onboard SAR ADC via FIFO + DMA (prototype path for watch-tick capture)
 - **SYNTHETIC** — deterministic 997 Hz sine at −12 dBFS (USB stack validation)

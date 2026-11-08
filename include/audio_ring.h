@@ -1,13 +1,10 @@
 /**
  * @file audio_ring.h
- * @brief Lock-free-ish mono PCM16 ring between capture and USB IN feeder.
+ * @brief Lock-free-ish mono PCM24 ring between capture and USB IN feeder.
  *
- * Single producer (capture / synth) and single consumer (USB audio task).
- * Indices are free-running; capacity must be a power of two. One slot is left
- * empty so full vs empty can be distinguished without an extra flag.
- *
- * Occupancy is sampled for diagnostics and (optionally) for 47/48/49 packet
- * size steering via {@link audio_ring_packet_samples}.
+ * Samples are signed 24-bit values stored in {@code int32_t} (sign-extended).
+ * USB packs them to 3-byte little-endian on the wire. Single producer /
+ * single consumer; capacity must be a power of two.
  */
 
 #pragma once
@@ -21,73 +18,43 @@
 extern "C" {
 #endif
 
-/**
- * Clears the ring and resets diagnostic min/max occupancy trackers.
- * Equivalent to {@link audio_ring_reset} at boot.
- */
+/** One mono sample: signed 24-bit in an int32 container. */
+typedef int32_t audio_sample_t;
+
 void audio_ring_init(void);
-
-/**
- * Discards all buffered samples and zeroes storage. Call on stream open/close
- * and when stopping capture so stale PCM is never sent to the host.
- */
 void audio_ring_reset(void);
-
-/**
- * @return Number of PCM16 samples currently buffered (0 .. capacity−1).
- */
 uint32_t audio_ring_occupancy(void);
-
-/**
- * @return Free slots available for {@link audio_ring_push} (leaves one empty).
- */
 uint32_t audio_ring_free(void);
-
-/**
- * @return {@code true} when occupancy ≥ {@code APP_RING_PREFILL_SAMPLES}
- *         (~10 ms), enough to begin ISO feeding without immediate underrun.
- */
 bool audio_ring_is_prefilled(void);
 
 /**
- * Producer: append PCM16 samples.
- *
- * Stops early and increments {@code pcm_ring_overrun_count} if the ring fills.
- *
- * @param samples Pointer to {@code count} signed 16-bit mono samples.
- * @param count   Number of samples to attempt.
- * @return Number of samples actually written (≤ {@code count}).
+ * Producer: append PCM24 samples (int32 containers).
+ * @return Samples written (≤ {@code count}).
  */
-uint32_t audio_ring_push(const int16_t *samples, uint32_t count);
+uint32_t audio_ring_push(const audio_sample_t *samples, uint32_t count);
 
 /**
- * Consumer: remove up to {@code count} samples into {@code out}.
- *
- * On underrun, increments {@code pcm_ring_underrun_count}. If
- * {@code pad_silence} is true, remaining slots are zero-filled and counted as
- * read; if false, the call returns early with a short count (USB path prefers
- * holding the last sample instead — see {@code usb_audio.cpp}).
- *
- * @param out          Destination buffer, length ≥ {@code count}.
- * @param count        Maximum samples to pop.
- * @param pad_silence  Zero-fill remainder on underrun when true.
+ * Consumer: pop up to {@code count} samples.
  * @return Samples written to {@code out}.
  */
-uint32_t audio_ring_pop(int16_t *out, uint32_t count, bool pad_silence);
+uint32_t audio_ring_pop(audio_sample_t *out, uint32_t count, bool pad_silence);
+
+uint32_t audio_ring_packet_samples(void);
 
 /**
- * Suggests how many samples to put in the next USB 1 ms ISO frame.
- *
- * When {@code APP_FIXED_PACKET_48} is 0, returns 47 / 48 / 49 based on ring
- * occupancy to absorb crystal vs SOF drift. When fixed mode is on, always 48.
- *
- * @note The current USB feeder pushes a nominal 48-sample software frame and
- *       relies on TinyUSB EP IN flow control for on-wire size; this helper
- *       remains available for alternate schedulers / tests.
- *
- * @return {@code APP_PKT_SAMPLES_MIN}, {@code _NOM}, or {@code _MAX}.
+ * Packs one signed 24-bit sample to 3-byte little-endian USB PCM.
+ * Clamps to the 24-bit range before packing.
  */
-uint32_t audio_ring_packet_samples(void);
+static inline void audio_pcm24_pack_le(uint8_t dst[3], audio_sample_t s) {
+  if (s > (audio_sample_t)APP_PCM24_FULL_SCALE) {
+    s = (audio_sample_t)APP_PCM24_FULL_SCALE;
+  } else if (s < (audio_sample_t)APP_PCM24_MIN) {
+    s = (audio_sample_t)APP_PCM24_MIN;
+  }
+  dst[0] = (uint8_t)((uint32_t)s & 0xFFu);
+  dst[1] = (uint8_t)(((uint32_t)s >> 8) & 0xFFu);
+  dst[2] = (uint8_t)(((uint32_t)s >> 16) & 0xFFu);
+}
 
 #ifdef __cplusplus
 }
