@@ -26,7 +26,7 @@ extern "C" {
  * @return Sign-extended signed 24-bit PCM sample in an int32.
  */
 static inline int32_t pcm1808_left_slot_to_pcm24(uint32_t left_slot32) {
-  return (int32_t)left_slot32 >> 8; /* arithmetic: sign-extend 24-bit */
+  return static_cast<int32_t>(left_slot32) >> 8; /* arithmetic: sign-extend 24-bit */
 }
 
 #ifdef __cplusplus

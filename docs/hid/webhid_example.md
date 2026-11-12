@@ -2,7 +2,7 @@
 
 Minimal browser-side sketch for the HID control plane. Normative details: [`../HID_CONTROL_PLANE.md`](../HID_CONTROL_PLANE.md). Types: [`timegrapher_hid.d.ts`](timegrapher_hid.d.ts).
 
-**Requires:** Chromium-based browser, HTTPS or `localhost`, user gesture for `requestDevice`. Firmware with `CFG_TUD_HID=1` (current builds). Interactive page: [`example.html`](example.html).
+**Requires:** Chromium-based browser, HTTPS or `localhost`, user gesture for `requestDevice`. Firmware with `CFG_TUD_HID=1` (current builds). Interactive page: [`example.html`](example.html) — full control UI (block enable/params, bypass, metrics/timing/beat/spectrum/matched, events/errors, subscribe pushes, presets).
 
 ---
 

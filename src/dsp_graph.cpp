@@ -18,12 +18,13 @@
 
 #include "app_config.h"
 #include "diagnostics.h"
+#include "perf_timing.h"
 
 #include <Arduino.h>
 #include <arm_math.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -45,6 +46,28 @@ constexpr uint32_t kCommonVph[] = {
 };
 /** Sliding history of inter-event intervals used for median beat estimate. */
 constexpr uint32_t kBeatHist = 16u;
+/** Intra-tick local maxima retained for unlock / drop landmarks. */
+constexpr uint32_t kMaxPulses = 8u;
+/** Amplitude sample history for median lift-time / degree estimate. */
+constexpr uint32_t kAmpHist = 8u;
+/**
+ * Ring of per-tick instant timing samples for rolling 1 s / 10 s means.
+ * Sized for >10 s at 16 Hz (57600 A/h).
+ */
+constexpr uint32_t kTimingAvgCap = 192u;
+constexpr uint32_t kTimingAvg1sMs = 1000u;
+constexpr uint32_t kTimingAvg10sMs = 10000u;
+constexpr uint8_t kTimingFlagRate = 1u;
+constexpr uint8_t kTimingFlagBe = 2u;
+constexpr uint8_t kTimingFlagAmp = 4u;
+
+struct TimingAvgSample {
+  uint32_t t_ms;
+  float rate;
+  float be;
+  float amp;
+  uint8_t flags;
+};
 
 bool g_bypass = true;
 bool g_en[DSP_BLOCK_COUNT];
@@ -56,6 +79,8 @@ dsp_filter_preset_t g_filter = DSP_FILTER_BYPASS;
 float g_event_threshold = 6.0f; /* detect when |x| > noise * threshold */
 float g_preroll_ms = 25.0f;
 float g_tail_ms = 25.0f;
+float g_lift_angle_deg = 51.0f; /* Witschi default lift angle λ */
+uint32_t g_vph_manual = 0u;     /* 0 = auto nearest common A/h */
 
 arm_biquad_casd_df1_inst_f32 g_bq;
 float g_bq_state[8]; /* 2 stages × 4 DF1 state words */
@@ -130,15 +155,31 @@ uint32_t g_event_head = 0;
 
 uint32_t g_intervals[kBeatHist];
 uint32_t g_interval_n = 0;
-uint64_t g_last_event_peak = 0;
+uint64_t g_last_event_unlock = 0;
 bool g_have_last_event = false;
+float g_amp_hist[kAmpHist];
+uint32_t g_amp_n = 0;
+TimingAvgSample g_timing_avg[kTimingAvgCap];
+uint32_t g_timing_avg_n = 0;
+uint32_t g_timing_avg_head = 0;
 dsp_beat_rate_t g_beat = {};
 
 bool g_in_event = false;
 uint64_t g_event_start = 0;
+uint64_t g_event_onset = 0; /* first sample that opened the window */
 uint64_t g_event_peak_idx = 0;
 float g_event_peak = 0.f;
 uint32_t g_below_count = 0;
+
+uint64_t g_pulse_idx[kMaxPulses];
+float g_pulse_amp[kMaxPulses];
+uint32_t g_pulse_n = 0;
+uint64_t g_last_pulse_idx = 0;
+float g_prev_a = 0.f;
+float g_prev2_a = 0.f;
+uint64_t g_prev_idx = 0;
+bool g_have_prev = false;
+bool g_have_prev2 = false;
 
 dsp_error_t g_errors[DSP_ERROR_LOG_CAP];
 uint32_t g_err_count = 0;
@@ -154,6 +195,169 @@ uint32_t g_watch_cooldown_ms = 0;
 
 /** Decibels → linear amplitude ({@code 10^(db/20)}). */
 float db_to_lin(float db) { return powf(10.0f, db / 20.0f); }
+
+/** Insertion-sort median of {@code n} uint32 values (mutates {@code tmp}). */
+uint32_t median_u32(uint32_t *tmp, uint32_t n) {
+  if (n == 0) {
+    return 0;
+  }
+  for (uint32_t i = 1; i < n; i++) {
+    uint32_t key = tmp[i];
+    auto j = static_cast<int32_t>(i) - 1;
+    while (j >= 0 && tmp[j] > key) {
+      tmp[j + 1] = tmp[j];
+      j--;
+    }
+    tmp[j + 1] = key;
+  }
+  return tmp[n / 2u];
+}
+
+/** Insertion-sort median of {@code n} float values (mutates {@code tmp}). */
+float median_f32(float *tmp, uint32_t n) {
+  if (n == 0) {
+    return 0.f;
+  }
+  for (uint32_t i = 1; i < n; i++) {
+    float key = tmp[i];
+    auto j = static_cast<int32_t>(i) - 1;
+    while (j >= 0 && tmp[j] > key) {
+      tmp[j + 1] = tmp[j];
+      j--;
+    }
+    tmp[j + 1] = key;
+  }
+  return tmp[n / 2u];
+}
+
+/**
+ * Witschi amplitude from lift time t and lift angle λ (degrees).
+ * A = λ / (2 sin(π f t)) with f = S/(2·3600); falls back to small-angle form.
+ */
+float amplitude_from_lift(float lift_s, uint32_t vph, float lift_angle_deg) {
+  if (lift_s < 5e-4f || vph == 0u || lift_angle_deg < 1.f) {
+    return 0.f;
+  }
+  const auto f = static_cast<float>(vph) / 7200.0f; /* oscillation Hz */
+  const float arg = 3.14159265f * f * lift_s;
+  if (arg >= 1.0f) {
+    return 0.f; /* outside sinusoidal model */
+  }
+  float s = sinf(arg);
+  if (s < 1e-4f) {
+    s = arg; /* ≈ π f t */
+  }
+  return lift_angle_deg / (2.0f * s);
+}
+
+void push_pulse(uint64_t idx, float amp, uint32_t refractory) {
+  if (g_pulse_n > 0 && idx < g_last_pulse_idx + refractory) {
+    /* Same pulse cluster: keep the louder of the two. */
+    if (amp > g_pulse_amp[g_pulse_n - 1u]) {
+      g_pulse_idx[g_pulse_n - 1u] = idx;
+      g_pulse_amp[g_pulse_n - 1u] = amp;
+      g_last_pulse_idx = idx;
+    }
+    return;
+  }
+  if (g_pulse_n < kMaxPulses) {
+    g_pulse_idx[g_pulse_n] = idx;
+    g_pulse_amp[g_pulse_n] = amp;
+    g_pulse_n++;
+    g_last_pulse_idx = idx;
+  }
+}
+
+void clear_timing_avg(void) {
+  g_timing_avg_n = 0;
+  g_timing_avg_head = 0;
+  g_beat.avg_1s = {};
+  g_beat.avg_10s = {};
+}
+
+void push_timing_avg_sample(uint32_t t_ms, float rate, float be, float amp,
+                            uint8_t flags) {
+  if (flags == 0u) {
+    return;
+  }
+  TimingAvgSample &s = g_timing_avg[g_timing_avg_head];
+  s.t_ms = t_ms;
+  s.rate = rate;
+  s.be = be;
+  s.amp = amp;
+  s.flags = flags;
+  g_timing_avg_head = (g_timing_avg_head + 1u) % kTimingAvgCap;
+  if (g_timing_avg_n < kTimingAvgCap) {
+    g_timing_avg_n++;
+  }
+}
+
+/**
+ * Arithmetic mean of instant samples whose timestamps fall in
+ * {@code [now_ms - window_ms, now_ms]} (millis wrap-safe for spans << 24 d).
+ */
+void compute_timing_avg_window(uint32_t now_ms, uint32_t window_ms,
+                               dsp_beat_timing_window_t *out) {
+  *out = {};
+  if (g_timing_avg_n == 0u || !out) {
+    return;
+  }
+  float rate_sum = 0.f, be_sum = 0.f, amp_sum = 0.f;
+  uint32_t rate_n = 0, be_n = 0, amp_n = 0;
+  for (uint32_t i = 0; i < g_timing_avg_n; i++) {
+    uint32_t idx =
+        (g_timing_avg_head + kTimingAvgCap - g_timing_avg_n + i) % kTimingAvgCap;
+    const TimingAvgSample &s = g_timing_avg[idx];
+    const uint32_t age = now_ms - s.t_ms; /* uint wrap-safe */
+    if (age > window_ms) {
+      continue;
+    }
+    if (s.flags & kTimingFlagRate) {
+      rate_sum += s.rate;
+      rate_n++;
+    }
+    if (s.flags & kTimingFlagBe) {
+      be_sum += s.be;
+      be_n++;
+    }
+    if (s.flags & kTimingFlagAmp) {
+      amp_sum += s.amp;
+      amp_n++;
+    }
+  }
+  out->samples = rate_n;
+  if (be_n > out->samples) {
+    out->samples = be_n;
+  }
+  if (amp_n > out->samples) {
+    out->samples = amp_n;
+  }
+  if (rate_n >= 2u) {
+    out->rate_s_day = rate_sum / static_cast<float>(rate_n);
+    out->rate_valid = true;
+  }
+  if (be_n >= 2u) {
+    out->beat_error_ms = be_sum / static_cast<float>(be_n);
+    out->beat_error_valid = true;
+  }
+  if (amp_n >= 2u) {
+    out->amplitude_deg = amp_sum / static_cast<float>(amp_n);
+    out->amplitude_valid = true;
+  }
+}
+
+void sync_instant_window(void) {
+  g_beat.instant.rate_s_day = g_beat.rate_s_day;
+  g_beat.instant.beat_error_ms = g_beat.beat_error_ms;
+  g_beat.instant.amplitude_deg = g_beat.amplitude_deg;
+  g_beat.instant.rate_valid = g_beat.rate_valid;
+  g_beat.instant.beat_error_valid = g_beat.beat_error_valid;
+  g_beat.instant.amplitude_valid = g_beat.amplitude_valid;
+  g_beat.instant.samples =
+      (g_beat.rate_valid || g_beat.beat_error_valid || g_beat.amplitude_valid)
+          ? 1u
+          : 0u;
+}
 
 /**
  * Appends a fault, advances the error ring, and queues a one-shot CLI string
@@ -216,10 +420,11 @@ void push_error(dsp_block_id_t block, dsp_error_reason_t reason, uint64_t sample
 }
 
 /**
- * Stores a completed analysis event and updates beat-rate state.
+ * Stores a completed analysis event and updates Witschi-style timing state.
  *
- * When beat_rate is enabled and at least four recent inter-peak intervals are
- * available, recomputes median interval → vph_raw and nearest common rate.
+ * Intervals are unlock-to-unlock. With ≥4 half-intervals and beat_rate enabled:
+ * median → vph_raw / lock, then TIC/TAC pair rate (s/d), beat error (ms), and
+ * amplitude (°) from unlock→drop lift time when a nominal A/h is locked.
  *
  * @param ev Closed event window from the detector.
  */
@@ -230,8 +435,13 @@ void push_event(const dsp_event_t &ev) {
     g_event_count++;
   }
 
-  if (g_have_last_event && ev.peak_sample > g_last_event_peak) {
-    uint32_t iv = (uint32_t)(ev.peak_sample - g_last_event_peak);
+  /* Prefer unlock landmark; fall back to peak only if unlock was never set. */
+  const uint64_t unlock =
+      (ev.unlock_sample != 0u || ev.drop_sample != 0u || ev.lift_samples != 0u)
+          ? ev.unlock_sample
+          : ev.peak_sample;
+  if (g_have_last_event && unlock > g_last_event_unlock) {
+    auto iv = static_cast<uint32_t>(unlock - g_last_event_unlock);
     /*
      * Accept ~25 ms .. 1 s in source-rate units (tick/tock pairs are often
      * half a beat). Using g_source_hz — not USB 48 kHz — is required when the
@@ -249,40 +459,152 @@ void push_event(const dsp_event_t &ev) {
       }
     }
   }
-  g_last_event_peak = ev.peak_sample;
+  g_last_event_unlock = unlock;
   g_have_last_event = true;
 
-  if (g_interval_n >= 4u && g_en[DSP_BLOCK_BEAT_RATE]) {
-    uint32_t tmp[kBeatHist];
-    memcpy(tmp, g_intervals, g_interval_n * sizeof(uint32_t));
-    for (uint32_t i = 1; i < g_interval_n; i++) {
-      uint32_t key = tmp[i];
-      int32_t j = (int32_t)i - 1;
-      while (j >= 0 && tmp[j] > key) {
-        tmp[j + 1] = tmp[j];
-        j--;
+  g_beat.lift_angle_deg = g_lift_angle_deg;
+  g_beat.rate_valid = false;
+  g_beat.beat_error_valid = false;
+  g_beat.amplitude_valid = false;
+  g_beat.rate_s_day = 0.f;
+  g_beat.beat_error_ms = 0.f;
+  g_beat.amplitude_deg = 0.f;
+  g_beat.lift_time_ms = 0.f;
+
+  auto finalize_windows = [&](bool push_sample) {
+    sync_instant_window();
+    const auto now = millis();
+    if (push_sample) {
+      uint8_t flags = 0;
+      if (g_beat.rate_valid) {
+        flags |= kTimingFlagRate;
       }
-      tmp[j + 1] = key;
+      if (g_beat.beat_error_valid) {
+        flags |= kTimingFlagBe;
+      }
+      if (g_beat.amplitude_valid) {
+        flags |= kTimingFlagAmp;
+      }
+      push_timing_avg_sample(now, g_beat.rate_s_day, g_beat.beat_error_ms,
+                             g_beat.amplitude_deg, flags);
     }
-    uint32_t med = tmp[g_interval_n / 2u];
-    g_beat.interval_samples = med;
-    float period_s = (float)med / (float)g_source_hz;
-    g_beat.vph_raw = (period_s > 0.f) ? (3600.0f / period_s) : 0.f;
-    uint32_t nearest = 0;
-    float best = 1e9f;
+    compute_timing_avg_window(now, kTimingAvg1sMs, &g_beat.avg_1s);
+    compute_timing_avg_window(now, kTimingAvg10sMs, &g_beat.avg_10s);
+  };
+
+  if (g_interval_n < 4u || !g_en[DSP_BLOCK_BEAT_RATE]) {
+    finalize_windows(false);
+    return;
+  }
+
+  uint32_t tmp[kBeatHist];
+  memcpy(tmp, g_intervals, g_interval_n * sizeof(uint32_t));
+  uint32_t med = median_u32(tmp, g_interval_n);
+  g_beat.interval_samples = med;
+  auto period_s = static_cast<float>(med) / static_cast<float>(g_source_hz);
+  g_beat.vph_raw = (period_s > 0.f) ? (3600.0f / period_s) : 0.f;
+
+  uint32_t nearest = 0;
+  float best = 1e9f;
+  if (g_vph_manual != 0u) {
+    nearest = g_vph_manual;
+    best = fabsf(g_beat.vph_raw - static_cast<float>(nearest));
+  } else {
     for (uint32_t c : kCommonVph) {
-      float d = fabsf(g_beat.vph_raw - (float)c);
+      auto d = fabsf(g_beat.vph_raw - static_cast<float>(c));
       if (d < best) {
         best = d;
         nearest = c;
       }
     }
-    float tol = 0.04f * (float)nearest;
-    g_beat.locked = best <= tol;
-    g_beat.vph_nearest = g_beat.locked ? nearest : 0u;
-    g_beat.confidence = g_beat.locked ? fmaxf(0.f, 1.f - best / (tol + 1.f))
-                                      : fmaxf(0.f, 1.f - best / ((float)nearest + 1.f));
   }
+  auto tol = 0.04f * static_cast<float>(nearest);
+  g_beat.locked = nearest != 0u && best <= tol;
+  g_beat.vph_nearest = g_beat.locked ? nearest : 0u;
+  g_beat.confidence =
+      g_beat.locked ? fmaxf(0.f, 1.f - best / (tol + 1.f))
+                    : fmaxf(0.f, 1.f - best / (static_cast<float>(nearest) + 1.f));
+
+  if (!g_beat.locked) {
+    finalize_windows(false);
+    return;
+  }
+
+  /* Beat error + daily rate from alternating half-intervals (TIC/TAC). */
+  uint32_t be_samp[kBeatHist];
+  uint32_t tic_full[kBeatHist];
+  uint32_t tac_full[kBeatHist];
+  uint32_t be_n = 0;
+  uint32_t tic_n = 0;
+  uint32_t tac_n = 0;
+  for (uint32_t i = 0; i + 1u < g_interval_n; i++) {
+    const uint32_t t1 = g_intervals[i];
+    const uint32_t t2 = g_intervals[i + 1u];
+    be_samp[be_n++] = (t1 > t2) ? ((t1 - t2) / 2u) : ((t2 - t1) / 2u);
+    if ((i & 1u) == 0u) {
+      tic_full[tic_n++] = t1 + t2; /* TIC→TAC→TIC */
+    } else {
+      tac_full[tac_n++] = t1 + t2; /* TAC→TIC→TAC */
+    }
+  }
+  if (be_n >= 2u) {
+    uint32_t be_tmp[kBeatHist];
+    memcpy(be_tmp, be_samp, be_n * sizeof(uint32_t));
+    const uint32_t be_med = median_u32(be_tmp, be_n);
+    g_beat.beat_error_ms =
+        1000.0f * static_cast<float>(be_med) / static_cast<float>(g_source_hz);
+    g_beat.beat_error_valid = true;
+  }
+  const auto t0 = 7200.0f / static_cast<float>(g_beat.vph_nearest); /* s / full osc */
+  auto period_to_rate = [&](uint32_t p_samp) -> float {
+    const auto t_meas = static_cast<float>(p_samp) / static_cast<float>(g_source_hz);
+    /* Watch fast ⇒ measured period shorter than nominal ⇒ positive s/d. */
+    return (t0 - t_meas) / t0 * 86400.0f;
+  };
+  if (t0 > 0.f && (tic_n + tac_n) >= 2u) {
+    float rate_sum = 0.f;
+    uint32_t rate_parts = 0;
+    if (tic_n >= 1u) {
+      uint32_t tmp_tic[kBeatHist];
+      memcpy(tmp_tic, tic_full, tic_n * sizeof(uint32_t));
+      rate_sum += period_to_rate(median_u32(tmp_tic, tic_n));
+      rate_parts++;
+    }
+    if (tac_n >= 1u) {
+      uint32_t tmp_tac[kBeatHist];
+      memcpy(tmp_tac, tac_full, tac_n * sizeof(uint32_t));
+      rate_sum += period_to_rate(median_u32(tmp_tac, tac_n));
+      rate_parts++;
+    }
+    if (rate_parts > 0u) {
+      g_beat.rate_s_day = rate_sum / static_cast<float>(rate_parts);
+      g_beat.rate_valid = true;
+    }
+  }
+
+  /* Amplitude from unlock→drop lift time. */
+  if (ev.lift_samples > 0u) {
+    const auto lift_s = static_cast<float>(ev.lift_samples) / static_cast<float>(g_source_hz);
+    const float a_deg =
+        amplitude_from_lift(lift_s, g_beat.vph_nearest, g_lift_angle_deg);
+    if (a_deg > 50.f && a_deg < 400.f) {
+      if (g_amp_n < kAmpHist) {
+        g_amp_hist[g_amp_n++] = a_deg;
+      } else {
+        memmove(&g_amp_hist[0], &g_amp_hist[1],
+                (kAmpHist - 1u) * sizeof(float));
+        g_amp_hist[kAmpHist - 1u] = a_deg;
+      }
+      float amp_tmp[kAmpHist];
+      memcpy(amp_tmp, g_amp_hist, g_amp_n * sizeof(float));
+      g_beat.amplitude_deg = median_f32(amp_tmp, g_amp_n);
+      g_beat.lift_time_ms = 1000.0f * lift_s;
+      g_beat.amplitude_valid = g_amp_n >= 2u;
+    }
+  }
+
+  finalize_windows(g_beat.rate_valid || g_beat.beat_error_valid ||
+                   g_beat.amplitude_valid);
 }
 
 /**
@@ -306,7 +628,7 @@ void design_biquad_pair(dsp_filter_preset_t preset) {
     hp = 800.f;
     lp = 8000.f;
   }
-  const float fs = (float)g_source_hz;
+  const auto fs = static_cast<float>(g_source_hz);
   auto one_pole_hp = [&](float fc, float *c) {
     float x = expf(-2.f * 3.14159265f * fc / fs);
     c[0] = (1.f + x) * 0.5f;
@@ -339,7 +661,7 @@ void design_notch(void) {
   if (g_notch_hz < 40.f || g_notch_hz > 70.f) {
     return;
   }
-  const float fs = (float)g_source_hz;
+  const auto fs = static_cast<float>(g_source_hz);
   const float w0 = 2.f * 3.14159265f * g_notch_hz / fs;
   const float cosw = cosf(w0);
   const float Q = 30.f;
@@ -369,7 +691,7 @@ void design_fir(dsp_filter_preset_t preset) {
     hp = 800.f;
     lp = 8000.f;
   }
-  const float fs = (float)g_source_hz;
+  const auto fs = static_cast<float>(g_source_hz);
   const float ny = 0.5f * fs;
   if (lp > ny * 0.98f) {
     lp = ny * 0.98f;
@@ -382,11 +704,11 @@ void design_fir(dsp_filter_preset_t preset) {
   }
   const float fc1 = hp / fs;
   const float fc2 = lp / fs;
-  const int M = (int)kFirTaps;
-  const float mid = 0.5f * (float)(M - 1);
+  const auto M = static_cast<int>(kFirTaps);
+  const auto mid = 0.5f * static_cast<float>(M - 1);
   float sum = 0.f;
   for (int n = 0; n < M; n++) {
-    float k = (float)n - mid;
+    auto k = static_cast<float>(n) - mid;
     float ideal;
     if (fabsf(k) < 1e-6f) {
       ideal = 2.f * (fc2 - fc1);
@@ -396,7 +718,7 @@ void design_fir(dsp_filter_preset_t preset) {
               (3.14159265f * k);
     }
     const float w =
-        0.54f - 0.46f * cosf(2.f * 3.14159265f * (float)n / (float)(M - 1));
+        0.54f - 0.46f * cosf(2.f * 3.14159265f * static_cast<float>(n) / static_cast<float>(M - 1));
     g_fir_coeffs[n] = ideal * w;
     sum += g_fir_coeffs[n];
   }
@@ -409,7 +731,7 @@ void design_fir(dsp_filter_preset_t preset) {
     }
   }
   if (peak > 1e-9f) {
-    float s = 1.f / (peak * (float)kFirTaps * 0.25f + 1e-9f);
+    float s = 1.f / (peak * static_cast<float>(kFirTaps) * 0.25f + 1e-9f);
     /* Scale so midband impulse energy is moderate. */
     float energy = 0.f;
     for (uint32_t i = 0; i < kFirTaps; i++) {
@@ -475,10 +797,10 @@ void match_learn_from_wave(void) {
       peak_i = i;
     }
   }
-  int32_t start = (int32_t)peak_i - (int32_t)(kMatchLen / 2u);
+  auto start = static_cast<int32_t>(peak_i) - static_cast<int32_t>(kMatchLen / 2u);
   for (uint32_t i = 0; i < kMatchLen; i++) {
-    int32_t src = start + (int32_t)i;
-    tmp[i] = (src >= 0 && src < (int32_t)n) ? g_event_wave[src] : 0.f;
+    auto src = start + static_cast<int32_t>(i);
+    tmp[i] = (src >= 0 && src < static_cast<int32_t>(n)) ? g_event_wave[src] : 0.f;
   }
   float energy = 0.f;
   arm_power_f32(tmp, kMatchLen, &energy);
@@ -521,8 +843,8 @@ void spectrum_push(const float *x, uint32_t n) {
     }
     /* Hann window into work buffer, then RFFT in-place. */
     for (uint32_t k = 0; k < kFftN; k++) {
-      float w = 0.5f - 0.5f * cosf(2.f * 3.14159265f * (float)k /
-                                   (float)(kFftN - 1u));
+      float w = 0.5f - 0.5f * cosf(2.f * 3.14159265f * static_cast<float>(k) /
+                                   static_cast<float>(kFftN - 1u));
       g_fft_work[k] = g_fft_acc[k] * w;
     }
     arm_rfft_fast_f32(&g_rfft, g_fft_work, g_fft_work, 0);
@@ -552,7 +874,7 @@ void spectrum_push(const float *x, uint32_t n) {
         break;
       }
       g_spectrum.peak_hz[p] =
-          (float)best * (float)g_source_hz / (float)kFftN;
+          static_cast<float>(best) * static_cast<float>(g_source_hz) / static_cast<float>(kFftN);
       g_spectrum.peak_mag[p] = bestm;
       g_spectrum.n_peaks = p + 1u;
       mags[best] = 0.f; /* suppress for next peak */
@@ -581,7 +903,7 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
       peak = a;
     }
   }
-  float rms = sqrtf(power / (float)n);
+  float rms = sqrtf(power / static_cast<float>(n));
   g_pre_peak = fmaxf(g_pre_peak * 0.95f, peak);
   g_pre_rms_ema = 0.9f * g_pre_rms_ema + 0.1f * rms;
 
@@ -616,9 +938,14 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
       fmaxf(g_noise * g_event_threshold, fmaxf(4.f * g_pre_rms_ema, 1e-3f));
   const float thr_close = thr_open * 0.35f;
   const float min_peak = fmaxf(thr_open, 0.25f * g_tick_peak_ema);
-  uint32_t preroll = (uint32_t)(g_preroll_ms * 0.001f * (float)g_source_hz);
-  uint32_t tail = (uint32_t)(g_tail_ms * 0.001f * (float)g_source_hz);
-  uint32_t max_event = (uint32_t)(0.080f * (float)g_source_hz); /* 80 ms */
+  auto preroll = static_cast<uint32_t>(g_preroll_ms * 0.001f * static_cast<float>(g_source_hz));
+  auto tail = static_cast<uint32_t>(g_tail_ms * 0.001f * static_cast<float>(g_source_hz));
+  auto max_event = static_cast<uint32_t>(0.080f * static_cast<float>(g_source_hz)); /* 80 ms */
+  /* ~0.75 ms refractory between intra-tick pulses (unlock / impulse / drop). */
+  auto pulse_refrac = static_cast<uint32_t>(0.00075f * static_cast<float>(g_source_hz));
+  if (pulse_refrac < 1u) {
+    pulse_refrac = 1u;
+  }
 
   const bool match_gate = g_en[DSP_BLOCK_MATCHED_FILTER] && g_match_learned;
   for (uint32_t i = 0; i < n; i++) {
@@ -632,11 +959,19 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
       if (open_ok) {
         g_in_event = true;
         g_event_start = (idx > preroll) ? (idx - preroll) : 0;
+        g_event_onset = idx;
         g_event_peak_idx = idx;
         g_event_peak = a;
         g_event_energy = a * a;
         g_below_count = 0;
         g_event_wave_n = 0;
+        g_pulse_n = 0;
+        g_last_pulse_idx = 0;
+        g_prev_a = a;
+        g_prev2_a = 0.f;
+        g_prev_idx = idx;
+        g_have_prev = true;
+        g_have_prev2 = false;
         if (g_event_wave_n < kMatchLen) {
           g_event_wave[g_event_wave_n++] = x[i];
         }
@@ -650,20 +985,43 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
         g_event_peak = a;
         g_event_peak_idx = idx;
       }
+
+      /* Three-point local max → candidate unlock / impulse / drop pulse. */
+      if (g_have_prev2 && g_have_prev) {
+        const float pulse_thr = fmaxf(thr_close, 0.25f * g_event_peak);
+        if (g_prev_a >= g_prev2_a && g_prev_a >= a && g_prev_a >= pulse_thr) {
+          push_pulse(g_prev_idx, g_prev_a, pulse_refrac);
+        }
+      }
+      g_prev2_a = g_prev_a;
+      g_have_prev2 = g_have_prev;
+      g_prev_a = a;
+      g_prev_idx = idx;
+      g_have_prev = true;
+
       if (a < thr_close) {
         g_below_count++;
       } else {
         g_below_count = 0;
       }
-      const uint32_t dur = (uint32_t)(idx - g_event_start);
+      const auto dur = static_cast<uint32_t>(idx - g_event_start);
       if (g_below_count > tail || dur >= max_event) {
         if (g_event_peak >= min_peak) {
+          /* Flush a trailing local max at close if still rising into silence. */
+          if (g_have_prev) {
+            const float pulse_thr = fmaxf(thr_close, 0.25f * g_event_peak);
+            if (g_prev_a >= pulse_thr &&
+                (!g_have_prev2 || g_prev_a >= g_prev2_a)) {
+              push_pulse(g_prev_idx, g_prev_a, pulse_refrac);
+            }
+          }
+
           dsp_event_t ev{};
           ev.start_sample = g_event_start;
           ev.peak_sample = g_event_peak_idx;
           ev.duration_samples = dur;
           ev.rise_samples =
-              (uint32_t)(g_event_peak_idx > g_event_start
+              static_cast<uint32_t>(g_event_peak_idx > g_event_start
                              ? (g_event_peak_idx - g_event_start)
                              : 0u);
           ev.peak_abs = g_event_peak;
@@ -676,6 +1034,35 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
             conf = fminf(1.f, 0.5f * conf + 0.5f * g_match_score);
           }
           ev.confidence = conf;
+
+          /* Unlock = first pulse; drop = loudest pulse (Witschi landmarks). */
+          if (g_pulse_n > 0u) {
+            ev.unlock_sample = g_pulse_idx[0];
+            uint32_t drop_i = 0;
+            for (uint32_t p = 1; p < g_pulse_n; p++) {
+              if (g_pulse_amp[p] > g_pulse_amp[drop_i]) {
+                drop_i = p;
+              }
+            }
+            ev.drop_sample = g_pulse_idx[drop_i];
+          } else {
+            ev.unlock_sample = g_event_onset;
+            ev.drop_sample = g_event_peak_idx;
+          }
+          if (ev.drop_sample > ev.unlock_sample) {
+            ev.lift_samples =
+                static_cast<uint32_t>(ev.drop_sample - ev.unlock_sample);
+          } else {
+            ev.lift_samples = 0;
+            /* Single-pulse tick: still time rate/BE from unlock landmark. */
+            if (ev.unlock_sample == 0) {
+              ev.unlock_sample = g_event_onset ? g_event_onset : g_event_peak_idx;
+            }
+            if (ev.drop_sample == 0) {
+              ev.drop_sample = g_event_peak_idx;
+            }
+          }
+
           push_event(ev);
           g_tick_peak_ema = 0.9f * g_tick_peak_ema + 0.1f * g_event_peak;
           if (g_en[DSP_BLOCK_MATCHED_FILTER]) {
@@ -686,6 +1073,9 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
         g_below_count = 0;
         g_event_energy = 0.f;
         g_event_wave_n = 0;
+        g_pulse_n = 0;
+        g_have_prev = false;
+        g_have_prev2 = false;
       }
     }
   }
@@ -716,7 +1106,7 @@ void process_path(float *x, uint32_t n) {
     arm_fir_f32(&g_fir, x, x, n);
   }
   if (g_en[DSP_BLOCK_SOFT_GATE]) {
-    const float fs = (float)g_source_hz;
+    const auto fs = static_cast<float>(g_source_hz);
     const float atk =
         1.f - expf(-1.f / fmaxf(g_gate_attack_ms * 0.001f * fs, 1.f));
     const float rel =
@@ -746,9 +1136,9 @@ void process_path(float *x, uint32_t n) {
     }
     /* Adapt only on energetic blocks (ticks), ignore quiet frames. */
     if (peak > fmaxf(4.f * g_pre_rms_ema, 1e-3f)) {
-      const float fs = (float)g_source_hz;
+      const auto fs = static_cast<float>(g_source_hz);
       const float alpha =
-          1.f - expf(-((float)n / fs) / fmaxf(g_agc_tau_s, 0.05f));
+          1.f - expf(-(static_cast<float>(n) / fs) / fmaxf(g_agc_tau_s, 0.05f));
       const float desired = g_agc_target / fmaxf(peak, 1e-6f);
       float next = g_agc_lin + alpha * (desired - g_agc_lin);
       if (next < g_agc_min_lin) {
@@ -778,11 +1168,11 @@ void process_path(float *x, uint32_t n) {
 } // namespace
 
 float dsp_sample_from_pcm1808_left24(int32_t left24) {
-  return (float)left24 * (1.0f / 8388608.0f);
+  return static_cast<float>(left24) * (1.0f / 8388608.0f);
 }
 
 float dsp_sample_from_adc_centered(int32_t centered_counts) {
-  return (float)centered_counts * (1.0f / 2048.0f);
+  return static_cast<float>(centered_counts) * (1.0f / 2048.0f);
 }
 
 void dsp_graph_init(void) {
@@ -820,9 +1210,19 @@ void dsp_graph_init(void) {
   g_event_count = 0;
   g_event_head = 0;
   g_interval_n = 0;
+  g_amp_n = 0;
   g_have_last_event = false;
+  g_last_event_unlock = 0;
+  g_lift_angle_deg = 51.0f;
+  g_vph_manual = 0u;
+  g_in_event = false;
+  g_pulse_n = 0;
+  g_have_prev = false;
+  g_have_prev2 = false;
   g_beat = {};
   g_beat.source_hz = g_source_hz;
+  g_beat.lift_angle_deg = g_lift_angle_deg;
+  clear_timing_avg();
   g_err_count = 0;
   g_err_head = 0;
   g_async_pending = false;
@@ -853,6 +1253,7 @@ uint32_t dsp_graph_process(const float *in_fs, uint32_t n, uint64_t source_index
   if (n == 0 || n > DSP_MAX_BLOCK || !in_fs || !out_pcm) {
     return 0;
   }
+  const uint32_t t0 = time_us_32();
   float buf[DSP_MAX_BLOCK];
   memcpy(buf, in_fs, n * sizeof(float));
 
@@ -863,8 +1264,8 @@ uint32_t dsp_graph_process(const float *in_fs, uint32_t n, uint64_t source_index
    * Quantize to signed 24-bit. Bypass may apply PCM1808_PCM_GAIN for loudness
    * parity with older builds; when processing is on, gain is the gain block.
    */
-  const float qscale = g_bypass ? ((float)APP_PCM24_FULL_SCALE * (float)PCM1808_PCM_GAIN)
-                                : (float)APP_PCM24_FULL_SCALE;
+  const auto qscale = g_bypass ? (static_cast<float>(APP_PCM24_FULL_SCALE) * static_cast<float>(PCM1808_PCM_GAIN))
+                               : static_cast<float>(APP_PCM24_FULL_SCALE);
 
   float peak = 0.f;
   float power = 0.f;
@@ -876,26 +1277,28 @@ uint32_t dsp_graph_process(const float *in_fs, uint32_t n, uint64_t source_index
     }
     power += y * y;
     float s = y * qscale;
-    if (s > (float)APP_PCM24_FULL_SCALE) {
-      s = (float)APP_PCM24_FULL_SCALE;
+    if (s > static_cast<float>(APP_PCM24_FULL_SCALE)) {
+      s = static_cast<float>(APP_PCM24_FULL_SCALE);
       g_clip++;
-    } else if (s < (float)APP_PCM24_MIN) {
-      s = (float)APP_PCM24_MIN;
+    } else if (s < static_cast<float>(APP_PCM24_MIN)) {
+      s = static_cast<float>(APP_PCM24_MIN);
       g_clip++;
     }
-    out_pcm[i] = (int32_t)s;
+    out_pcm[i] = static_cast<int32_t>(s);
   }
   g_post_peak = fmaxf(g_post_peak * 0.95f, peak);
-  g_post_rms_ema = 0.9f * g_post_rms_ema + 0.1f * sqrtf(power / (float)n);
+  g_post_rms_ema = 0.9f * g_post_rms_ema + 0.1f * sqrtf(power / static_cast<float>(n));
+
+  perf_timing_note_dsp_block(time_us_32() - t0, n, g_source_hz);
   return n;
 }
 
 void dsp_graph_watchdog_poll(void) {
-  uint32_t now = millis();
+  auto now = millis();
   if (g_watch_cooldown_ms != 0 && (now - g_watch_cooldown_ms) < 2000u) {
     return;
   }
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   if (g_enable_ms == 0 || g_last_enabled == DSP_BLOCK_BYPASS ||
       !g_en[g_last_enabled]) {
     return;
@@ -930,7 +1333,7 @@ void dsp_graph_watchdog_poll(void) {
 void dsp_graph_note_enable(dsp_block_id_t id) {
   g_last_enabled = id;
   g_enable_ms = millis();
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   g_underrun_at_enable = d->pcm_ring_underrun_count;
   g_short_at_enable = d->usb_short_write_count;
 }
@@ -1057,11 +1460,11 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     return true;
   }
   if (id == DSP_BLOCK_FILTER_BANK && strcmp(param, "preset") == 0) {
-    int p = (int)value;
-    if (p < 0 || p > (int)DSP_FILTER_NARROW) {
+    auto p = static_cast<int>(value);
+    if (p < 0 || p > static_cast<int>(DSP_FILTER_NARROW)) {
       return false;
     }
-    g_filter = (dsp_filter_preset_t)p;
+    g_filter = static_cast<dsp_filter_preset_t>(p);
     g_en[DSP_BLOCK_FILTER_BANK] = (g_filter != DSP_FILTER_BYPASS);
     design_biquad_pair(g_filter);
     g_bypass = false;
@@ -1069,11 +1472,11 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     return true;
   }
   if (id == DSP_BLOCK_FIR_BANK && strcmp(param, "preset") == 0) {
-    int p = (int)value;
-    if (p < 0 || p > (int)DSP_FILTER_NARROW) {
+    auto p = static_cast<int>(value);
+    if (p < 0 || p > static_cast<int>(DSP_FILTER_NARROW)) {
       return false;
     }
-    g_fir_preset = (dsp_filter_preset_t)p;
+    g_fir_preset = static_cast<dsp_filter_preset_t>(p);
     g_en[DSP_BLOCK_FIR_BANK] = (g_fir_preset != DSP_FILTER_BYPASS);
     design_fir(g_fir_preset);
     g_bypass = false;
@@ -1094,11 +1497,11 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     }
   }
   if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
-    int s = (int)value;
+    auto s = static_cast<int>(value);
     if (s < 1 || s > 16) {
       return false;
     }
-    g_fft_stride = (uint32_t)s;
+    g_fft_stride = static_cast<uint32_t>(s);
     return true;
   }
   if (id == DSP_BLOCK_EVENT_DETECT) {
@@ -1112,6 +1515,35 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     }
     if (strcmp(param, "tail_ms") == 0) {
       g_tail_ms = value;
+      return true;
+    }
+  }
+  if (id == DSP_BLOCK_BEAT_RATE) {
+    if (strcmp(param, "liftAngle") == 0 || strcmp(param, "lift_angle") == 0) {
+      if (value < 10.f || value > 90.f) {
+        return false;
+      }
+      g_lift_angle_deg = value;
+      g_beat.lift_angle_deg = value;
+      g_amp_n = 0; /* lift angle change invalidates prior amplitude hist */
+      clear_timing_avg();
+      return true;
+    }
+    if (strcmp(param, "vph") == 0) {
+      if (value < 0.f) {
+        return false;
+      }
+      auto v = static_cast<uint32_t>(lroundf(value));
+      if (v == 0u) {
+        g_vph_manual = 0u;
+        clear_timing_avg();
+        return true;
+      }
+      if (v < 3600u || v > 72000u) {
+        return false;
+      }
+      g_vph_manual = v;
+      clear_timing_avg();
       return true;
     }
   }
@@ -1179,11 +1611,11 @@ bool dsp_graph_get_param(dsp_block_id_t id, const char *param, float *out) {
     return true;
   }
   if (id == DSP_BLOCK_FILTER_BANK && strcmp(param, "preset") == 0) {
-    *out = (float)g_filter;
+    *out = static_cast<float>(g_filter);
     return true;
   }
   if (id == DSP_BLOCK_FIR_BANK && strcmp(param, "preset") == 0) {
-    *out = (float)g_fir_preset;
+    *out = static_cast<float>(g_fir_preset);
     return true;
   }
   if (id == DSP_BLOCK_MATCHED_FILTER) {
@@ -1201,7 +1633,7 @@ bool dsp_graph_get_param(dsp_block_id_t id, const char *param, float *out) {
     }
   }
   if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
-    *out = (float)g_fft_stride;
+    *out = static_cast<float>(g_fft_stride);
     return true;
   }
   if (id == DSP_BLOCK_EVENT_DETECT) {
@@ -1215,6 +1647,16 @@ bool dsp_graph_get_param(dsp_block_id_t id, const char *param, float *out) {
     }
     if (strcmp(param, "tail_ms") == 0) {
       *out = g_tail_ms;
+      return true;
+    }
+  }
+  if (id == DSP_BLOCK_BEAT_RATE) {
+    if (strcmp(param, "liftAngle") == 0 || strcmp(param, "lift_angle") == 0) {
+      *out = g_lift_angle_deg;
+      return true;
+    }
+    if (strcmp(param, "vph") == 0) {
+      *out = static_cast<float>(g_vph_manual);
       return true;
     }
   }

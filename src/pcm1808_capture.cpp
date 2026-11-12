@@ -27,11 +27,11 @@
 #include <hardware/sync.h>
 
 #include <Arduino.h>
-#include <string.h>
+#include <cstring>
 
 #if AUDIO_SOURCE == PCM1808
 
-/* PIO wait gpio immediates are fixed to GP2/GP3 — must match board_config. */
+/* PIO wait gpio immediates are board-baked — must match PCM1808_* build flags. */
 static_assert(PCM1808_BCK_GPIO == pcm1808_i2s_rx_BCK_GPIO, "BCK pin mismatch");
 static_assert(PCM1808_LRCK_GPIO == pcm1808_i2s_rx_LRCK_GPIO, "LRCK pin mismatch");
 
@@ -56,14 +56,14 @@ static uint64_t g_source_index;
  * @param s One mono PCM24 sample (int32 container) after DSP.
  */
 static void pcm1808_note_peak(int32_t s) {
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   uint32_t abs_v;
-  if (s == (int32_t)0xFF800000) {
+  if (s == static_cast<int32_t>(0xFF800000)) {
     abs_v = 8388608u;
   } else if (s < 0) {
-    abs_v = (uint32_t)(-s);
+    abs_v = static_cast<uint32_t>(-s);
   } else {
-    abs_v = (uint32_t)s;
+    abs_v = static_cast<uint32_t>(s);
   }
   if (abs_v > d->pcm1808_sample_peak_abs) {
     d->pcm1808_sample_peak_abs = abs_v;
@@ -75,10 +75,10 @@ static void pcm1808_note_peak(int32_t s) {
  * PIO RX FIFO never backs up.
  */
 static void __isr pcm1808_dma_handler(void) {
-  if (!(dma_hw->ints0 & (1u << (uint32_t)g_dma_chan))) {
+  if (!(dma_hw->ints0 & (1u << static_cast<uint32_t>(g_dma_chan)))) {
     return;
   }
-  dma_hw->ints0 = 1u << (uint32_t)g_dma_chan;
+  dma_hw->ints0 = 1u << static_cast<uint32_t>(g_dma_chan);
 
   uint32_t done = g_active;
 
@@ -103,16 +103,18 @@ static void __isr pcm1808_dma_handler(void) {
  * enables the state machine.
  */
 static void capture_hw_start(void) {
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
   g_active = 0;
 
   /* Re-apply after control_api/dsp_graph_init (runs later in setup than capture_init). */
-  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / (uint32_t)PCM1808_OUTPUT_UPSAMPLE);
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / static_cast<uint32_t>(PCM1808_OUTPUT_UPSAMPLE));
 
   g_pio->fdebug = (1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm));
 
   dma_channel_abort(g_dma_chan);
-  dma_hw->ints0 = 1u << (uint32_t)g_dma_chan;
+  dma_hw->ints0 = 1u << static_cast<uint32_t>(g_dma_chan);
 
   pio_sm_set_enabled(g_pio, g_sm, false);
   pio_sm_clear_fifos(g_pio, g_sm);
@@ -139,14 +141,18 @@ static void capture_hw_stop(void) {
   g_running = false;
   pio_sm_set_enabled(g_pio, g_sm, false);
   dma_channel_abort(g_dma_chan);
-  dma_hw->ints0 = 1u << (uint32_t)g_dma_chan;
+  dma_hw->ints0 = 1u << static_cast<uint32_t>(g_dma_chan);
   pio_sm_clear_fifos(g_pio, g_sm);
   g_pio->fdebug = (1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm));
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
 }
 
 bool pcm1808_capture_init(void) {
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
   g_running = false;
   g_start_pending = false;
   g_active = 0;
@@ -163,7 +169,7 @@ bool pcm1808_capture_init(void) {
     return false;
   }
 
-  pcm1808_i2s_rx_program_init(g_pio, g_sm, g_offset, (uint)PCM1808_DOUT_GPIO);
+  pcm1808_i2s_rx_program_init(g_pio, g_sm, g_offset, static_cast<uint>(PCM1808_DOUT_GPIO));
 
   g_dma_chan = dma_claim_unused_channel(true);
   dma_channel_config cfg = dma_channel_get_default_config(g_dma_chan);
@@ -183,7 +189,7 @@ bool pcm1808_capture_init(void) {
    * DSP sees pre-upsample mono frames. With UPSAMPLE=2 the codec LRCK is
    * typically ~24 kHz — beat/event timing must use that rate, not USB 48 kHz.
    */
-  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / (uint32_t)PCM1808_OUTPUT_UPSAMPLE);
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / static_cast<uint32_t>(PCM1808_OUTPUT_UPSAMPLE));
 
   g_inited = true;
   return true;
@@ -193,7 +199,7 @@ bool pcm1808_capture_is_ready(void) {
   if (!pcm1808_clock_is_ok()) {
     return false;
   }
-  return (int32_t)(millis() - pcm1808_clock_ready_deadline_ms()) >= 0;
+  return static_cast<int32_t>(millis() - pcm1808_clock_ready_deadline_ms()) >= 0;
 }
 
 void pcm1808_capture_start(void) {
@@ -239,26 +245,26 @@ void pcm1808_capture_process(void) {
     g_buf_ready[i] = false;
     restore_interrupts(irq);
 
-    audio_sample_t pcm[APP_PCM1808_DMA_FRAMES * (uint32_t)PCM1808_OUTPUT_UPSAMPLE];
+    audio_sample_t pcm[APP_PCM1808_DMA_FRAMES * static_cast<uint32_t>(PCM1808_OUTPUT_UPSAMPLE)];
     uint32_t out_n = 0;
     float in_fs[APP_PCM1808_DMA_FRAMES];
     audio_sample_t mono[APP_PCM1808_DMA_FRAMES];
 
-    diag_counters_t *d = diagnostics_get();
+    auto *d = diagnostics_get();
     for (uint32_t f = 0; f < APP_PCM1808_DMA_FRAMES; f++) {
       uint32_t left = local[f * 2u];
       uint32_t right = local[f * 2u + 1u];
-      int32_t left24 = (int32_t)left >> 8;
-      int32_t right24 = (int32_t)right >> 8;
-      uint32_t labs = (left24 < 0) ? (uint32_t)(-left24) : (uint32_t)left24;
-      uint32_t rabs = (right24 < 0) ? (uint32_t)(-right24) : (uint32_t)right24;
+      int32_t left24 = static_cast<int32_t>(left) >> 8;
+      int32_t right24 = static_cast<int32_t>(right) >> 8;
+      uint32_t labs = (left24 < 0) ? static_cast<uint32_t>(-left24) : static_cast<uint32_t>(left24);
+      uint32_t rabs = (right24 < 0) ? static_cast<uint32_t>(-right24) : static_cast<uint32_t>(right24);
       if (labs > d->pcm1808_raw_left_peak_abs) {
         d->pcm1808_raw_left_peak_abs = labs;
       }
       if (rabs > d->pcm1808_raw_right_peak_abs) {
         d->pcm1808_raw_right_peak_abs = rabs;
       }
-      if (left24 == 0x7FFFFF || left24 == (int32_t)0xFF800000) {
+      if (left24 == 0x7FFFFF || left24 == static_cast<int32_t>(0xFF800000)) {
         d->pcm1808_saturated_count++;
       }
       in_fs[f] = dsp_sample_from_pcm1808_left24(left24);
@@ -268,7 +274,7 @@ void pcm1808_capture_process(void) {
     g_source_index += APP_PCM1808_DMA_FRAMES;
     for (uint32_t f = 0; f < APP_PCM1808_DMA_FRAMES; f++) {
       pcm1808_note_peak(mono[f]);
-      for (uint32_t u = 0; u < (uint32_t)PCM1808_OUTPUT_UPSAMPLE; u++) {
+      for (uint32_t u = 0; u < static_cast<uint32_t>(PCM1808_OUTPUT_UPSAMPLE); u++) {
         pcm[out_n++] = mono[f];
       }
     }

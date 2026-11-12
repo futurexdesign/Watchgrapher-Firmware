@@ -101,13 +101,20 @@ export interface SpectrumParams {
   stride: number;
 }
 
+export interface BeatRateParams {
+  /** Lift angle λ in degrees (10..90). Default 51. */
+  liftAngle: number;
+  /** Nominal A/h; 0 = auto nearest common rate. */
+  vph: number;
+}
+
 export interface DspBlocksState {
   levelMeter?: BlockState;
   gain?: BlockState<GainParams>;
   limiter?: BlockState;
   filterBank?: BlockState<FilterBankParams>;
   eventDetect?: BlockState<EventDetectParams>;
-  beatRate?: BlockState;
+  beatRate?: BlockState<BeatRateParams>;
   noiseFloor?: BlockState;
   eventLog?: BlockState;
   softGate?: BlockState<SoftGateParams>;
@@ -147,6 +154,26 @@ export interface DspMetrics {
   limiterCount: number;
 }
 
+/** Core-0 DSP block + main-loop timing (getTiming / timing notify). */
+export interface DspTiming {
+  dspBlockUsLast: number;
+  dspBlockUsMean: number;
+  dspBlockUsMax: number;
+  dspBlockBudgetUs: number;
+  dspBlockSamples: number;
+  dspBlocks: number;
+  loopUsLast: number;
+  loopUsMean: number;
+  loopUsMax: number;
+  loopCount: number;
+  idleUsPerS: number;
+  loopBusyPct: number;
+  underruns: number;
+  shortWrites: number;
+  ringMin: number;
+  ringMax: number;
+}
+
 export interface DspSpectrumPeak {
   hz: number;
   mag: number;
@@ -167,6 +194,18 @@ export interface DspMatched {
   learned: boolean;
 }
 
+/** Instant or rolling-average view of rate / beat error / amplitude. */
+export interface DspBeatTimingWindow {
+  rateSDay: number;
+  beatErrorMs: number;
+  amplitudeDeg: number;
+  /** Instant: 0 or 1. Rolling: ticks contributing in the window. */
+  samples: number;
+  rateValid: boolean;
+  beatErrorValid: boolean;
+  amplitudeValid: boolean;
+}
+
 export interface DspBeatRate {
   vphRaw: number;
   vphNearest: number;
@@ -176,13 +215,38 @@ export interface DspBeatRate {
   eventsSeen: number;
   intervalsHeld: number;
   sourceHz: number;
+  /** Instant daily rate (s/d); same as instant.rateSDay. */
+  rateSDay: number;
+  /** Instant beat error (ms); same as instant.beatErrorMs. */
+  beatErrorMs: number;
+  /** Instant amplitude (degrees); same as instant.amplitudeDeg. */
+  amplitudeDeg: number;
+  /** Configured lift angle λ (degrees). */
+  liftAngleDeg: number;
+  /** Latest unlock→drop lift time (ms). */
+  liftTimeMs: number;
+  rateValid: boolean;
+  beatErrorValid: boolean;
+  amplitudeValid: boolean;
+  /** Last computed tick set (mirrors top-level rate/BE/amp fields). */
+  instant: DspBeatTimingWindow;
+  /** Rolling ~1 s arithmetic mean of instant values. */
+  avg1s: DspBeatTimingWindow;
+  /** Rolling ~10 s arithmetic mean of instant values. */
+  avg10s: DspBeatTimingWindow;
 }
 
 export interface DspEvent {
   startSample: SampleIndexString;
   peakSample: SampleIndexString;
+  /** First pulse (unlock) landmark for rate / beat error. */
+  unlockSample: SampleIndexString;
+  /** Loudest pulse (drop) landmark for amplitude lift. */
+  dropSample: SampleIndexString;
   durationSamples: number;
   riseSamples: number;
+  /** dropSample - unlockSample when ordered; else 0. */
+  liftSamples: number;
   peakAbs: number;
   noiseFloor: number;
   snrDb: number;
@@ -201,6 +265,8 @@ export interface HidHelloCaps {
   maxJsonBytes: number;
   metricsHzMax: number;
   beatHzMax: number;
+  timingHzMax: number;
+  timing: boolean;
   blocks: DspBlockKey[];
 }
 
@@ -217,6 +283,7 @@ export interface HidHelloResult {
 export interface HidSubscription {
   metricsHz: number;
   beatHz: number;
+  timingHz: number;
   events: boolean;
   errors: boolean;
 }
@@ -230,6 +297,8 @@ export type HidOp =
   | 'getState'
   | 'patchState'
   | 'getMetrics'
+  | 'getTiming'
+  | 'resetTiming'
   | 'getBeat'
   | 'getSpectrum'
   | 'getMatched'
@@ -269,6 +338,14 @@ export interface HidGetMetricsRequest extends HidRequestBase {
   op: 'getMetrics';
 }
 
+export interface HidGetTimingRequest extends HidRequestBase {
+  op: 'getTiming';
+}
+
+export interface HidResetTimingRequest extends HidRequestBase {
+  op: 'resetTiming';
+}
+
 export interface HidGetBeatRequest extends HidRequestBase {
   op: 'getBeat';
 }
@@ -296,6 +373,8 @@ export type HidRequest =
   | HidGetStateRequest
   | HidPatchStateRequest
   | HidGetMetricsRequest
+  | HidGetTimingRequest
+  | HidResetTimingRequest
   | HidGetBeatRequest
   | HidGetEventsRequest
   | HidGetErrorsRequest
@@ -330,6 +409,11 @@ export interface HidMetricsNotify extends HidNotifyBase {
   data: DspMetrics;
 }
 
+export interface HidTimingNotify extends HidNotifyBase {
+  op: 'timing';
+  data: DspTiming;
+}
+
 export interface HidBeatNotify extends HidNotifyBase {
   op: 'beat';
   data: DspBeatRate;
@@ -347,6 +431,7 @@ export interface HidErrorNotify extends HidNotifyBase {
 
 export type HidNotify =
   | HidMetricsNotify
+  | HidTimingNotify
   | HidBeatNotify
   | HidEventNotify
   | HidErrorNotify;

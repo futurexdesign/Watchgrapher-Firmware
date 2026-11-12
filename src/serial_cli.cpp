@@ -10,7 +10,7 @@
 #include "control_api.h"
 
 #include <Arduino.h>
-#include <string.h>
+#include <cstring>
 
 void serial_cli_init(void) {
   control_api_init();
@@ -23,7 +23,7 @@ void serial_cli_tick(void) {
 
   char msg[96];
   if (control_api_pop_async_message(msg, sizeof(msg))) {
-    if (Serial.availableForWrite() >= (int)strlen(msg) + 2) {
+    if (Serial.availableForWrite() >= static_cast<int>(strlen(msg)) + 2) {
       Serial.println(msg);
     }
   }

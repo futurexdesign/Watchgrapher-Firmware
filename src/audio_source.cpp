@@ -27,12 +27,13 @@ static bool g_awaiting_preamp;
 static uint32_t g_pcm_index;
 
 static void synthetic_generate(uint32_t count) {
-  audio_sample_t tmp[64];
+  constexpr uint32_t kChunk = 64u;
+  audio_sample_t tmp[kChunk];
   while (count > 0) {
-    uint32_t n = count > 64 ? 64 : count;
+    uint32_t n = count > kChunk ? kChunk : count;
     for (uint32_t i = 0; i < n; i++) {
       /* S16 source → MSB-aligned PCM24 for USB. */
-      tmp[i] = ((audio_sample_t)kTickTockPcm[g_pcm_index++]) << 8;
+      tmp[i] = (static_cast<audio_sample_t>(kTickTockPcm[g_pcm_index++])) << 8;
       if (g_pcm_index >= TICK_TOCK_PCM_LEN) {
         g_pcm_index = 0;
       }

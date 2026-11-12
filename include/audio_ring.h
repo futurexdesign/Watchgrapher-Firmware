@@ -46,14 +46,14 @@ uint32_t audio_ring_packet_samples(void);
  * Clamps to the 24-bit range before packing.
  */
 static inline void audio_pcm24_pack_le(uint8_t dst[3], audio_sample_t s) {
-  if (s > (audio_sample_t)APP_PCM24_FULL_SCALE) {
-    s = (audio_sample_t)APP_PCM24_FULL_SCALE;
-  } else if (s < (audio_sample_t)APP_PCM24_MIN) {
-    s = (audio_sample_t)APP_PCM24_MIN;
+  if (s > static_cast<audio_sample_t>(APP_PCM24_FULL_SCALE)) {
+    s = static_cast<audio_sample_t>(APP_PCM24_FULL_SCALE);
+  } else if (s < static_cast<audio_sample_t>(APP_PCM24_MIN)) {
+    s = static_cast<audio_sample_t>(APP_PCM24_MIN);
   }
-  dst[0] = (uint8_t)((uint32_t)s & 0xFFu);
-  dst[1] = (uint8_t)(((uint32_t)s >> 8) & 0xFFu);
-  dst[2] = (uint8_t)(((uint32_t)s >> 16) & 0xFFu);
+  dst[0] = static_cast<uint8_t>(static_cast<uint32_t>(s) & 0xFFu);
+  dst[1] = static_cast<uint8_t>((static_cast<uint32_t>(s) >> 8) & 0xFFu);
+  dst[2] = static_cast<uint8_t>((static_cast<uint32_t>(s) >> 16) & 0xFFu);
 }
 
 #ifdef __cplusplus

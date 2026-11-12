@@ -6,12 +6,12 @@ Supported PlatformIO envs (RP2350-only; RP2040 `pico_pcm1808` removed): `pico2_p
 
 ## Expected clocks (software-configured)
 
-| Signal | Pin | Expected | Notes |
-|---|---|---|---|
-| SCKI (MCLK) | **GP21** | **~12.288 MHz average** | `clock_gpio_init_int_frac16(21, PLL_SYS, 12, 0x3500)` |
-| BCK | GP2 | ~3.072 MHz | Driven by PCM1808 after power + straps |
-| LRCK | GP3 | ~48 kHz | Driven by PCM1808 |
-| DOUT | GP4 | I²S data | Sampled by PIO |
+| Signal | Pico 2 GPIO | Kiwi / legacy GPIO | Expected | Notes |
+|---|---|---|---|---|
+| SCKI (MCLK) | **GP21** | **GP21** | **~12.288 MHz average** | `clock_gpio_init_int_frac16(21, PLL_SYS, 12, 0x3500)` |
+| BCK | **GP18** | GP2 | ~3.072 MHz | Driven by PCM1808 after power + straps |
+| LRCK / LRC | **GP20** | GP3 | ~48 kHz | Driven by PCM1808 |
+| DOUT / OUT | **GP19** | GP4 | I²S data | Sampled by PIO |
 
 Fractional GPOUT divider math:
 
@@ -37,7 +37,21 @@ MCLK starts in `audio_source_init()` on PCM1808 builds so GP21 toggles **without
 
 Confirm against the module silkscreen / TI PCM1808 datasheet (SLES177B) for the exact MD1/MD0/FMT encoding on your board revision.
 
-## Wiring table
+## Wiring tables
+
+### Pico 2 (`pico2_pcm1808`) — PCB alignment (no-cross harness)
+
+| Module | Pico 2 GPIO | Header pin | Direction |
+|---|---|---|---|
+| SCKI | GP21 | 27 | Pico → PCM1808, 12.288 MHz |
+| LRC / LRCK | GP20 | 26 | PCM1808 → Pico, 48 kHz |
+| OUT / DOUT | GP19 | 25 | PCM1808 → Pico, serial data |
+| BCK | GP18 | 24 | PCM1808 → Pico, 3.072 MHz |
+| 3.3 V dig | 3V3 | — | Do not backfeed |
+| 5 V analog | VSYS/5V as appropriate | — | Verify module regulator scheme |
+| GND | GND | — | Common ground |
+
+### Kiwi (`kiwi_pcm1808`) — unchanged legacy map
 
 | Module | RP2350 | Notes |
 |---|---|---|
@@ -49,14 +63,16 @@ Confirm against the module silkscreen / TI PCM1808 datasheet (SLES177B) for the 
 | 5 V analog | VSYS/5V as appropriate | Verify module regulator scheme |
 | GND | GND | Common ground |
 
-If GP21 is unavailable, RP2350 also routes GPOUT0 to **GP13** — change `PCM1808_MCLK_GPIO` and rewire together. BCK/LRCK wait immediates in `pcm1808_i2s.pio` are fixed to GPIO 2/3; changing those pins requires regenerating the PIO header (`scripts/gen_pcm1808_pio.py`).
+If GP21 is unavailable, RP2350 also routes GPOUT0 to **GP13** — change `PCM1808_MCLK_GPIO` and rewire together.
+
+BCK/LRCK wait immediates are **baked into board-specific PIO headers** (`pcm1808_i2s_pico2.pio.h` / `pcm1808_i2s_legacy.pio.h`). Changing those pins requires regenerating with `python3 scripts/gen_pcm1808_pio.py` (edit `BOARDS` in that script).
 
 ## Gate B scope checklist
 
 1. Straps MD1=H, MD0=H, FMT=L **before** applying module power.
 2. Power module; verify 5 V analog / 3.3 V digital rails; no MCU pin backfeed.
 3. Flash `pico2_pcm1808` or `kiwi_pcm1808`; measure **GP21** ≈ 12.288 MHz average.
-4. With module clocked: **BCK ≈ 3.072 MHz**, **LRCK ≈ 48 kHz**.
+4. With module clocked: **BCK ≈ 3.072 MHz**, **LRCK ≈ 48 kHz** (Pico 2: probe GP18 / GP20).
 5. Only then proceed to USB recording / capture soak.
 
 BCK/LRCK appear only after the module is powered with correct straps and receives SCKI.

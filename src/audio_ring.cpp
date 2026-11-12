@@ -7,8 +7,8 @@
 
 #include "diagnostics.h"
 
-#include <limits.h>
-#include <string.h>
+#include <climits>
+#include <cstring>
 
 static audio_sample_t g_ring[APP_RING_CAPACITY];
 static volatile uint32_t g_write;
@@ -20,13 +20,13 @@ void audio_ring_reset(void) {
   g_write = 0;
   g_read = 0;
   memset(g_ring, 0, sizeof(g_ring));
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   d->ring_min_occupancy = UINT32_MAX;
   d->ring_max_occupancy = 0;
 }
 
-static uint32_t occupancy_raw(void) {
-  return (uint32_t)(g_write - g_read);
+static uint32_t occupancy_raw() {
+  return g_write - g_read;
 }
 
 uint32_t audio_ring_occupancy(void) { return occupancy_raw(); }

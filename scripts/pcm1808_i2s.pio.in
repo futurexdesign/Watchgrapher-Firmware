@@ -1,10 +1,9 @@
 ;
 ; PCM1808 I²S RX — ADC is BCK/LRCK master; RP2350 samples DOUT only.
 ;
-; Wiring (baked into wait gpio immediates — must match board_config.h defaults):
-;   BCK  = GPIO2
-;   LRCK = GPIO3
-;   DOUT = GPIO4  (set as PIO in_base from C)
+; wait gpio immediates are board-specific (baked by scripts/gen_pcm1808_pio.py):
+;   Kiwi / legacy: BCK=GP2,  LRCK=GP3,  DOUT=GP4  (set as PIO in_base from C)
+;   Pico 2 PCB:    BCK=GP18, LRCK=GP20, DOUT=GP19 (set as PIO in_base from C)
 ;
 ; I²S: after each LRCK edge, skip one BCK period, then capture 32 bits MSB-first
 ; on rising BCK. Autopush every 32 bits → DMA sees [left_slot32, right_slot32, ...].
@@ -12,8 +11,8 @@
 
 .program pcm1808_i2s_rx
 
-.define public BCK_GPIO  2
-.define public LRCK_GPIO 3
+.define public BCK_GPIO  @BCK_GPIO@
+.define public LRCK_GPIO @LRCK_GPIO@
 
 .wrap_target
 public entry_point:

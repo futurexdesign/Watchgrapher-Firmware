@@ -18,7 +18,7 @@
 #include <hardware/irq.h>
 #include <hardware/sync.h>
 
-#include <string.h>
+#include <cstring>
 
 #if AUDIO_SOURCE == ADC
 
@@ -30,7 +30,7 @@ static volatile uint32_t g_seq;
 static volatile bool g_running;
 static volatile uint32_t g_active;
 static int g_dma_chan;
-static uint16_t g_last_valid_code = (uint16_t)ADC_DC_OFFSET_COUNTS;
+static uint16_t g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
 
 /**
  * Frozen midrail for DC removal ({@code ADC_DC_REMOVE=1}): learned as the
@@ -50,12 +50,12 @@ static bool g_lpf_primed;
  * @return Code in 0..4095.
  */
 static uint16_t adc_extract_code(uint16_t fifo_word) {
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   if (fifo_word & 0x8000u) {
     d->adc_conversion_error_count++;
     return g_last_valid_code;
   }
-  uint16_t code = (uint16_t)(fifo_word & 0x0FFFu);
+  auto code = static_cast<uint16_t>(fifo_word & 0x0FFFu);
   g_last_valid_code = code;
   return code;
 }
@@ -75,30 +75,30 @@ static uint16_t adc_extract_code(uint16_t fifo_word) {
  * @return PCM24 sample (int32 container) for the ring.
  */
 static int32_t adc_code_to_pcm(uint16_t code) {
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   diagnostics_note_adc_code(code);
 
 #if ADC_DC_REMOVE
-  int32_t dc = g_dc_ready ? g_dc_counts : (int32_t)ADC_DC_OFFSET_COUNTS;
+  int32_t dc = g_dc_ready ? g_dc_counts : static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
 #else
   int32_t dc = 0;
 #endif
-  int32_t centered = (int32_t)code - dc;
-  int32_t pcm = (centered * (int32_t)ADC_PCM_SCALE) << 8;
-  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
-    pcm = (int32_t)APP_PCM24_FULL_SCALE;
+  int32_t centered = static_cast<int32_t>(code) - dc;
+  int32_t pcm = (centered * static_cast<int32_t>(ADC_PCM_SCALE)) << 8;
+  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
+    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
   }
-  if (pcm < (int32_t)APP_PCM24_MIN) {
-    pcm = (int32_t)APP_PCM24_MIN;
+  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
+    pcm = static_cast<int32_t>(APP_PCM24_MIN);
   }
 
   uint32_t abs_pcm;
-  if (pcm == (int32_t)APP_PCM24_MIN) {
+  if (pcm == static_cast<int32_t>(APP_PCM24_MIN)) {
     abs_pcm = 8388608u;
   } else if (pcm < 0) {
-    abs_pcm = (uint32_t)(-pcm);
+    abs_pcm = static_cast<uint32_t>(-pcm);
   } else {
-    abs_pcm = (uint32_t)pcm;
+    abs_pcm = static_cast<uint32_t>(pcm);
   }
   if (abs_pcm > g_pcm_peak_abs) {
     g_pcm_peak_abs = abs_pcm;
@@ -107,7 +107,7 @@ static int32_t adc_code_to_pcm(uint16_t code) {
     d->adc_pcm_peak_abs = abs_pcm;
   }
 
-  uint32_t abs_c = (uint32_t)(centered < 0 ? -centered : centered);
+  auto abs_c = static_cast<uint32_t>(centered < 0 ? -centered : centered);
   if (abs_c > d->adc_ac_peak_counts) {
     d->adc_ac_peak_counts = abs_c;
   }
@@ -120,11 +120,11 @@ static int32_t adc_code_to_pcm(uint16_t code) {
     g_lpf_y += (pcm - g_lpf_y) >> ADC_LPF_SHIFT;
   }
   pcm = g_lpf_y;
-  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
-    pcm = (int32_t)APP_PCM24_FULL_SCALE;
+  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
+    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
   }
-  if (pcm < (int32_t)APP_PCM24_MIN) {
-    pcm = (int32_t)APP_PCM24_MIN;
+  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
+    pcm = static_cast<int32_t>(APP_PCM24_MIN);
   }
 #endif
 
@@ -141,10 +141,10 @@ int32_t adc_convert_sample(uint16_t fifo_word) {
  * the completed buffer (producer overrun).
  */
 static void __isr dma_handler(void) {
-  if (!(dma_hw->ints0 & (1u << (uint32_t)g_dma_chan))) {
+  if (!(dma_hw->ints0 & (1u << static_cast<uint32_t>(g_dma_chan)))) {
     return;
   }
-  dma_hw->ints0 = 1u << (uint32_t)g_dma_chan;
+  dma_hw->ints0 = 1u << static_cast<uint32_t>(g_dma_chan);
 
   uint32_t done = g_active;
 
@@ -164,18 +164,20 @@ static void __isr dma_handler(void) {
 }
 
 bool adc_capture_init(void) {
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
   g_seq = 0;
   g_running = false;
   g_active = 0;
 #if ADC_DC_REMOVE
   g_dc_ready = false;
-  g_dc_counts = (int32_t)ADC_DC_OFFSET_COUNTS;
+  g_dc_counts = static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
 #else
   g_dc_ready = true;
   g_dc_counts = 0;
 #endif
-  g_last_valid_code = (uint16_t)ADC_DC_OFFSET_COUNTS;
+  g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
   g_pcm_peak_abs = 0;
   g_lpf_y = 0;
   g_lpf_primed = false;
@@ -186,7 +188,7 @@ bool adc_capture_init(void) {
   adc_set_round_robin(0);
 
   uint32_t adc_hz = clock_get_hz(clk_adc);
-  float div = ((float)adc_hz / (float)APP_ADC_RAW_RATE_HZ) - 1.0f;
+  float div = (static_cast<float>(adc_hz) / static_cast<float>(APP_ADC_RAW_RATE_HZ)) - 1.0f;
   if (div < 0.0f) {
     div = 0.0f;
   }
@@ -218,23 +220,25 @@ void adc_capture_start(void) {
     return;
   }
 
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
   g_seq = 0;
   g_active = 0;
 #if ADC_DC_REMOVE
   g_dc_ready = false;
-  g_dc_counts = (int32_t)ADC_DC_OFFSET_COUNTS;
+  g_dc_counts = static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
 #else
   g_dc_ready = true;
   g_dc_counts = 0;
 #endif
-  g_last_valid_code = (uint16_t)ADC_DC_OFFSET_COUNTS;
+  g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
   g_pcm_peak_abs = 0;
   g_lpf_y = 0;
   g_lpf_primed = false;
   diagnostics_get()->adc_pcm_peak_abs = 0;
   diagnostics_get()->adc_ac_peak_counts = 0;
-  diagnostics_get()->adc_dc_counts = (uint32_t)g_dc_counts;
+  diagnostics_get()->adc_dc_counts = static_cast<uint32_t>(g_dc_counts);
 
   adc_run(false);
   adc_fifo_drain();
@@ -261,7 +265,9 @@ void adc_capture_stop(void) {
   dma_channel_abort(g_dma_chan);
   dma_channel_acknowledge_irq0(g_dma_chan);
   adc_fifo_drain();
-  memset((void *)g_buf_ready, 0, sizeof(g_buf_ready));
+  for (auto &ready : g_buf_ready) {
+    ready = false;
+  }
   restore_interrupts(irq);
 }
 
@@ -290,9 +296,9 @@ void adc_capture_process(void) {
         sum += code;
         diagnostics_note_adc_code(code);
       }
-      g_dc_counts = (int32_t)(sum / APP_ADC_DMA_BUF_RAW_SAMPLES);
+      g_dc_counts = static_cast<int32_t>(sum / APP_ADC_DMA_BUF_RAW_SAMPLES);
       g_dc_ready = true;
-      diagnostics_get()->adc_dc_counts = (uint32_t)g_dc_counts;
+      diagnostics_get()->adc_dc_counts = static_cast<uint32_t>(g_dc_counts);
       diagnostics_get()->adc_total_sample_count += APP_ADC_DMA_BUF_SAMPLES;
       continue;
     }
@@ -301,11 +307,11 @@ void adc_capture_process(void) {
     audio_sample_t pcm[APP_ADC_DMA_BUF_SAMPLES];
     for (uint32_t s = 0; s < APP_ADC_DMA_BUF_SAMPLES; s++) {
       uint32_t sum = 0;
-      uint32_t base = s * (uint32_t)ADC_OVERSAMPLE;
-      for (uint32_t k = 0; k < (uint32_t)ADC_OVERSAMPLE; k++) {
+      uint32_t base = s * static_cast<uint32_t>(ADC_OVERSAMPLE);
+      for (uint32_t k = 0; k < static_cast<uint32_t>(ADC_OVERSAMPLE); k++) {
         sum += adc_extract_code(local[base + k]);
       }
-      uint16_t avg = (uint16_t)(sum / (uint32_t)ADC_OVERSAMPLE);
+      auto avg = static_cast<uint16_t>(sum / static_cast<uint32_t>(ADC_OVERSAMPLE));
       pcm[s] = adc_code_to_pcm(avg);
     }
     diagnostics_get()->adc_total_sample_count += APP_ADC_DMA_BUF_SAMPLES;
@@ -316,14 +322,14 @@ void adc_capture_process(void) {
 #else /* AUDIO_SOURCE != ADC */
 
 int32_t adc_convert_sample(uint16_t fifo_word) {
-  uint16_t code = (uint16_t)(fifo_word & 0x0FFFu);
-  int32_t centered = (int32_t)code - (int32_t)ADC_DC_OFFSET_COUNTS;
-  int32_t pcm = (centered * (int32_t)ADC_PCM_SCALE) << 8;
-  if (pcm > (int32_t)APP_PCM24_FULL_SCALE) {
-    pcm = (int32_t)APP_PCM24_FULL_SCALE;
+  auto code = static_cast<uint16_t>(fifo_word & 0x0FFFu);
+  int32_t centered = static_cast<int32_t>(code) - static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
+  int32_t pcm = (centered * static_cast<int32_t>(ADC_PCM_SCALE)) << 8;
+  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
+    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
   }
-  if (pcm < (int32_t)APP_PCM24_MIN) {
-    pcm = (int32_t)APP_PCM24_MIN;
+  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
+    pcm = static_cast<int32_t>(APP_PCM24_MIN);
   }
   return pcm;
 }

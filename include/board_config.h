@@ -86,7 +86,11 @@
 #endif
 #endif
 
-/** PCM1808 I²S + MCLK defaults (P3.0); overridable via {@code -D}. */
+/**
+ * PCM1808 I²S + MCLK defaults (Kiwi / legacy bench wiring).
+ * Pico 2 PCB overrides via {@code platformio.ini} ({@code pico2_pcm1808}):
+ * MCLK GP21, LRCK GP20, DOUT GP19, BCK GP18.
+ */
 #ifndef PCM1808_MCLK_GPIO
 #define PCM1808_MCLK_GPIO 21
 #endif

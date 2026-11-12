@@ -18,7 +18,7 @@
 #include "hid_control.h"
 
 #include <Adafruit_TinyUSB.h>
-#include <string.h>
+#include <cstring>
 
 /** Registers the Adafruit_USBD_Interface mic (implemented in usb_descriptors.cpp). */
 bool usb_audio_register_interface(void);
@@ -70,9 +70,9 @@ static void usb_audio_feed_frame(void) {
     audio_pcm24_pack_le(&g_pkt_bytes[i * APP_BYTES_PER_SAMPLE], g_samp_buf[i]);
   }
 
-  uint16_t bytes = (uint16_t)(APP_PKT_SAMPLES_NOM * APP_BYTES_PER_SAMPLE);
+  auto bytes = static_cast<uint16_t>(APP_PKT_SAMPLES_NOM * APP_BYTES_PER_SAMPLE);
   uint16_t written = tud_audio_write(g_pkt_bytes, bytes);
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   d->usb_in_packet_count++;
   d->usb_in_sample_count += APP_PKT_SAMPLES_NOM;
   if (written < bytes) {
@@ -227,11 +227,13 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport,
     switch (ctrlSel) {
     case AUDIO_FU_CTRL_MUTE:
       TU_VERIFY(req->wLength == sizeof(audio_control_cur_1_t));
-      g_mute[channelNum] = ((audio_control_cur_1_t *)buf)->bCur;
+      g_mute[channelNum] =
+          reinterpret_cast<audio_control_cur_1_t const *>(buf)->bCur;
       return true;
     case AUDIO_FU_CTRL_VOLUME:
       TU_VERIFY(req->wLength == sizeof(audio_control_cur_2_t));
-      g_volume[channelNum] = ((audio_control_cur_2_t *)buf)->bCur;
+      g_volume[channelNum] =
+          reinterpret_cast<audio_control_cur_2_t const *>(buf)->bCur;
       /* Volume is tracked for host compliance only — not applied to PCM. */
       return true;
     default:
@@ -265,7 +267,7 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport,
     if (ctrlSel == AUDIO_TE_CTRL_CONNECTOR) {
       audio_desc_channel_cluster_t ret;
       ret.bNrChannels = 1;
-      ret.bmChannelConfig = (audio_channel_config_t)0;
+      ret.bmChannelConfig = static_cast<audio_channel_config_t>(0);
       ret.iChannelNames = 0;
       return tud_audio_buffer_and_schedule_control_xfer(rhport, req, &ret,
                                                        sizeof(ret));

@@ -173,6 +173,8 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
 | `getState` | — | Full `DspState` (§6) |
 | `patchState` | `patch`: partial `DspState` | Post-patch full `DspState` |
 | `getMetrics` | — | `DspMetrics` |
+| `getTiming` | — | `DspTiming` (DSP block + main-loop CPU headroom) |
+| `resetTiming` | — | `{ "cleared": true }` |
 | `getBeat` | — | `DspBeatRate` |
 | `getEvents` | optional `limit` (1..32, default 8) | `{ "events": DspEvent[] }` newest first |
 | `getErrors` | — | `{ "errors": DspError[] }` newest first |
@@ -193,16 +195,18 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
     "maxJsonBytes": 2048,
     "metricsHzMax": 20,
     "beatHzMax": 5,
+    "timingHzMax": 5,
+    "timing": true,
     "blocks": [
-      "bypass", "levelMeter", "gain", "limiter", "filterBank",
+      "levelMeter", "gain", "limiter", "filterBank",
       "eventDetect", "beatRate", "noiseFloor", "eventLog",
-      "softGate", "notch", "agc"
+      "softGate", "notch", "agc", "matchedFilter", "firBank", "spectrum"
     ]
   }
 }
 ```
 
-`caps.blocks` lists JSON camelCase keys available in `getState` / `patchState`. Future Phase-3 blocks appear here when implemented.
+`caps.blocks` lists JSON camelCase keys available in `getState` / `patchState`. `caps.timing` / `timingHzMax` advertise CPU headroom telemetry (`getTiming` / `subscribe.timingHz`).
 
 ---
 
@@ -222,7 +226,7 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
       "enabled": true,
       "params": { "threshold": 6, "prerollMs": 25, "tailMs": 25 }
     },
-    "beatRate": { "enabled": true, "params": {} },
+    "beatRate": { "enabled": true, "params": { "liftAngle": 51, "vph": 0 } },
     "noiseFloor": { "enabled": true, "params": {} },
     "eventLog": { "enabled": false, "params": {} },
     "softGate": {
@@ -303,9 +307,12 @@ JSON uses camelCase. Firmware maps to existing C/CLI names:
 | `target` | `target` |
 | `tauS` | `tau_s` |
 | `gainDb` | `gain_db` (get only) |
+| `liftAngle` | `liftAngle` / `lift_angle` |
+| `vph` | `vph` (`0` = auto nearest A/h) |
 
 `filterBank.preset`: `0`=bypass/off, `1`=wide, `2`=medium, `3`=narrow.  
-`notch.hz`: `50` or `60` only.
+`notch.hz`: `50` or `60` only.  
+`beatRate.liftAngle`: degrees, 10..90 (default 51).
 
 ---
 
@@ -322,6 +329,7 @@ Default after connect: **no pushes** (quiet).
   "op": "subscribe",
   "metricsHz": 10,
   "beatHz": 2,
+  "timingHz": 2,
   "events": true,
   "errors": true
 }
@@ -331,6 +339,7 @@ Default after connect: **no pushes** (quiet).
 |---|---|---|
 | `metricsHz` | Periodic `notify` / `op: "metrics"` | `0` = off; max **20** |
 | `beatHz` | Periodic `notify` / `op: "beat"` | `0` = off; max **5** |
+| `timingHz` | Periodic `notify` / `op: "timing"` | `0` = off; max **5** |
 | `events` | Push when new analysis events land | boolean; batch ≤ 8 per notify |
 | `errors` | Push when new faults / auto-ejects land | boolean |
 
@@ -339,6 +348,8 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
 ### 7.2 Notify payloads
 
 **metrics** — same fields as `getMetrics` / `DspMetrics`.
+
+**timing** — same fields as `getTiming` / `DspTiming` (`dspBlockUs*`, `loopBusyPct`, underrun/short/ring proxies).
 
 **beat** — same fields as `getBeat` / `DspBeatRate`.
 
@@ -400,6 +411,19 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
 
 ### 8.2 `DspBeatRate`
 
+Unlock-based Witschi-style timing (rate s/d, beat error ms, amplitude °).  
+`beatRate.params.liftAngle` (default 51) and `beatRate.params.vph` (`0` = auto) are set via `patchState`.
+
+Top-level `rateSDay` / `beatErrorMs` / `amplitudeDeg` are the **instant** view (last tick set). Nested windows:
+
+| Key | Meaning |
+|---|---|
+| `instant` | Same values as the top-level rate/BE/amp fields |
+| `avg1s` | Arithmetic mean of instant samples over the last ~1 s |
+| `avg10s` | Arithmetic mean of instant samples over the last ~10 s |
+
+Rolling windows need ≥2 contributing samples per metric before `*Valid` is true. `samples` is the contributing tick count (max of the three metric counts).
+
 ```json
 {
   "vphRaw": 18012.5,
@@ -409,7 +433,42 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
   "intervalSamples": 4800,
   "eventsSeen": 12,
   "intervalsHeld": 8,
-  "sourceHz": 24000
+  "sourceHz": 24000,
+  "rateSDay": 4.2,
+  "beatErrorMs": 0.35,
+  "amplitudeDeg": 288.0,
+  "liftAngleDeg": 51,
+  "liftTimeMs": 3.8,
+  "rateValid": true,
+  "beatErrorValid": true,
+  "amplitudeValid": true,
+  "instant": {
+    "rateSDay": 4.2,
+    "beatErrorMs": 0.35,
+    "amplitudeDeg": 288.0,
+    "samples": 1,
+    "rateValid": true,
+    "beatErrorValid": true,
+    "amplitudeValid": true
+  },
+  "avg1s": {
+    "rateSDay": 3.9,
+    "beatErrorMs": 0.32,
+    "amplitudeDeg": 286.5,
+    "samples": 8,
+    "rateValid": true,
+    "beatErrorValid": true,
+    "amplitudeValid": true
+  },
+  "avg10s": {
+    "rateSDay": 3.7,
+    "beatErrorMs": 0.30,
+    "amplitudeDeg": 285.0,
+    "samples": 72,
+    "rateValid": true,
+    "beatErrorValid": true,
+    "amplitudeValid": true
+  }
 }
 ```
 
@@ -419,8 +478,11 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
 {
   "startSample": "1000",
   "peakSample": "1100",
+  "unlockSample": "1020",
+  "dropSample": "1100",
   "durationSamples": 200,
   "riseSamples": 100,
+  "liftSamples": 80,
   "peakAbs": 0.5,
   "noiseFloor": 0.0001,
   "snrDb": 74.0,

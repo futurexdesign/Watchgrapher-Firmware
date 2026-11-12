@@ -1,5 +1,12 @@
 # CHANGELOG — PCM1808 backend
 
+## Pico 2 PCB pin map (2026-11-08)
+
+- `pico2_pcm1808`: MCLK GP21, LRCK GP20, DOUT GP19, BCK GP18 (header 27/26/25/24) — no-cross wiring.
+- Board-specific PIO blobs: `pcm1808_i2s_pico2.pio.h` vs `pcm1808_i2s_legacy.pio.h` (Kiwi unchanged GP2/3/4).
+- PIO template moved to `scripts/pcm1808_i2s.pio.in` (not under `src/`, so PlatformIO won’t auto-pioasm placeholders).
+- Regen: `python3 scripts/gen_pcm1808_pio.py`.
+
 ## Added
 
 - `PCM1808` audio source (`AUDIO_SOURCE=3`) with PlatformIO envs `pico_pcm1808` (RP2040 Pico @ 150 MHz), `pico2_pcm1808`, and `kiwi_pcm1808`.

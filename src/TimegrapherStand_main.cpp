@@ -11,6 +11,7 @@
 #include "diagnostics.h"
 #include "dsp_graph.h"
 #include "hid_control.h"
+#include "perf_timing.h"
 #include "power_control.h"
 #include "serial_cli.h"
 #include "usb_audio.h"
@@ -52,12 +53,15 @@ void setup() {
    * Re-assert PCM1808 pre-upsample timing if that backend is active.
    */
 #if AUDIO_SOURCE == PCM1808
-  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ / (uint32_t)PCM1808_OUTPUT_UPSAMPLE);
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ /
+                            static_cast<uint32_t>(PCM1808_OUTPUT_UPSAMPLE));
 #endif
   led_set(true);
 }
 
 void loop() {
+  const uint32_t t0 = time_us_32();
+
   TinyUSBDevice.task();
   audio_source_process();
   usb_audio_task();
@@ -75,6 +79,7 @@ void loop() {
       on = false;
       led_set(false);
     }
+    perf_timing_note_loop(time_us_32() - t0);
     return;
   }
 
@@ -90,4 +95,5 @@ void loop() {
     led_set(on);
   }
 #endif
+  perf_timing_note_loop(time_us_32() - t0);
 }

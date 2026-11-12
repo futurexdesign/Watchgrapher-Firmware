@@ -11,9 +11,10 @@
 #include "control_api.h"
 
 #include "dsp_graph.h"
+#include "perf_timing.h"
 
-#include <ctype.h>
-#include <string.h>
+#include <cctype>
+#include <cstring>
 
 /**
  * Case-insensitive C-string equality (ASCII).
@@ -24,7 +25,8 @@ static bool name_eq(const char *a, const char *b) {
     return false;
   }
   while (*a && *b) {
-    if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+    if (tolower(static_cast<unsigned char>(*a)) !=
+        tolower(static_cast<unsigned char>(*b))) {
       return false;
     }
     a++;
@@ -33,7 +35,10 @@ static bool name_eq(const char *a, const char *b) {
   return *a == *b;
 }
 
-void control_api_init(void) { dsp_graph_init(); }
+void control_api_init(void) {
+  dsp_graph_init();
+  perf_timing_init();
+}
 
 void control_api_watchdog_poll(void) { dsp_graph_watchdog_poll(); }
 
@@ -90,9 +95,9 @@ dsp_block_id_t control_api_block_from_name(const char *name) {
   if (!name) {
     return DSP_BLOCK_COUNT;
   }
-  for (int i = 0; i < (int)DSP_BLOCK_COUNT; i++) {
-    if (name_eq(name, control_api_block_name((dsp_block_id_t)i))) {
-      return (dsp_block_id_t)i;
+  for (int i = 0; i < static_cast<int>(DSP_BLOCK_COUNT); i++) {
+    if (name_eq(name, control_api_block_name(static_cast<dsp_block_id_t>(i)))) {
+      return static_cast<dsp_block_id_t>(i);
     }
   }
   /* Short aliases for CLI convenience. */
@@ -138,6 +143,10 @@ bool control_api_get_param(dsp_block_id_t id, const char *param, float *out) {
 }
 
 void control_api_get_metrics(dsp_metrics_t *out) { dsp_graph_get_metrics(out); }
+
+void control_api_get_timing(dsp_timing_t *out) { perf_timing_get(out); }
+
+void control_api_reset_timing(void) { perf_timing_reset(); }
 
 void control_api_get_beat_rate(dsp_beat_rate_t *out) {
   dsp_graph_get_beat(out);

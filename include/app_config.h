@@ -47,9 +47,9 @@
 #error "ADC_OVERSAMPLE must be >= 1"
 #endif
 #define APP_ADC_RAW_RATE_HZ \
-  (APP_SAMPLE_RATE_HZ * (uint32_t)ADC_OVERSAMPLE)
+  (APP_SAMPLE_RATE_HZ * static_cast<uint32_t>(ADC_OVERSAMPLE))
 #define APP_ADC_DMA_BUF_RAW_SAMPLES \
-  (APP_ADC_DMA_BUF_SAMPLES * (uint32_t)ADC_OVERSAMPLE)
+  (APP_ADC_DMA_BUF_SAMPLES * static_cast<uint32_t>(ADC_OVERSAMPLE))
 
 /** PCM1808 DMA: 240 stereo frames × 2 slots = 480 uint32 words / 5 ms block. */
 #define APP_PCM1808_DMA_FRAMES      240u

@@ -90,8 +90,11 @@ typedef enum {
 typedef struct {
   uint64_t start_sample; /**< Source index at window open (includes pre-roll). */
   uint64_t peak_sample;  /**< Source index of peak |sample| in the window. */
+  uint64_t unlock_sample; /**< First pulse (unlock); used for rate / beat error. */
+  uint64_t drop_sample;   /**< Loudest pulse (drop); used for amplitude lift. */
   uint32_t duration_samples;
   uint32_t rise_samples; /**< Samples from onset to peak. */
+  uint32_t lift_samples; /**< drop - unlock when both valid; else 0. */
   float peak_abs;        /**< Peak magnitude in float full-scale (~[-1,1]). */
   float noise_floor;     /**< Noise EMA at close time. */
   float snr_db;          /**< 20*log10(peak / noise). */
@@ -100,18 +103,49 @@ typedef struct {
 } dsp_event_t;
 
 /**
- * Escapement beat-rate estimate derived from inter-event peak intervals.
- * Updated when enough recent intervals exist and beat_rate is enabled.
+ * One timing view: instant snapshot or a rolling time-average window.
+ * Invalid metrics are zeroed with the matching {@code *_valid} flag false.
  */
 typedef struct {
-  float vph_raw;             /**< Vibrations per hour from median interval. */
-  uint32_t vph_nearest;      /**< Nearest common rate, or 0 if unlocked. */
-  float confidence;          /**< 0..1 proximity to nearest common rate. */
-  bool locked;               /**< True when within tolerance of a common rate. */
-  uint32_t interval_samples; /**< Median inter-peak interval in source samples. */
+  float rate_s_day;    /**< Daily rate deviation (s/d). */
+  float beat_error_ms; /**< Beat error / repère (ms). */
+  float amplitude_deg; /**< Balance amplitude (degrees). */
+  uint32_t samples;    /**< Instant: 0/1. Rolling: count contributing ticks. */
+  bool rate_valid;
+  bool beat_error_valid;
+  bool amplitude_valid;
+} dsp_beat_timing_window_t;
+
+/**
+ * Escapement timing estimate from unlock-based intervals (Witschi-style).
+ * Updated when enough recent intervals exist and beat_rate is enabled.
+ *
+ * Top-level rate/beat-error/amplitude fields are the <em>instant</em> view
+ * (last computed tick set). {@code avg_1s} / {@code avg_10s} are arithmetic
+ * means of those instant values over rolling wall-clock windows.
+ */
+typedef struct {
+  float vph_raw;             /**< Vibrations per hour from median half-interval. */
+  uint32_t vph_nearest;      /**< Nominal A/h when locked (auto or manual), else 0. */
+  float confidence;          /**< 0..1 proximity to nominal rate. */
+  bool locked;               /**< True when within tolerance of a nominal rate. */
+  uint32_t interval_samples; /**< Median unlock-to-unlock half-interval (samples). */
   uint32_t events_seen;      /**< Events currently held in the event log. */
-  uint32_t intervals_held;   /**< Accepted inter-peak intervals in beat history. */
-  uint32_t source_hz;        /**< Analysis sample rate used for vph math. */
+  uint32_t intervals_held;   /**< Accepted half-intervals in beat history. */
+  uint32_t source_hz;        /**< Analysis sample rate used for timing math. */
+
+  float rate_s_day;     /**< Instant daily rate (s/d); alias of instant.rate_s_day. */
+  float beat_error_ms;  /**< Instant beat error (ms). */
+  float amplitude_deg;  /**< Instant amplitude (degrees). */
+  float lift_angle_deg; /**< Configured lift angle λ used for amplitude. */
+  float lift_time_ms;   /**< Latest unlock→drop lift time (ms). */
+  bool rate_valid;
+  bool beat_error_valid;
+  bool amplitude_valid;
+
+  dsp_beat_timing_window_t instant; /**< Last computed tick set (same as top-level). */
+  dsp_beat_timing_window_t avg_1s;  /**< Rolling ~1 s mean of instant values. */
+  dsp_beat_timing_window_t avg_10s; /**< Rolling ~10 s mean of instant values. */
 } dsp_beat_rate_t;
 
 /**
@@ -129,6 +163,32 @@ typedef struct {
   uint32_t clip_count;    /**< Hard clamps at PCM24 full scale. */
   uint32_t limiter_count; /**< Soft clamps at ±1.0 in the limiter block. */
 } dsp_metrics_t;
+
+/**
+ * Core-0 CPU / DSP timing snapshot for headroom diagnostics.
+ * Block stats update on each {@code dsp_graph_process}; loop stats on each
+ * main {@code loop()} pass. Continuity counters are copied from diagnostics.
+ */
+typedef struct {
+  uint32_t dsp_block_us_last;
+  uint32_t dsp_block_us_mean;   /**< EMA of block wall time. */
+  uint32_t dsp_block_us_max;    /**< Max since last timing reset / window clear. */
+  uint32_t dsp_block_samples;   /**< Sample count of last process call. */
+  uint32_t dsp_block_budget_us; /**< n * 1e6 / source_hz for last block. */
+  uint32_t dsp_blocks;          /**< Process calls since reset. */
+
+  uint32_t loop_us_last;
+  uint32_t loop_us_mean; /**< EMA of main-loop wall time. */
+  uint32_t loop_us_max;
+  uint32_t loop_count;   /**< Loop iterations since reset. */
+  uint32_t idle_us_per_s; /**< Approx idle µs in the last completed 1 s window. */
+  uint8_t loop_busy_pct;  /**< 0..100 over the last completed 1 s window. */
+
+  uint32_t underruns;    /**< {@code pcm_ring_underrun_count} snapshot. */
+  uint32_t short_writes; /**< {@code usb_short_write_count} snapshot. */
+  uint32_t ring_min;     /**< Current diag window ring min occupancy. */
+  uint32_t ring_max;     /**< Current diag window ring max occupancy. */
+} dsp_timing_t;
 
 /** Last 512-point real-FFT peak list ({@link DSP_BLOCK_SPECTRUM}). */
 typedef struct {

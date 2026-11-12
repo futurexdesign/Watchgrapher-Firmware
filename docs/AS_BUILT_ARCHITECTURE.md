@@ -58,7 +58,7 @@ Three compile-time audio sources (`-DAUDIO_SOURCE=…`):
 
 Kiwi upload/debug: `picoprobe`. Status LED: **GPIO 25** on Pico 2 and Kiwi.
 
-PCM1808 default pins (overridable via `-D`): MCLK **GP21**, BCK **GP2**, LRCK **GP3**, DOUT **GP4**. See [`PCM1808_WIRING_AND_CLOCKS.md`](PCM1808_WIRING_AND_CLOCKS.md).
+PCM1808 pins: **Pico 2 PCB** MCLK **GP21**, LRCK **GP20**, DOUT **GP19**, BCK **GP18**; **Kiwi / legacy** MCLK **GP21**, BCK **GP2**, LRCK **GP3**, DOUT **GP4**. PIO wait immediates are board-baked (`pcm1808_i2s_pico2` vs `pcm1808_i2s_legacy`). See [`PCM1808_WIRING_AND_CLOCKS.md`](PCM1808_WIRING_AND_CLOCKS.md).
 
 ### 2.3 TinyUSB config mechanism
 
@@ -85,7 +85,7 @@ timegrapher-stand/
     audio_source.h            # stream FSM
     adc_capture.h / pcm1808_*.h / pcm1808_format.h
     usb_audio.h / diagnostics.h / power_control.h
-    dsp_types.h / dsp_graph.h / control_api.h
+    dsp_types.h / dsp_graph.h / control_api.h / perf_timing.h
     serial_cli.h / cli/*.h
     dsp_cmsis_smoke.h
   src/
@@ -95,8 +95,9 @@ timegrapher-stand/
     audio_source.cpp          # FSM + ADC / PCM1808 / SYNTHETIC
     audio_ring.cpp
     adc_capture.cpp
-    pcm1808_capture.cpp / pcm1808_clock.cpp / pcm1808_i2s.pio(.h)
-    dsp_graph.cpp / control_api.cpp / dsp_cmsis_smoke.cpp
+    pcm1808_capture.cpp / pcm1808_clock.cpp
+    # PIO: scripts/pcm1808_i2s.pio.in → include/pcm1808_i2s_{pico2,legacy}.pio.h
+    dsp_graph.cpp / control_api.cpp / perf_timing.cpp / dsp_cmsis_smoke.cpp
     serial_cli.cpp / cli/cli_core.cpp / cli/cli_commands.cpp
     diagnostics.cpp / power_control.cpp
   third_party/CMSIS-DSP/      # vendored CMSIS-DSP sources
@@ -265,7 +266,7 @@ Wire packing (int32 → 3 LE bytes) happens only in the USB feeder, not in the r
 
 | Item | As built |
 |---|---|
-| Mode | Codec master I²S; MCU generates **MCLK ~12.288 MHz** on GP21 (`clock_gpio_init_int_frac16`, assumes **150 MHz** `clk_sys`) |
+| Mode | Codec master I²S; MCU generates **MCLK ~12.288 MHz** on GP21 (`clock_gpio_init_int_frac16`, assumes **150 MHz** `clk_sys`). Pico 2 I²S: BCK GP18 / DOUT GP19 / LRCK GP20 |
 | Capture | PIO RX SM + single DMA channel ping-pong (IRQ swaps buffers) |
 | Block | 240 stereo frames (480 `uint32` slot words) per DMA buffer |
 | Mono | Left slot only: arithmetic `>> 8` → sign-extended 24-bit |
@@ -305,7 +306,7 @@ CMSIS-DSP kernels: `arm_power_f32`, `arm_biquad_cascade_df1_*`, `arm_fir_f32`, `
 | `level_meter` | Analysis | on | Pre peak / RMS EMA |
 | `noise_floor` | Analysis | on | EMA of RMS on quiet blocks (feeds detect / gate) |
 | `event_detect` | Analysis | on | Threshold × noise; hysteresis; max 80 ms; min-peak gate |
-| `beat_rate` | Analysis | on | Median inter-peak interval → vph; nearest common rate (14.4k…57.6k) |
+| `beat_rate` | Analysis | on | Unlock intervals → vph, daily rate s/d, beat error ms, amplitude ° |
 | `event_log` | Analysis store | (ring) | Last `DSP_EVENT_LOG_CAP` (32) events (rise/snr/energy) |
 | `notch` | Process | off | Narrow RBJ notch at 50 or 60 Hz |
 | `filter_bank` | Process | off | Cascaded one-pole HPF+LPF presets (wide/medium/narrow) |
@@ -326,7 +327,7 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 - **Noise EMA:** adapts on quiet blocks only (peak below open threshold).
 - **Open event:** `|x| > max(noise×threshold, 4×pre_rms, 1e-3)` (default threshold **6**). Window start = onset − `preroll_ms` (default 25 ms).
 - **Close event:** hysteresis (`0.35×` open thr) for `tail_ms`, or max duration **80 ms**. Reject peaks below `max(open_thr, 0.25×tick_peak_ema)`. Log rise, snr_db, energy, confidence.
-- **Beat rate:** Keep up to 16 inter-peak intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of a common rate in `{14400, 16200, 18000, 19800, 21600, 25200, 28800, 36000, 43200, 57600}`; else `vph_nearest = 0`.
+- **Beat rate:** Keep up to 16 unlock-to-unlock half-intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of nominal A/h (auto common table `{14400…57600}` or manual `vph` param). When locked: TIC/TAC full-period average → instant `rateSDay`; `|T1−T2|/2` → instant `beatErrorMs`; unlock→drop lift time + `liftAngle` (default 51°) → instant `amplitudeDeg` via `A = λ / (2 sin(π f t))`. Instant values are also averaged into rolling **`avg1s`** (~1 s) and **`avg10s`** (~10 s) windows (arithmetic mean, ≥2 samples per metric).
 
 ### 8.4 Continuity watchdog / auto-eject
 
@@ -352,8 +353,9 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 | `cli_commands` | `help`, `version`/`ver`, `status`, `diag`, `dsp …` |
 | `control_api` | Transport-agnostic façade over `dsp_graph` (CDC + HID) |
 | `hid_control` | Vendor HID JSON framer / RPC (WebHID) |
+| `perf_timing` | DSP block + main-loop µs timing / busy% (headroom) |
 
-Useful `dsp` subcommands: `list`, `status`/`bypass`, `on`/`off`/`enable`/`disable`, `get`/`set`, `events`, `beat`/`rate`, `metrics`, `errors` [`clear`], `help` [`block`].
+Useful `dsp` subcommands: `list`, `status`/`bypass`, `on`/`off`/`enable`/`disable`, `get`/`set`, `events`, `beat`/`rate`, `metrics`, `timing`/`cpu` [`reset`], `errors` [`clear`], `help` [`block`].
 
 Formatting stays in the CLI; `control_api` returns structured data only.
 
@@ -371,7 +373,7 @@ Locked model:
 
 - Composite USB keeps UAC2 + CDC; HID is an added vendor interface (Usage Page `0xFFA0`, Usage `0x0001`).
 - JSON UTF-8 over fragmented Input/Output reports (report ID `0x01`); no Feature-report RPC; no audio on HID.
-- JS-facing ops: `hello`, `getState`, `patchState`, `subscribe`, plus one-shot metrics/beat/events/errors.
+- JS-facing ops: `hello`, `getState`, `patchState`, `subscribe`, plus one-shot metrics/timing/beat/events/errors.
 - Firmware HID codec (when implemented) calls **`control_api` only**, same as the CLI.
 
 Firmware: `CFG_TUD_HID=1`, Usage Page `0xFFA0` / Usage `0x0001` / Report ID `0x01`. Smoke UI: [`hid/example.html`](hid/example.html) (localhost/HTTPS + user gesture).
@@ -397,7 +399,9 @@ Firmware: `CFG_TUD_HID=1`, Usage Page `0xFFA0` / Usage `0x0001` / Report ID `0x0
 
 USB enum/open/close/suspend/resume; boost/preamp settle; ADC window stats; DMA/ring/USB packet stats; PCM1808 clock/DMA/stall/saturation peaks. See `diag_counters_t`.
 
-Periodic print ~every **2 s** when `DIAG_CDC=1` (default) and/or `DIAG_UART=1`. Windowed ADC/ring extrema clear after each line.
+CPU headroom lives in [`perf_timing`](../include/perf_timing.h) / `dsp_timing_t`: wall time of each `dsp_graph_process` vs block budget, plus main-loop busy% over 1 s. Exposed via `dsp timing`, HID `getTiming` / `subscribe.timingHz`, and appended on the periodic diag line (`dsp_us=last/mean/max bud=… busy=…%`).
+
+Periodic print ~every **2 s** when `DIAG_CDC=1` (default) and/or `DIAG_UART=1`. Windowed ADC/ring extrema and timing maxima clear after each line.
 
 ### 11.2 Status LED (GPIO 25)
 

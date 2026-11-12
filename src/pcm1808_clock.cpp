@@ -23,7 +23,7 @@ static bool g_ok;
 static uint32_t g_ready_ms;
 
 bool pcm1808_clock_start(void) {
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
 
   uint32_t sys_hz = clock_get_hz(clk_sys);
   uint32_t usb_hz = clock_get_hz(clk_usb);
@@ -46,7 +46,7 @@ bool pcm1808_clock_start(void) {
    * 150e6 / 12.20703125 ≈ 12.288000 MHz average. Edge jitter is expected.
    */
   clock_gpio_init_int_frac16(
-      (uint)PCM1808_MCLK_GPIO,
+      static_cast<uint>(PCM1808_MCLK_GPIO),
       CLOCKS_CLK_GPOUT0_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
       12u,
       0x3500u);
@@ -62,8 +62,8 @@ void pcm1808_clock_stop(void) {
     return;
   }
   clock_stop(clk_gpout0);
-  gpio_set_function((uint)PCM1808_MCLK_GPIO, GPIO_FUNC_SIO);
-  gpio_set_dir((uint)PCM1808_MCLK_GPIO, GPIO_IN);
+  gpio_set_function(static_cast<uint>(PCM1808_MCLK_GPIO), GPIO_FUNC_SIO);
+  gpio_set_dir(static_cast<uint>(PCM1808_MCLK_GPIO), GPIO_IN);
   g_started = false;
 }
 

@@ -13,7 +13,7 @@
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
-#include <string.h>
+#include <cstring>
 
 /**
  * Adafruit_USBD_Interface that injects TinyUSB's UAC2 mono mic descriptor

@@ -2,30 +2,409 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Timegrapher HID smoke</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timegrapher WebHID Control</title>
   <style>
-    body { font-family: ui-monospace, Menlo, monospace; margin: 1.5rem; max-width: 52rem; }
-    button { margin: 0.25rem 0.25rem 0.25rem 0; padding: 0.4rem 0.7rem; }
-    pre { background: #111; color: #ddd; padding: 0.75rem; overflow: auto; min-height: 12rem; }
-    .row { margin: 0.75rem 0; }
+    :root {
+      --bg: #0f1216;
+      --panel: #171b22;
+      --panel2: #1e2430;
+      --border: #2a3340;
+      --text: #e6ebf2;
+      --muted: #8b97a8;
+      --accent: #3d9a78;
+      --accent2: #c4a35a;
+      --danger: #c45c5c;
+      --ok: #5cad6e;
+      --mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+      --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background: radial-gradient(1200px 600px at 10% -10%, #1a2433 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 18, 22, 0.9);
+      position: sticky; top: 0; z-index: 5;
+      backdrop-filter: blur(8px);
+    }
+    header h1 { margin: 0; font-size: 1.05rem; letter-spacing: 0.02em; font-weight: 600; }
+    header .meta { color: var(--muted); font-size: 0.8rem; font-family: var(--mono); }
+    .dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.35rem; background: var(--danger); }
+    .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(92, 173, 110, 0.2); }
+    main {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 1rem 1.25rem 2rem;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .top-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .body-row {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 1rem;
+    }
+    @media (max-width: 980px) {
+      .top-row, .body-row { grid-template-columns: 1fr; }
+    }
+    .beat-hero .kv div { padding: 0.35rem 0; }
+    .beat-hero .vph {
+      font-family: var(--mono);
+      font-size: 1.65rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      margin: 0.15rem 0 0.55rem;
+    }
+    .beat-hero .vph .nearest { color: var(--muted); font-size: 0.95rem; font-weight: 500; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+    }
+    .panel h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+    button, .btn {
+      font: inherit; font-size: 0.82rem;
+      padding: 0.4rem 0.65rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #04140e; font-weight: 600; }
+    button.warn { border-color: var(--accent2); color: var(--accent2); }
+    button.danger { border-color: var(--danger); color: #f0b4b4; }
+    .stack { display: flex; flex-direction: column; gap: 1rem; }
+    .grid-blocks {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 0.6rem;
+    }
+    .block {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 0.65rem 0.7rem;
+    }
+    .block.on { border-color: rgba(61, 154, 120, 0.55); }
+    .block.process { border-left: 3px solid var(--accent2); }
+    .block.analysis { border-left: 3px solid var(--accent); }
+    .block-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+      margin-bottom: 0.45rem;
+    }
+    .block-name { font-family: var(--mono); font-size: 0.82rem; }
+    .tag {
+      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); border: 1px solid var(--border); padding: 0.1rem 0.35rem; border-radius: 999px;
+    }
+    label.toggle {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.75rem; color: var(--muted); cursor: pointer; user-select: none;
+    }
+    .params { display: grid; gap: 0.35rem; }
+    .param {
+      display: grid; grid-template-columns: 1fr auto; gap: 0.35rem; align-items: center;
+      font-size: 0.75rem; color: var(--muted);
+    }
+    .param input, .param select {
+      width: 5.5rem; font: inherit; font-family: var(--mono); font-size: 0.75rem;
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 4px; padding: 0.2rem 0.35rem;
+    }
+    .kv {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem 0.75rem;
+      font-family: var(--mono); font-size: 0.75rem;
+    }
+    .kv div { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.2rem 0; border-bottom: 1px dashed rgba(42,51,64,0.7); }
+    .kv span:first-child { color: var(--muted); }
+    .kv .warn { color: var(--accent2); }
+    .kv .bad { color: var(--danger); }
+    .kv .good { color: var(--ok); }
+    table {
+      width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.7rem;
+    }
+    th, td { text-align: left; padding: 0.28rem 0.35rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    .scroll { max-height: 12rem; overflow: auto; }
+    #log {
+      margin: 0; min-height: 10rem; max-height: 18rem; overflow: auto;
+      background: #0a0c10; color: #c5ced9; border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.6rem; font-family: var(--mono); font-size: 0.7rem;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .sub-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.5rem; margin-bottom: 0.6rem;
+    }
+    .sub-grid label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.72rem; color: var(--muted); }
+    .sub-grid input[type="number"] {
+      font-family: var(--mono); background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.4rem;
+    }
+    .bypass-row {
+      display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center;
+      margin-bottom: 0.75rem; padding: 0.55rem 0.65rem;
+      background: var(--panel2); border-radius: 6px; border: 1px solid var(--border);
+    }
+    .hint { color: var(--muted); font-size: 0.75rem; margin: 0.35rem 0 0; }
+    .tabs { display: flex; gap: 0.25rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+    .tabs button.active { background: var(--accent); border-color: var(--accent); color: #04140e; font-weight: 600; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>Timegrapher WebHID</h1>
-  <p>Usage Page <code>0xFFA0</code> / Usage <code>0x0001</code>. Serve via localhost or HTTPS.</p>
-  <div class="row">
-    <button id="connect">Connect</button>
-    <button id="hello" disabled>hello</button>
-    <button id="state" disabled>getState</button>
-    <button id="patch" disabled>patch +6 dB / notch 60</button>
-    <button id="sub" disabled>subscribe</button>
-  </div>
-  <pre id="log"></pre>
+  <header>
+    <div>
+      <h1>Timegrapher WebHID</h1>
+      <div class="meta">Usage Page 0xFFA0 · Usage 0x0001 · localhost / HTTPS</div>
+    </div>
+    <div class="toolbar">
+      <span id="connLabel"><span class="dot" id="connDot"></span>disconnected</span>
+      <button id="btnConnect" class="primary">Connect</button>
+      <button id="btnDisconnect" disabled>Disconnect</button>
+      <button id="btnHello" disabled>hello</button>
+      <button id="btnPing" disabled>ping</button>
+      <button id="btnRefresh" disabled>Refresh all</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="top-row">
+      <section class="panel">
+        <h2>Device</h2>
+        <div class="kv" id="deviceKv">
+          <div><span>fw</span><span id="dFw">—</span></div>
+          <div><span>board</span><span id="dBoard">—</span></div>
+          <div><span>source</span><span id="dSource">—</span></div>
+          <div><span>vid:pid</span><span id="dVidPid">—</span></div>
+          <div><span>uptime</span><span id="dUptime">—</span></div>
+          <div><span>caps</span><span id="dCaps">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel beat-hero">
+        <h2>Beat / timing</h2>
+        <div class="toolbar" style="margin-bottom:0.45rem">
+          <button id="btnBeat" disabled>getBeat</button>
+        </div>
+        <div class="vph" id="beatVph">— <span class="nearest" id="beatNearest"></span></div>
+        <div class="kv" id="beatKv"></div>
+      </section>
+    </div>
+
+    <div class="body-row">
+    <div class="stack">
+      <section class="panel">
+        <h2>DSP state</h2>
+        <div class="bypass-row">
+          <label class="toggle">
+            <input type="checkbox" id="bypassChk" disabled />
+            Master bypass (process path off when checked)
+          </label>
+          <button id="btnBypassOn" disabled>Bypass on</button>
+          <button id="btnBypassOff" disabled>Bypass off</button>
+          <button id="btnRefreshState" disabled>getState</button>
+        </div>
+        <div class="toolbar" style="margin-bottom:0.65rem">
+          <button id="presetSafe" disabled class="warn">Preset: analysis only</button>
+          <button id="presetTiming" disabled>Preset: timing soak</button>
+          <button id="presetOffProcess" disabled>All process off</button>
+        </div>
+        <p class="hint">Green edge = analysis · gold edge = process. Enabling process clears bypass.</p>
+        <div class="grid-blocks" id="blocks"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Live telemetry</h2>
+        <div class="tabs">
+          <button type="button" class="active" data-tab="metrics">Metrics</button>
+          <button type="button" data-tab="timing">Timing / CPU</button>
+          <button type="button" data-tab="spectrum">Spectrum</button>
+          <button type="button" data-tab="matched">Matched</button>
+        </div>
+        <div id="tab-metrics">
+          <div class="toolbar" style="margin-bottom:0.5rem">
+            <button id="btnMetrics" disabled>getMetrics</button>
+          </div>
+          <div class="kv" id="metricsKv"></div>
+        </div>
+        <div id="tab-timing" class="hidden">
+          <div class="toolbar" style="margin-bottom:0.5rem">
+            <button id="btnTiming" disabled>getTiming</button>
+            <button id="btnResetTiming" disabled>resetTiming</button>
+          </div>
+          <div class="kv" id="timingKv"></div>
+        </div>
+        <div id="tab-spectrum" class="hidden">
+          <div class="toolbar" style="margin-bottom:0.5rem">
+            <button id="btnSpectrum" disabled>getSpectrum</button>
+          </div>
+          <p class="hint">Heavy on-device FFT — leave off during watch timing unless sniffing interference.</p>
+          <div class="scroll"><table><thead><tr><th>#</th><th>Hz</th><th>mag</th></tr></thead><tbody id="spectrumBody"></tbody></table></div>
+        </div>
+        <div id="tab-matched" class="hidden">
+          <div class="toolbar" style="margin-bottom:0.5rem">
+            <button id="btnMatched" disabled>getMatched</button>
+          </div>
+          <div class="kv" id="matchedKv"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <h2>Subscribe (push)</h2>
+        <div class="sub-grid">
+          <label>metricsHz <input type="number" id="subMetrics" min="0" max="20" value="5" /></label>
+          <label>beatHz <input type="number" id="subBeat" min="0" max="5" value="1" /></label>
+          <label>timingHz <input type="number" id="subTiming" min="0" max="5" value="1" /></label>
+          <label>events <select id="subEvents"><option value="1" selected>on</option><option value="0">off</option></select></label>
+          <label>errors <select id="subErrors"><option value="1" selected>on</option><option value="0">off</option></select></label>
+        </div>
+        <div class="toolbar">
+          <button id="btnSub" disabled class="primary">Apply subscribe</button>
+          <button id="btnSubOff" disabled>All push off</button>
+        </div>
+        <p class="hint" id="subStatus">subscription: idle</p>
+      </section>
+
+      <section class="panel">
+        <h2>Events</h2>
+        <div class="toolbar" style="margin-bottom:0.5rem">
+          <button id="btnEvents" disabled>getEvents</button>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>peak</th><th>dur</th><th>snr</th><th>energy</th><th>conf</th></tr></thead>
+            <tbody id="eventsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Errors / faults</h2>
+        <div class="toolbar" style="margin-bottom:0.5rem">
+          <button id="btnErrors" disabled>getErrors</button>
+          <button id="btnClearErrors" disabled class="danger">clearErrors</button>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>block</th><th>reason</th><th>t_ms</th><th>sample</th></tr></thead>
+            <tbody id="errorsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <div class="toolbar" style="margin-bottom:0.5rem">
+          <button id="btnClearLog">Clear</button>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </div>
+    </div>
+  </main>
+
   <script>
 const USAGE_PAGE = 0xffa0, USAGE = 0x0001, REPORT_ID = 0x01;
 const FLAG_MORE = 0x01, MAX_CHUNK = 58, MAX_JSON = 2048;
+
+const PROCESS_BLOCKS = new Set(['gain', 'limiter', 'filterBank', 'softGate', 'notch', 'agc', 'firBank']);
+const BLOCK_META = {
+  levelMeter: { label: 'levelMeter', kind: 'analysis', params: [] },
+  noiseFloor: { label: 'noiseFloor', kind: 'analysis', params: [] },
+  eventDetect: {
+    label: 'eventDetect', kind: 'analysis',
+    params: [
+      { key: 'threshold', type: 'number', step: 0.5 },
+      { key: 'prerollMs', type: 'number', step: 1 },
+      { key: 'tailMs', type: 'number', step: 1 },
+    ],
+  },
+  beatRate: {
+    label: 'beatRate',
+    kind: 'analysis',
+    params: [
+      { key: 'liftAngle', type: 'number', step: 1, min: 10, max: 90 },
+      { key: 'vph', type: 'number', step: 100, min: 0 },
+    ],
+  },
+  eventLog: { label: 'eventLog', kind: 'analysis', params: [] },
+  matchedFilter: {
+    label: 'matchedFilter', kind: 'analysis',
+    params: [
+      { key: 'threshold', type: 'number', step: 0.05 },
+      { key: 'learn', type: 'number', step: 1, min: 0, max: 1 },
+    ],
+  },
+  spectrum: {
+    label: 'spectrum', kind: 'analysis',
+    params: [{ key: 'stride', type: 'number', step: 1, min: 1 }],
+  },
+  gain: { label: 'gain', kind: 'process', params: [{ key: 'db', type: 'number', step: 0.5 }] },
+  limiter: { label: 'limiter', kind: 'process', params: [] },
+  filterBank: {
+    label: 'filterBank', kind: 'process',
+    params: [{ key: 'preset', type: 'select', options: [['0', 'off'], ['1', 'wide'], ['2', 'med'], ['3', 'narrow']] }],
+  },
+  firBank: {
+    label: 'firBank', kind: 'process',
+    params: [{ key: 'preset', type: 'select', options: [['0', 'off'], ['1', 'wide'], ['2', 'med'], ['3', 'narrow']] }],
+  },
+  softGate: {
+    label: 'softGate', kind: 'process',
+    params: [
+      { key: 'floorDb', type: 'number', step: 1 },
+      { key: 'attackMs', type: 'number', step: 0.5 },
+      { key: 'releaseMs', type: 'number', step: 1 },
+    ],
+  },
+  notch: {
+    label: 'notch', kind: 'process',
+    params: [{ key: 'hz', type: 'select', options: [['50', '50 Hz'], ['60', '60 Hz']] }],
+  },
+  agc: {
+    label: 'agc', kind: 'process',
+    params: [
+      { key: 'target', type: 'number', step: 0.05 },
+      { key: 'tauS', type: 'number', step: 0.1 },
+    ],
+  },
+};
+
 const logEl = document.getElementById('log');
-function log(...a) { logEl.textContent += a.map(String).join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function log(...a) {
+  const t = new Date().toISOString().slice(11, 19);
+  logEl.textContent += `[${t}] ` + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
 
 class HidFramer {
   constructor() { this._txSeq = 0; this._rx = null; this.onMessage = null; }
@@ -36,7 +415,7 @@ class HidFramer {
     const seq = (this._txSeq++) & 0xff;
     const reports = [];
     for (let i = 0; i < fragCount; i++) {
-      const chunk = text.subarray(i * MAX_CHUNK, i * MAX_CHUNK + MAX_CHUNK);
+      const chunk = text.subarray(i * MAX_CHUNK, Math.min(text.length, (i + 1) * MAX_CHUNK));
       const buf = new Uint8Array(5 + chunk.length);
       buf[0] = i + 1 < fragCount ? FLAG_MORE : 0;
       buf[1] = seq; buf[2] = i; buf[3] = fragCount; buf[4] = chunk.length;
@@ -58,82 +437,535 @@ class HidFramer {
     const out = new Uint8Array(total); let o = 0;
     for (const p of this._rx.parts) { out.set(p, o); o += p.byteLength; }
     this._rx = null;
-    const obj = JSON.parse(new TextDecoder().decode(out));
+    let obj;
+    try { obj = JSON.parse(new TextDecoder().decode(out)); }
+    catch (e) { log('parse error', e.message); return; }
     if (this.onMessage) this.onMessage(obj);
   }
 }
 
 class Client {
   constructor(device) {
-    this.device = device; this.framer = new HidFramer(); this._pending = new Map(); this._nextId = 1;
+    this.device = device;
+    this.framer = new HidFramer();
+    this._pending = new Map();
+    this._nextId = 1;
     this.onNotify = null;
     this.framer.onMessage = (msg) => {
       if (msg.notify) { if (this.onNotify) this.onNotify(msg); return; }
-      const p = this._pending.get(msg.id); if (!p) return;
+      const p = this._pending.get(msg.id);
+      if (!p) return;
       this._pending.delete(msg.id);
-      if (msg.ok) p.resolve(msg.result); else p.reject(msg.error || msg);
+      if (msg.ok) p.resolve(msg.result);
+      else p.reject(Object.assign(new Error(msg.error?.message || 'rpc error'), msg.error || {}));
     };
-    device.addEventListener('inputreport', (ev) => {
+    this._onInput = (ev) => {
       if (ev.reportId !== REPORT_ID) return;
       this.framer.push(ev.data);
-    });
+    };
+    device.addEventListener('inputreport', this._onInput);
   }
-  async request(op, extra = {}) {
+  async request(op, extra = {}, timeoutMs = 4000) {
     const id = this._nextId++;
     const body = { v: 1, id, op, ...extra };
     const result = new Promise((resolve, reject) => {
       this._pending.set(id, { resolve, reject });
-      setTimeout(() => { if (this._pending.has(id)) { this._pending.delete(id); reject(new Error('timeout')); } }, 3000);
+      setTimeout(() => {
+        if (this._pending.has(id)) {
+          this._pending.delete(id);
+          reject(new Error('timeout'));
+        }
+      }, timeoutMs);
     });
     for (const r of this.framer.encode(body)) await this.device.sendReport(REPORT_ID, r);
     return result;
   }
+  dispose() {
+    try { this.device.removeEventListener('inputreport', this._onInput); } catch (_) {}
+    for (const [, p] of this._pending) p.reject(new Error('disconnected'));
+    this._pending.clear();
+  }
 }
 
 let client = null;
-function setEnabled(on) {
-  for (const id of ['hello', 'state', 'patch', 'sub']) document.getElementById(id).disabled = !on;
+let state = { bypass: true, blocks: {} };
+let caps = null;
+
+const needConn = [
+  'btnDisconnect', 'btnHello', 'btnPing', 'btnRefresh', 'btnBypassOn', 'btnBypassOff',
+  'btnRefreshState', 'bypassChk', 'presetSafe', 'presetTiming', 'presetOffProcess',
+  'btnMetrics', 'btnTiming', 'btnResetTiming', 'btnBeat', 'btnSpectrum', 'btnMatched',
+  'btnSub', 'btnSubOff', 'btnEvents', 'btnErrors', 'btnClearErrors',
+];
+
+function setConnected(on) {
+  document.getElementById('connLabel').innerHTML =
+    `<span class="dot${on ? ' on' : ''}" id="connDot"></span>${on ? 'connected' : 'disconnected'}`;
+  document.getElementById('btnConnect').disabled = on;
+  for (const id of needConn) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
+  }
 }
 
-document.getElementById('connect').onclick = async () => {
+function fmt(n, d = 4) {
+  if (n == null || Number.isNaN(n)) return '—';
+  if (typeof n === 'number') return Number.isInteger(n) ? String(n) : n.toFixed(d);
+  return String(n);
+}
+
+function fillKv(el, rows) {
+  el.innerHTML = rows.map(([k, v, cls]) =>
+    `<div><span>${k}</span><span class="${cls || ''}">${v}</span></div>`).join('');
+}
+
+function renderMetrics(m) {
+  if (!m) return;
+  fillKv(document.getElementById('metricsKv'), [
+    ['prePeak', fmt(m.prePeak, 5)],
+    ['postPeak', fmt(m.postPeak, 5)],
+    ['preRms', fmt(m.preRms, 5)],
+    ['postRms', fmt(m.postRms, 5)],
+    ['noiseFloor', fmt(m.noiseFloor, 6)],
+    ['agcGainDb', fmt(m.agcGainDb, 2)],
+    ['matchScore', fmt(m.matchScore, 3)],
+    ['clipCount', fmt(m.clipCount, 0)],
+    ['limiterCount', fmt(m.limiterCount, 0)],
+  ]);
+}
+
+function renderTiming(t) {
+  if (!t) return;
+  const headroom = t.dspBlockBudgetUs > 0
+    ? Math.max(0, Math.round(100 * (1 - t.dspBlockUsMax / t.dspBlockBudgetUs)))
+    : 0;
+  const busyCls = t.loopBusyPct >= 85 ? 'bad' : t.loopBusyPct >= 60 ? 'warn' : 'good';
+  fillKv(document.getElementById('timingKv'), [
+    ['block us last/mean/max', `${t.dspBlockUsLast}/${t.dspBlockUsMean}/${t.dspBlockUsMax}`],
+    ['budget us', fmt(t.dspBlockBudgetUs, 0)],
+    ['headroom (vs max)', `${headroom}%`, headroom < 20 ? 'bad' : 'good'],
+    ['blocks', fmt(t.dspBlocks, 0)],
+    ['loop busy %', `${t.loopBusyPct}%`, busyCls],
+    ['loop us max', fmt(t.loopUsMax, 0)],
+    ['idle us/s', fmt(t.idleUsPerS, 0)],
+    ['underruns', fmt(t.underruns, 0), t.underruns ? 'bad' : 'good'],
+    ['shortWrites', fmt(t.shortWrites, 0), t.shortWrites ? 'warn' : ''],
+    ['ring min/max', `${t.ringMin}/${t.ringMax}`],
+  ]);
+}
+
+function fmtWindow(w, key) {
+  if (!w) return 'n/a';
+  const validKey = key === 'rateSDay' ? 'rateValid'
+    : key === 'beatErrorMs' ? 'beatErrorValid' : 'amplitudeValid';
+  return w[validKey] ? fmt(w[key], key === 'beatErrorMs' ? 3 : key === 'amplitudeDeg' ? 1 : 2) : 'n/a';
+}
+
+function renderBeat(b) {
+  if (!b) return;
+  const raw = b.vphRaw != null ? fmt(b.vphRaw, 1) : '—';
+  const rateStr = b.rateValid ? `${fmt(b.rateSDay, 1)} s/d` : '—';
+  document.getElementById('beatVph').innerHTML =
+    `${raw} <span class="nearest" id="beatNearest">${b.vphNearest ? `→ ${b.vphNearest}` : ''}</span>` +
+    ` <span class="nearest">${rateStr}</span>`;
+  const inst = b.instant || b;
+  const a1 = b.avg1s;
+  const a10 = b.avg10s;
+  fillKv(document.getElementById('beatKv'), [
+    ['locked', b.locked ? 'yes' : 'no', b.locked ? 'good' : 'warn'],
+    ['rate instant / 1s / 10s',
+      `${fmtWindow(inst, 'rateSDay')} / ${fmtWindow(a1, 'rateSDay')} / ${fmtWindow(a10, 'rateSDay')}`],
+    ['BE instant / 1s / 10s',
+      `${fmtWindow(inst, 'beatErrorMs')} / ${fmtWindow(a1, 'beatErrorMs')} / ${fmtWindow(a10, 'beatErrorMs')}`],
+    ['amp instant / 1s / 10s',
+      `${fmtWindow(inst, 'amplitudeDeg')} / ${fmtWindow(a1, 'amplitudeDeg')} / ${fmtWindow(a10, 'amplitudeDeg')}`],
+    ['avg samples 1s / 10s', `${a1?.samples ?? '—'} / ${a10?.samples ?? '—'}`],
+    ['liftAngleDeg', fmt(b.liftAngleDeg, 1)],
+    ['liftTimeMs', fmt(b.liftTimeMs, 3)],
+    ['confidence', fmt(b.confidence, 3)],
+    ['intervalSamples', fmt(b.intervalSamples, 0)],
+    ['eventsSeen', fmt(b.eventsSeen, 0)],
+    ['intervalsHeld', fmt(b.intervalsHeld, 0)],
+    ['sourceHz', fmt(b.sourceHz, 0)],
+  ]);
+}
+
+function renderMatched(m) {
+  if (!m) return;
+  fillKv(document.getElementById('matchedKv'), [
+    ['score', fmt(m.score, 3)],
+    ['learned', m.learned ? 'yes' : 'no', m.learned ? 'good' : 'warn'],
+    ['templateLen', fmt(m.templateLen, 0)],
+    ['templatePeak', fmt(m.templatePeak, 4)],
+  ]);
+}
+
+function renderSpectrum(s) {
+  const body = document.getElementById('spectrumBody');
+  if (!s || !s.valid) {
+    body.innerHTML = `<tr><td colspan="3">${s ? 'invalid / empty' : '—'}</td></tr>`;
+    return;
+  }
+  body.innerHTML = (s.peaks || []).map((p, i) =>
+    `<tr><td>${i}</td><td>${fmt(p.hz, 1)}</td><td>${fmt(p.mag, 4)}</td></tr>`).join('')
+    || '<tr><td colspan="3">no peaks</td></tr>';
+}
+
+function renderEvents(list) {
+  const body = document.getElementById('eventsBody');
+  const ev = list || [];
+  body.innerHTML = ev.length
+    ? ev.map((e) => `<tr>
+        <td>${e.peakSample}</td><td>${e.durationSamples}</td>
+        <td>${fmt(e.snrDb, 1)}</td><td>${fmt(e.energy, 4)}</td><td>${fmt(e.confidence, 2)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5">none</td></tr>';
+}
+
+function renderErrors(list) {
+  const body = document.getElementById('errorsBody');
+  const err = list || [];
+  body.innerHTML = err.length
+    ? err.map((e) => `<tr>
+        <td>${e.block}</td><td class="bad">${e.reason}</td>
+        <td>${e.uptimeMs}</td><td>${e.sampleIndex}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="4">none</td></tr>';
+}
+
+function renderBlocks() {
+  const root = document.getElementById('blocks');
+  const order = caps?.blocks?.length
+    ? caps.blocks
+    : Object.keys(BLOCK_META);
+  document.getElementById('bypassChk').checked = !!state.bypass;
+
+  root.innerHTML = order.map((key) => {
+    const meta = BLOCK_META[key] || { label: key, kind: PROCESS_BLOCKS.has(key) ? 'process' : 'analysis', params: [] };
+    const blk = state.blocks?.[key] || { enabled: false, params: {} };
+    const params = meta.params.map((p) => {
+      const val = blk.params?.[p.key] ?? '';
+      if (p.type === 'select') {
+        const opts = p.options.map(([v, lab]) =>
+          `<option value="${v}" ${String(val) === String(v) ? 'selected' : ''}>${lab}</option>`).join('');
+        return `<div class="param"><span>${p.key}</span>
+          <select data-block="${key}" data-param="${p.key}">${opts}</select></div>`;
+      }
+      return `<div class="param"><span>${p.key}</span>
+        <input type="number" data-block="${key}" data-param="${p.key}" value="${val}"
+          step="${p.step ?? 1}" ${p.min != null ? `min="${p.min}"` : ''} ${p.max != null ? `max="${p.max}"` : ''} /></div>`;
+    }).join('');
+    const ro = key === 'agc' && blk.params?.gainDb != null
+      ? `<div class="param"><span>gainDb (ro)</span><span>${fmt(blk.params.gainDb, 2)}</span></div>`
+      : (key === 'matchedFilter' && blk.params?.score != null
+        ? `<div class="param"><span>score (ro)</span><span>${fmt(blk.params.score, 3)}</span></div>` : '');
+    return `<div class="block ${meta.kind} ${blk.enabled ? 'on' : ''}" data-key="${key}">
+      <div class="block-head">
+        <span class="block-name">${meta.label}</span>
+        <span class="tag">${meta.kind}</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" data-enable="${key}" ${blk.enabled ? 'checked' : ''} ${client ? '' : 'disabled'} />
+        enabled
+      </label>
+      <div class="params">${params}${ro}
+        ${meta.params.length ? `<button type="button" data-apply="${key}" ${client ? '' : 'disabled'}>Apply params</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  root.querySelectorAll('[data-enable]').forEach((chk) => {
+    chk.onchange = async () => {
+      const key = chk.getAttribute('data-enable');
+      await patchState({ blocks: { [key]: { enabled: chk.checked } } });
+    };
+  });
+  root.querySelectorAll('[data-apply]').forEach((btn) => {
+    btn.onclick = async () => {
+      const key = btn.getAttribute('data-apply');
+      const params = {};
+      root.querySelectorAll(`[data-block="${key}"]`).forEach((inp) => {
+        const pk = inp.getAttribute('data-param');
+        params[pk] = inp.tagName === 'SELECT' || inp.type === 'number' ? Number(inp.value) : inp.value;
+      });
+      await patchState({ blocks: { [key]: { params } } });
+    };
+  });
+}
+
+async function patchState(patch) {
+  if (!client) return;
   try {
-    const devices = await navigator.hid.requestDevice({ filters: [{ usagePage: USAGE_PAGE, usage: USAGE }] });
+    const r = await client.request('patchState', { patch });
+    state = r;
+    renderBlocks();
+    log('patchState ok', { bypass: r.bypass });
+  } catch (e) {
+    log('patchState err', e.message || e);
+    await refreshState();
+  }
+}
+
+async function refreshState() {
+  if (!client) return;
+  state = await client.request('getState');
+  renderBlocks();
+  log('getState', { bypass: state.bypass, enabled: Object.entries(state.blocks || {})
+    .filter(([, b]) => b.enabled).map(([k]) => k) });
+}
+
+async function refreshAll() {
+  if (!client) return;
+  await refreshState();
+  try { renderMetrics(await client.request('getMetrics')); } catch (e) { log('metrics', e.message); }
+  try { renderTiming(await client.request('getTiming')); } catch (e) { log('timing', e.message); }
+  try { renderBeat(await client.request('getBeat')); } catch (e) { log('beat', e.message); }
+  try { renderMatched(await client.request('getMatched')); } catch (e) { log('matched', e.message); }
+  try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log('spectrum', e.message); }
+  try {
+    const ev = await client.request('getEvents', { limit: 16 });
+    renderEvents(ev.events || []);
+  } catch (e) { log('events', e.message); }
+  try {
+    const er = await client.request('getErrors');
+    renderErrors(er.errors || []);
+  } catch (e) { log('errors', e.message); }
+}
+
+function applyHello(h) {
+  caps = h.caps || null;
+  document.getElementById('dFw').textContent = h.fwVersion || '—';
+  document.getElementById('dBoard').textContent = h.board || '—';
+  document.getElementById('dSource').textContent = h.source || '—';
+  document.getElementById('dVidPid').textContent =
+    h.vid != null ? `0x${h.vid.toString(16)}:0x${(h.pid || 0).toString(16)}` : '—';
+  document.getElementById('dCaps').textContent = caps
+    ? `metrics≤${caps.metricsHzMax} beat≤${caps.beatHzMax} timing≤${caps.timingHzMax ?? '—'}`
+    : '—';
+  if (caps?.metricsHzMax != null) document.getElementById('subMetrics').max = caps.metricsHzMax;
+  if (caps?.beatHzMax != null) document.getElementById('subBeat').max = caps.beatHzMax;
+  if (caps?.timingHzMax != null) document.getElementById('subTiming').max = caps.timingHzMax;
+}
+
+document.querySelectorAll('.tabs button').forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.getAttribute('data-tab');
+    for (const id of ['metrics', 'timing', 'spectrum', 'matched']) {
+      document.getElementById(`tab-${id}`).classList.toggle('hidden', id !== tab);
+    }
+  };
+});
+
+document.getElementById('btnConnect').onclick = async () => {
+  if (!navigator.hid) {
+    log('WebHID not available (use Chromium on localhost/HTTPS)');
+    return;
+  }
+  try {
+    const devices = await navigator.hid.requestDevice({
+      filters: [{ usagePage: USAGE_PAGE, usage: USAGE }],
+    });
     const device = devices[0];
     if (!device) return;
     if (!device.opened) await device.open();
+    if (client) client.dispose();
     client = new Client(device);
-    client.onNotify = (m) => log('NOTIFY', m.op, JSON.stringify(m.data));
-    setEnabled(true);
-    log('connected', device.productName || '(no product string)');
-  } catch (e) { log('connect error', e); }
+    client.onNotify = (m) => {
+      log('NOTIFY', m.op);
+      if (m.op === 'metrics') renderMetrics(m.data);
+      else if (m.op === 'timing') renderTiming(m.data);
+      else if (m.op === 'beat') renderBeat(m.data);
+      else if (m.op === 'event') {
+        renderEvents(m.data?.events || []);
+      } else if (m.op === 'error') {
+        const row = m.data;
+        if (row) {
+          const body = document.getElementById('errorsBody');
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${row.block}</td><td class="bad">${row.reason}</td><td>${row.uptimeMs}</td><td>${row.sampleIndex}</td>`;
+          body.prepend(tr);
+        }
+      }
+    };
+    device.addEventListener('disconnect', () => {
+      log('device disconnected');
+      if (client) { client.dispose(); client = null; }
+      setConnected(false);
+    });
+    setConnected(true);
+    log('connected', device.productName || device.productId);
+    const h = await client.request('hello');
+    applyHello(h);
+    log('hello', h);
+    const p = await client.request('ping', { t: Date.now() });
+    document.getElementById('dUptime').textContent = `${p.uptimeMs} ms`;
+    await refreshAll();
+  } catch (e) {
+    log('connect error', e.message || e);
+    setConnected(false);
+  }
 };
 
-document.getElementById('hello').onclick = async () => {
-  try { log('hello', JSON.stringify(await client.request('hello'), null, 2)); }
-  catch (e) { log('err', e); }
-};
-document.getElementById('state').onclick = async () => {
-  try { log('state', JSON.stringify(await client.request('getState'), null, 2)); }
-  catch (e) { log('err', e); }
-};
-document.getElementById('patch').onclick = async () => {
+document.getElementById('btnDisconnect').onclick = async () => {
   try {
-    const r = await client.request('patchState', {
-      patch: { bypass: false, blocks: {
-        gain: { enabled: true, params: { db: 6 } },
-        notch: { enabled: true, params: { hz: 60 } },
-      } },
-    });
-    log('patched', JSON.stringify(r.blocks?.gain), JSON.stringify(r.blocks?.notch));
-  } catch (e) { log('err', e); }
+    if (client) {
+      try { await client.request('subscribe', { metricsHz: 0, beatHz: 0, timingHz: 0, events: false, errors: false }); } catch (_) {}
+      const d = client.device;
+      client.dispose();
+      client = null;
+      if (d.opened) await d.close();
+    }
+  } catch (e) { log('disconnect', e.message || e); }
+  setConnected(false);
+  log('disconnected');
 };
-document.getElementById('sub').onclick = async () => {
+
+document.getElementById('btnHello').onclick = async () => {
   try {
-    log('sub', JSON.stringify(await client.request('subscribe', {
-      metricsHz: 5, beatHz: 1, events: true, errors: true,
-    })));
-  } catch (e) { log('err', e); }
+    const h = await client.request('hello');
+    applyHello(h);
+    log('hello', h);
+  } catch (e) { log('hello err', e.message || e); }
 };
+
+document.getElementById('btnPing').onclick = async () => {
+  try {
+    const p = await client.request('ping', { t: Date.now() });
+    document.getElementById('dUptime').textContent = `${p.uptimeMs} ms`;
+    log('ping', p);
+  } catch (e) { log('ping err', e.message || e); }
+};
+
+document.getElementById('btnRefresh').onclick = () => refreshAll().catch((e) => log(e.message || e));
+document.getElementById('btnRefreshState').onclick = () => refreshState().catch((e) => log(e.message || e));
+
+document.getElementById('bypassChk').onchange = async (ev) => {
+  await patchState({ bypass: ev.target.checked });
+};
+document.getElementById('btnBypassOn').onclick = () => patchState({ bypass: true });
+document.getElementById('btnBypassOff').onclick = () => patchState({ bypass: false });
+
+document.getElementById('presetSafe').onclick = async () => {
+  await patchState({
+    bypass: true,
+    blocks: {
+      levelMeter: { enabled: true },
+      noiseFloor: { enabled: true },
+      eventDetect: { enabled: true },
+      beatRate: { enabled: true },
+      eventLog: { enabled: true },
+      matchedFilter: { enabled: false },
+      spectrum: { enabled: false },
+      gain: { enabled: false },
+      limiter: { enabled: true },
+      filterBank: { enabled: false },
+      firBank: { enabled: false },
+      softGate: { enabled: false },
+      notch: { enabled: false },
+      agc: { enabled: false },
+    },
+  });
+  log('preset: analysis only (spectrum off)');
+};
+
+document.getElementById('presetTiming').onclick = async () => {
+  await patchState({
+    bypass: true,
+    blocks: {
+      spectrum: { enabled: false },
+      matchedFilter: { enabled: false },
+      softGate: { enabled: false },
+      agc: { enabled: false },
+      firBank: { enabled: false },
+      filterBank: { enabled: false },
+      notch: { enabled: false },
+      gain: { enabled: false },
+    },
+  });
+  log('preset: timing soak (heavy process/FFT off)');
+};
+
+document.getElementById('presetOffProcess').onclick = async () => {
+  const blocks = {};
+  for (const k of PROCESS_BLOCKS) blocks[k] = { enabled: false };
+  blocks.spectrum = { enabled: false };
+  await patchState({ bypass: true, blocks });
+};
+
+document.getElementById('btnMetrics').onclick = async () => {
+  try { renderMetrics(await client.request('getMetrics')); } catch (e) { log(e.message); }
+};
+document.getElementById('btnTiming').onclick = async () => {
+  try { renderTiming(await client.request('getTiming')); } catch (e) { log(e.message); }
+};
+document.getElementById('btnResetTiming').onclick = async () => {
+  try {
+    await client.request('resetTiming');
+    log('timing reset');
+    renderTiming(await client.request('getTiming'));
+  } catch (e) { log(e.message); }
+};
+document.getElementById('btnBeat').onclick = async () => {
+  try { renderBeat(await client.request('getBeat')); } catch (e) { log(e.message); }
+};
+document.getElementById('btnSpectrum').onclick = async () => {
+  try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log(e.message); }
+};
+document.getElementById('btnMatched').onclick = async () => {
+  try { renderMatched(await client.request('getMatched')); } catch (e) { log(e.message); }
+};
+document.getElementById('btnEvents').onclick = async () => {
+  try {
+    const r = await client.request('getEvents', { limit: 16 });
+    renderEvents(r.events || []);
+  } catch (e) { log(e.message); }
+};
+document.getElementById('btnErrors').onclick = async () => {
+  try {
+    const r = await client.request('getErrors');
+    renderErrors(r.errors || []);
+  } catch (e) { log(e.message); }
+};
+document.getElementById('btnClearErrors').onclick = async () => {
+  try {
+    await client.request('clearErrors');
+    renderErrors([]);
+    log('errors cleared');
+  } catch (e) { log(e.message); }
+};
+
+document.getElementById('btnSub').onclick = async () => {
+  try {
+    const body = {
+      metricsHz: Number(document.getElementById('subMetrics').value) || 0,
+      beatHz: Number(document.getElementById('subBeat').value) || 0,
+      timingHz: Number(document.getElementById('subTiming').value) || 0,
+      events: document.getElementById('subEvents').value === '1',
+      errors: document.getElementById('subErrors').value === '1',
+    };
+    const r = await client.request('subscribe', body);
+    document.getElementById('subStatus').textContent =
+      `subscription: metrics ${r.metricsHz} Hz · beat ${r.beatHz} Hz · timing ${r.timingHz ?? 0} Hz · events ${r.events} · errors ${r.errors}`;
+    log('subscribe', r);
+  } catch (e) { log('subscribe err', e.message || e); }
+};
+
+document.getElementById('btnSubOff').onclick = async () => {
+  document.getElementById('subMetrics').value = 0;
+  document.getElementById('subBeat').value = 0;
+  document.getElementById('subTiming').value = 0;
+  document.getElementById('subEvents').value = '0';
+  document.getElementById('subErrors').value = '0';
+  document.getElementById('btnSub').click();
+};
+
+document.getElementById('btnClearLog').onclick = () => { logEl.textContent = ''; };
+
+renderBlocks();
+setConnected(false);
+log('Ready. Connect a Timegrapher (WebHID) device.');
   </script>
 </body>
 </html>

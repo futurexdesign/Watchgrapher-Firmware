@@ -42,7 +42,7 @@ void boost_power_enable(bool enable) {
     return;
   }
 
-  diag_counters_t *d = diagnostics_get();
+  auto *d = diagnostics_get();
   g_requested = enable;
 
 #if BOOST_SWITCH_PRESENT
@@ -122,7 +122,7 @@ bool power_control_poll(uint32_t now_ms) {
     return false;
   }
 
-  if ((now_ms - g_enabled_at_ms) < (uint32_t)PREAMP_SETTLE_MS) {
+  if ((now_ms - g_enabled_at_ms) < static_cast<uint32_t>(PREAMP_SETTLE_MS)) {
     return false;
   }
 

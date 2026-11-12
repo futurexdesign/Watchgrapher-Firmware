@@ -13,12 +13,13 @@
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
-#include <ctype.h>
-#include <math.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #ifndef FW_VERSION
 #define FW_VERSION "0.1.0-dev"
@@ -37,6 +38,7 @@ constexpr uint32_t kReasmTimeoutMs = 500;
 
 constexpr uint8_t kMetricsHzMax = 20;
 constexpr uint8_t kBeatHzMax = 5;
+constexpr uint8_t kTimingHzMax = 5;
 
 /* Report descriptor: Usage Page 0xFFA0, Usage 0x0001, Report ID 1, 63-byte IO. */
 uint8_t const kHidReportDesc[] = {
@@ -79,10 +81,12 @@ bool g_tx_notify = false;
 
 uint8_t g_sub_metrics_hz = 0;
 uint8_t g_sub_beat_hz = 0;
+uint8_t g_sub_timing_hz = 0;
 bool g_sub_events = false;
 bool g_sub_errors = false;
 uint32_t g_last_metrics_ms = 0;
 uint32_t g_last_beat_ms = 0;
+uint32_t g_last_timing_ms = 0;
 uint64_t g_last_event_peak = 0;
 bool g_have_last_event_peak = false;
 uint32_t g_last_error_uptime = 0;
@@ -112,7 +116,7 @@ const BlockMap kBlocks[] = {
 };
 
 const char *skip_ws(const char *p) {
-  while (p && *p && isspace((unsigned char)*p)) {
+  while (p && *p && isspace(static_cast<unsigned char>(*p))) {
     p++;
   }
   return p;
@@ -138,7 +142,7 @@ const char *json_find_key(const char *json, const char *key) {
 }
 
 bool json_get_string(const char *json, const char *key, char *out, size_t outlen) {
-  const char *v = json_find_key(json, key);
+  const auto *v = json_find_key(json, key);
   if (!v || *v != '"') {
     return false;
   }
@@ -155,12 +159,12 @@ bool json_get_string(const char *json, const char *key, char *out, size_t outlen
 }
 
 bool json_get_int(const char *json, const char *key, long *out) {
-  const char *v = json_find_key(json, key);
+  const auto *v = json_find_key(json, key);
   if (!v) {
     return false;
   }
   char *end = nullptr;
-  long n = strtol(v, &end, 10);
+  auto n = strtol(v, &end, 10);
   if (end == v) {
     return false;
   }
@@ -169,12 +173,12 @@ bool json_get_int(const char *json, const char *key, long *out) {
 }
 
 bool json_get_double(const char *json, const char *key, double *out) {
-  const char *v = json_find_key(json, key);
+  const auto *v = json_find_key(json, key);
   if (!v) {
     return false;
   }
   char *end = nullptr;
-  double n = strtod(v, &end);
+  auto n = strtod(v, &end);
   if (end == v) {
     return false;
   }
@@ -183,7 +187,7 @@ bool json_get_double(const char *json, const char *key, double *out) {
 }
 
 bool json_get_bool(const char *json, const char *key, bool *out) {
-  const char *v = json_find_key(json, key);
+  const auto *v = json_find_key(json, key);
   if (!v) {
     return false;
   }
@@ -255,12 +259,12 @@ void u64_to_dec(uint64_t v, char *out, size_t outlen) {
   if (v == 0) {
     tmp[n++] = '0';
   } else {
-    while (v > 0 && n < (int)sizeof(tmp)) {
-      tmp[n++] = (char)('0' + (v % 10ull));
+    while (v > 0 && n < static_cast<int>(sizeof(tmp))) {
+      tmp[n++] = static_cast<char>('0' + (v % 10ull));
       v /= 10ull;
     }
   }
-  if ((size_t)n + 1 > outlen) {
+  if (static_cast<size_t>(n) + 1 > outlen) {
     out[0] = '\0';
     return;
   }
@@ -279,20 +283,20 @@ void rx_reset(void) {
 }
 
 void tx_begin(const char *json, bool notify) {
-  size_t n = strlen(json);
+  auto n = strlen(json);
   if (n > kMaxJson) {
     n = kMaxJson;
   }
   memcpy(g_tx_json, json, n);
   g_tx_json[n] = '\0';
-  g_tx_len = (uint16_t)n;
+  g_tx_len = static_cast<uint16_t>(n);
   g_tx_off = 0;
   g_tx_frag_index = 0;
-  g_tx_frag_count = (uint8_t)((n + kMaxChunk - 1) / kMaxChunk);
+  g_tx_frag_count = static_cast<uint8_t>((n + kMaxChunk - 1) / kMaxChunk);
   if (g_tx_frag_count == 0) {
     g_tx_frag_count = 1;
   }
-  g_tx_seq = (uint8_t)(g_tx_seq + 1u);
+  g_tx_seq = static_cast<uint8_t>(g_tx_seq + 1u);
   g_tx_notify = notify;
   g_tx_active = true;
 }
@@ -303,8 +307,8 @@ void tx_pump(void) {
   }
   uint8_t report[kPayloadBytes];
   memset(report, 0, sizeof(report));
-  uint16_t remain = (g_tx_off < g_tx_len) ? (uint16_t)(g_tx_len - g_tx_off) : 0;
-  uint8_t chunk = (remain > kMaxChunk) ? kMaxChunk : (uint8_t)remain;
+  auto remain = (g_tx_off < g_tx_len) ? static_cast<uint16_t>(g_tx_len - g_tx_off) : static_cast<uint16_t>(0);
+  auto chunk = (remain > kMaxChunk) ? kMaxChunk : static_cast<uint8_t>(remain);
   bool more = (g_tx_frag_index + 1u) < g_tx_frag_count;
   report[0] = (more ? kFlagMore : 0) | (g_tx_notify ? kFlagNotifyHint : 0);
   report[1] = g_tx_seq;
@@ -313,7 +317,7 @@ void tx_pump(void) {
   report[4] = chunk;
   if (chunk) {
     memcpy(&report[5], &g_tx_json[g_tx_off], chunk);
-    g_tx_off = (uint16_t)(g_tx_off + chunk);
+    g_tx_off = static_cast<uint16_t>(g_tx_off + chunk);
   }
   if (!g_hid.sendReport(kReportId, report, kPayloadBytes)) {
     return;
@@ -334,14 +338,14 @@ void send_error(long id, const char *code, const char *message) {
 }
 
 int appendf(char *dst, size_t dstlen, int off, const char *fmt, ...) {
-  if (off < 0 || (size_t)off >= dstlen) {
+  if (off < 0 || static_cast<size_t>(off) >= dstlen) {
     return -1;
   }
   va_list ap;
   va_start(ap, fmt);
-  int n = vsnprintf(dst + off, dstlen - (size_t)off, fmt, ap);
+  auto n = vsnprintf(dst + off, dstlen - static_cast<size_t>(off), fmt, ap);
   va_end(ap);
-  if (n < 0 || (size_t)off + (size_t)n >= dstlen) {
+  if (n < 0 || static_cast<size_t>(off) + static_cast<size_t>(n) >= dstlen) {
     return -1;
   }
   return off + n;
@@ -361,9 +365,9 @@ int append_params_for_block(char *dst, size_t dstlen, int off, dsp_block_id_t id
     }
     /* Integers for preset/hz when whole. */
     if (fabsf(v - roundf(v)) < 1e-4f && fabsf(v) < 1e6f) {
-      off = appendf(dst, dstlen, off, "%d", (int)lroundf(v));
+      off = appendf(dst, dstlen, off, "%d", static_cast<int>(lroundf(v)));
     } else {
-      off = appendf(dst, dstlen, off, "%.6g", (double)v);
+      off = appendf(dst, dstlen, off, "%.6g", static_cast<double>(v));
     }
     return off >= 0;
   };
@@ -418,6 +422,11 @@ int append_params_for_block(char *dst, size_t dstlen, int off, dsp_block_id_t id
       return -1;
     }
     break;
+  case DSP_BLOCK_BEAT_RATE:
+    if (!add("liftAngle", "liftAngle") || !add("vph", "vph")) {
+      return -1;
+    }
+    break;
   default:
     break;
   }
@@ -431,7 +440,7 @@ int encode_state(char *dst, size_t dstlen, int off) {
     return -1;
   }
   for (size_t i = 0; i < sizeof(kBlocks) / sizeof(kBlocks[0]); i++) {
-    const BlockMap &b = kBlocks[i];
+    const auto &b = kBlocks[i];
     off = appendf(dst, dstlen, off, "%s\"%s\":{\"enabled\":%s,\"params\":{",
                   i ? "," : "", b.json,
                   control_api_block_enabled(b.id) ? "true" : "false");
@@ -457,10 +466,30 @@ int encode_metrics(char *dst, size_t dstlen, int off) {
                  "{\"prePeak\":%.6g,\"postPeak\":%.6g,\"preRms\":%.6g,"
                  "\"postRms\":%.6g,\"noiseFloor\":%.6g,\"agcGainDb\":%.6g,"
                  "\"matchScore\":%.6g,\"clipCount\":%lu,\"limiterCount\":%lu}",
-                 (double)m.pre_peak, (double)m.post_peak, (double)m.pre_rms,
-                 (double)m.post_rms, (double)m.noise_floor,
-                 (double)m.agc_gain_db, (double)m.match_score,
-                 (unsigned long)m.clip_count, (unsigned long)m.limiter_count);
+                 static_cast<double>(m.pre_peak), static_cast<double>(m.post_peak), static_cast<double>(m.pre_rms),
+                 static_cast<double>(m.post_rms), static_cast<double>(m.noise_floor),
+                 static_cast<double>(m.agc_gain_db), static_cast<double>(m.match_score),
+                 static_cast<unsigned long>(m.clip_count), static_cast<unsigned long>(m.limiter_count));
+}
+
+int encode_timing(char *dst, size_t dstlen, int off) {
+  dsp_timing_t t{};
+  control_api_get_timing(&t);
+  return appendf(
+      dst, dstlen, off,
+      "{\"dspBlockUsLast\":%lu,\"dspBlockUsMean\":%lu,\"dspBlockUsMax\":%lu,"
+      "\"dspBlockBudgetUs\":%lu,\"dspBlockSamples\":%lu,\"dspBlocks\":%lu,"
+      "\"loopUsLast\":%lu,\"loopUsMean\":%lu,\"loopUsMax\":%lu,"
+      "\"loopCount\":%lu,\"idleUsPerS\":%lu,\"loopBusyPct\":%u,"
+      "\"underruns\":%lu,\"shortWrites\":%lu,\"ringMin\":%lu,\"ringMax\":%lu}",
+      static_cast<unsigned long>(t.dsp_block_us_last), static_cast<unsigned long>(t.dsp_block_us_mean),
+      static_cast<unsigned long>(t.dsp_block_us_max), static_cast<unsigned long>(t.dsp_block_budget_us),
+      static_cast<unsigned long>(t.dsp_block_samples), static_cast<unsigned long>(t.dsp_blocks),
+      static_cast<unsigned long>(t.loop_us_last), static_cast<unsigned long>(t.loop_us_mean),
+      static_cast<unsigned long>(t.loop_us_max), static_cast<unsigned long>(t.loop_count),
+      static_cast<unsigned long>(t.idle_us_per_s), static_cast<unsigned>(t.loop_busy_pct),
+      static_cast<unsigned long>(t.underruns), static_cast<unsigned long>(t.short_writes),
+      static_cast<unsigned long>(t.ring_min), static_cast<unsigned long>(t.ring_max));
 }
 
 int encode_spectrum(char *dst, size_t dstlen, int off) {
@@ -469,11 +498,11 @@ int encode_spectrum(char *dst, size_t dstlen, int off) {
   off = appendf(dst, dstlen, off,
                 "{\"valid\":%s,\"fftN\":%lu,\"sourceHz\":%lu,\"nPeaks\":%lu,"
                 "\"peaks\":[",
-                s.valid ? "true" : "false", (unsigned long)s.fft_n,
-                (unsigned long)s.source_hz, (unsigned long)s.n_peaks);
+                s.valid ? "true" : "false", static_cast<unsigned long>(s.fft_n),
+                static_cast<unsigned long>(s.source_hz), static_cast<unsigned long>(s.n_peaks));
   for (uint32_t i = 0; i < s.n_peaks && off >= 0; i++) {
     off = appendf(dst, dstlen, off, "%s{\"hz\":%.6g,\"mag\":%.6g}", i ? "," : "",
-                  (double)s.peak_hz[i], (double)s.peak_mag[i]);
+                  static_cast<double>(s.peak_hz[i]), static_cast<double>(s.peak_mag[i]));
   }
   if (off >= 0) {
     off = appendf(dst, dstlen, off, "]}");
@@ -487,37 +516,86 @@ int encode_matched(char *dst, size_t dstlen, int off) {
   return appendf(dst, dstlen, off,
                  "{\"score\":%.6g,\"templatePeak\":%.6g,\"templateLen\":%lu,"
                  "\"learned\":%s}",
-                 (double)m.score, (double)m.template_peak,
-                 (unsigned long)m.template_len, m.learned ? "true" : "false");
+                 static_cast<double>(m.score), static_cast<double>(m.template_peak),
+                 static_cast<unsigned long>(m.template_len), m.learned ? "true" : "false");
+}
+
+int encode_timing_window(char *dst, size_t dstlen, int off,
+                         const dsp_beat_timing_window_t &w) {
+  return appendf(dst, dstlen, off,
+                 "{\"rateSDay\":%.6g,\"beatErrorMs\":%.6g,\"amplitudeDeg\":%.6g,"
+                 "\"samples\":%lu,\"rateValid\":%s,\"beatErrorValid\":%s,"
+                 "\"amplitudeValid\":%s}",
+                 static_cast<double>(w.rate_s_day), static_cast<double>(w.beat_error_ms),
+                 static_cast<double>(w.amplitude_deg), static_cast<unsigned long>(w.samples),
+                 w.rate_valid ? "true" : "false",
+                 w.beat_error_valid ? "true" : "false",
+                 w.amplitude_valid ? "true" : "false");
 }
 
 int encode_beat(char *dst, size_t dstlen, int off) {
   dsp_beat_rate_t b{};
   control_api_get_beat_rate(&b);
-  return appendf(dst, dstlen, off,
-                 "{\"vphRaw\":%.6g,\"vphNearest\":%lu,\"confidence\":%.6g,"
-                 "\"locked\":%s,\"intervalSamples\":%lu,\"eventsSeen\":%lu,"
-                 "\"intervalsHeld\":%lu,\"sourceHz\":%lu}",
-                 (double)b.vph_raw, (unsigned long)b.vph_nearest,
-                 (double)b.confidence, b.locked ? "true" : "false",
-                 (unsigned long)b.interval_samples,
-                 (unsigned long)b.events_seen,
-                 (unsigned long)b.intervals_held, (unsigned long)b.source_hz);
+  off = appendf(
+      dst, dstlen, off,
+      "{\"vphRaw\":%.6g,\"vphNearest\":%lu,\"confidence\":%.6g,"
+      "\"locked\":%s,\"intervalSamples\":%lu,\"eventsSeen\":%lu,"
+      "\"intervalsHeld\":%lu,\"sourceHz\":%lu,"
+      "\"rateSDay\":%.6g,\"beatErrorMs\":%.6g,\"amplitudeDeg\":%.6g,"
+      "\"liftAngleDeg\":%.6g,\"liftTimeMs\":%.6g,"
+      "\"rateValid\":%s,\"beatErrorValid\":%s,\"amplitudeValid\":%s,"
+      "\"instant\":",
+      static_cast<double>(b.vph_raw), static_cast<unsigned long>(b.vph_nearest), static_cast<double>(b.confidence),
+      b.locked ? "true" : "false", static_cast<unsigned long>(b.interval_samples),
+      static_cast<unsigned long>(b.events_seen), static_cast<unsigned long>(b.intervals_held),
+      static_cast<unsigned long>(b.source_hz), static_cast<double>(b.rate_s_day),
+      static_cast<double>(b.beat_error_ms), static_cast<double>(b.amplitude_deg),
+      static_cast<double>(b.lift_angle_deg), static_cast<double>(b.lift_time_ms),
+      b.rate_valid ? "true" : "false", b.beat_error_valid ? "true" : "false",
+      b.amplitude_valid ? "true" : "false");
+  if (off < 0) {
+    return -1;
+  }
+  off = encode_timing_window(dst, dstlen, off, b.instant);
+  if (off < 0) {
+    return -1;
+  }
+  off = appendf(dst, dstlen, off, ",\"avg1s\":");
+  if (off < 0) {
+    return -1;
+  }
+  off = encode_timing_window(dst, dstlen, off, b.avg_1s);
+  if (off < 0) {
+    return -1;
+  }
+  off = appendf(dst, dstlen, off, ",\"avg10s\":");
+  if (off < 0) {
+    return -1;
+  }
+  off = encode_timing_window(dst, dstlen, off, b.avg_10s);
+  if (off < 0) {
+    return -1;
+  }
+  return appendf(dst, dstlen, off, "}");
 }
 
 int encode_event(char *dst, size_t dstlen, int off, const dsp_event_t &ev) {
-  char s0[24], s1[24];
+  char s0[24], s1[24], s2[24], s3[24];
   u64_to_dec(ev.start_sample, s0, sizeof(s0));
   u64_to_dec(ev.peak_sample, s1, sizeof(s1));
+  u64_to_dec(ev.unlock_sample, s2, sizeof(s2));
+  u64_to_dec(ev.drop_sample, s3, sizeof(s3));
   return appendf(dst, dstlen, off,
                  "{\"startSample\":\"%s\",\"peakSample\":\"%s\","
+                 "\"unlockSample\":\"%s\",\"dropSample\":\"%s\","
                  "\"durationSamples\":%lu,\"riseSamples\":%lu,"
+                 "\"liftSamples\":%lu,"
                  "\"peakAbs\":%.6g,\"noiseFloor\":%.6g,\"snrDb\":%.6g,"
                  "\"energy\":%.6g,\"confidence\":%.6g}",
-                 s0, s1, (unsigned long)ev.duration_samples,
-                 (unsigned long)ev.rise_samples, (double)ev.peak_abs,
-                 (double)ev.noise_floor, (double)ev.snr_db, (double)ev.energy,
-                 (double)ev.confidence);
+                 s0, s1, s2, s3, static_cast<unsigned long>(ev.duration_samples),
+                 static_cast<unsigned long>(ev.rise_samples), static_cast<unsigned long>(ev.lift_samples),
+                 static_cast<double>(ev.peak_abs), static_cast<double>(ev.noise_floor),
+                 static_cast<double>(ev.snr_db), static_cast<double>(ev.energy), static_cast<double>(ev.confidence));
 }
 
 const char *reason_str(dsp_error_reason_t r) {
@@ -534,7 +612,7 @@ const char *reason_str(dsp_error_reason_t r) {
 }
 
 const char *block_json_name(dsp_block_id_t id) {
-  for (const BlockMap &b : kBlocks) {
+  for (const auto &b : kBlocks) {
     if (b.id == id) {
       return b.json;
     }
@@ -552,7 +630,7 @@ int encode_error(char *dst, size_t dstlen, int off, const dsp_error_t &e) {
                  "{\"block\":\"%s\",\"reason\":\"%s\",\"uptimeMs\":%lu,"
                  "\"sampleIndex\":\"%s\"}",
                  block_json_name(e.block), reason_str(e.reason),
-                 (unsigned long)e.uptime_ms, si);
+                 static_cast<unsigned long>(e.uptime_ms), si);
 }
 
 bool apply_block_params(dsp_block_id_t id, const char *obj) {
@@ -560,7 +638,7 @@ bool apply_block_params(dsp_block_id_t id, const char *obj) {
   bool ok = true;
   auto setf = [&](const char *json_key, const char *cli_key) {
     if (json_get_double(obj, json_key, &d)) {
-      if (!control_api_set_param(id, cli_key, (float)d)) {
+      if (!control_api_set_param(id, cli_key, static_cast<float>(d))) {
         ok = false;
       }
     }
@@ -600,6 +678,10 @@ bool apply_block_params(dsp_block_id_t id, const char *obj) {
   case DSP_BLOCK_SPECTRUM:
     setf("stride", "stride");
     break;
+  case DSP_BLOCK_BEAT_RATE:
+    setf("liftAngle", "liftAngle");
+    setf("vph", "vph");
+    break;
   default:
     break;
   }
@@ -620,8 +702,8 @@ bool apply_patch(const char *patch_json) {
     /* blocks value may already be object start */
     return false;
   }
-  for (const BlockMap &b : kBlocks) {
-    const char *bv = json_find_key(blocks_obj, b.json);
+  for (const auto &b : kBlocks) {
+    const auto *bv = json_find_key(blocks_obj, b.json);
     if (!bv) {
       continue;
     }
@@ -674,7 +756,7 @@ void handle_request(const char *json) {
     off = appendf(out, sizeof(out), 0,
                   "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":{\"t\":%ld,"
                   "\"uptimeMs\":%lu}}",
-                  id, t, (unsigned long)millis());
+                  id, t, static_cast<unsigned long>(millis()));
   } else if (strcmp(op, "hello") == 0) {
     off = appendf(
         out, sizeof(out), 0,
@@ -682,12 +764,14 @@ void handle_request(const char *json) {
         "\"protocolVersion\":1,\"fwVersion\":\"%s\",\"board\":\"%s\","
         "\"source\":\"%s\",\"vid\":%u,\"pid\":%u,\"caps\":{"
         "\"maxJsonBytes\":%u,\"metricsHzMax\":%u,\"beatHzMax\":%u,"
+        "\"timingHzMax\":%u,\"timing\":true,"
         "\"blocks\":[\"levelMeter\",\"gain\",\"limiter\",\"filterBank\","
         "\"eventDetect\",\"beatRate\",\"noiseFloor\",\"eventLog\","
         "\"softGate\",\"notch\",\"agc\",\"matchedFilter\",\"firBank\","
         "\"spectrum\"]}}}",
         id, FW_VERSION, BOARD_NAME, AUDIO_SOURCE_NAME, 0xCafeu, 0x4003u,
-        (unsigned)kMaxJson, (unsigned)kMetricsHzMax, (unsigned)kBeatHzMax);
+        static_cast<unsigned>(kMaxJson), static_cast<unsigned>(kMetricsHzMax), static_cast<unsigned>(kBeatHzMax),
+        static_cast<unsigned>(kTimingHzMax));
   } else if (strcmp(op, "getState") == 0) {
     off = appendf(out, sizeof(out), 0, "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":",
                   id);
@@ -725,6 +809,20 @@ void handle_request(const char *json) {
     if (off >= 0) {
       off = appendf(out, sizeof(out), off, "}");
     }
+  } else if (strcmp(op, "getTiming") == 0) {
+    off = appendf(out, sizeof(out), 0, "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":",
+                  id);
+    if (off >= 0) {
+      off = encode_timing(out, sizeof(out), off);
+    }
+    if (off >= 0) {
+      off = appendf(out, sizeof(out), off, "}");
+    }
+  } else if (strcmp(op, "resetTiming") == 0) {
+    control_api_reset_timing();
+    off = appendf(out, sizeof(out), 0,
+                  "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":{\"cleared\":true}}",
+                  id);
   } else if (strcmp(op, "getBeat") == 0) {
     off = appendf(out, sizeof(out), 0, "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":",
                   id);
@@ -762,7 +860,7 @@ void handle_request(const char *json) {
       limit = 32;
     }
     dsp_event_t ev[32];
-    uint32_t n = control_api_copy_events(ev, (uint32_t)limit);
+    auto n = control_api_copy_events(ev, static_cast<uint32_t>(limit));
     off = appendf(out, sizeof(out), 0,
                   "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":{\"events\":[", id);
     for (uint32_t i = 0; i < n && off >= 0; i++) {
@@ -778,7 +876,7 @@ void handle_request(const char *json) {
     }
   } else if (strcmp(op, "getErrors") == 0) {
     dsp_error_t err[8];
-    uint32_t n = control_api_copy_errors(err, 8);
+    auto n = control_api_copy_errors(err, 8);
     off = appendf(out, sizeof(out), 0,
                   "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":{\"errors\":[", id);
     for (uint32_t i = 0; i < n && off >= 0; i++) {
@@ -809,7 +907,7 @@ void handle_request(const char *json) {
       if (hz > kMetricsHzMax) {
         hz = kMetricsHzMax;
       }
-      g_sub_metrics_hz = (uint8_t)hz;
+      g_sub_metrics_hz = static_cast<uint8_t>(hz);
     }
     if (json_get_int(json, "beatHz", &hz)) {
       if (hz < 0) {
@@ -818,7 +916,16 @@ void handle_request(const char *json) {
       if (hz > kBeatHzMax) {
         hz = kBeatHzMax;
       }
-      g_sub_beat_hz = (uint8_t)hz;
+      g_sub_beat_hz = static_cast<uint8_t>(hz);
+    }
+    if (json_get_int(json, "timingHz", &hz)) {
+      if (hz < 0) {
+        hz = 0;
+      }
+      if (hz > kTimingHzMax) {
+        hz = kTimingHzMax;
+      }
+      g_sub_timing_hz = static_cast<uint8_t>(hz);
     }
     if (json_get_bool(json, "events", &flag)) {
       g_sub_events = flag;
@@ -847,11 +954,13 @@ void handle_request(const char *json) {
     }
     g_last_metrics_ms = millis();
     g_last_beat_ms = millis();
+    g_last_timing_ms = millis();
     off = appendf(out, sizeof(out), 0,
                   "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":{"
-                  "\"metricsHz\":%u,\"beatHz\":%u,\"events\":%s,\"errors\":%s}}",
-                  id, (unsigned)g_sub_metrics_hz, (unsigned)g_sub_beat_hz,
-                  g_sub_events ? "true" : "false",
+                  "\"metricsHz\":%u,\"beatHz\":%u,\"timingHz\":%u,"
+                  "\"events\":%s,\"errors\":%s}}",
+                  id, static_cast<unsigned>(g_sub_metrics_hz), static_cast<unsigned>(g_sub_beat_hz),
+                  static_cast<unsigned>(g_sub_timing_hz), g_sub_events ? "true" : "false",
                   g_sub_errors ? "true" : "false");
   } else {
     send_error(id, "unknownOp", op);
@@ -874,6 +983,24 @@ void push_notify_metrics(void) {
                     "{\"v\":1,\"notify\":true,\"op\":\"metrics\",\"data\":");
   if (off >= 0) {
     off = encode_metrics(out, sizeof(out), off);
+  }
+  if (off >= 0) {
+    off = appendf(out, sizeof(out), off, "}");
+  }
+  if (off >= 0) {
+    tx_begin(out, true);
+  }
+}
+
+void push_notify_timing(void) {
+  if (g_tx_active) {
+    return;
+  }
+  char out[640];
+  int off = appendf(out, sizeof(out), 0,
+                    "{\"v\":1,\"notify\":true,\"op\":\"timing\",\"data\":");
+  if (off >= 0) {
+    off = encode_timing(out, sizeof(out), off);
   }
   if (off >= 0) {
     off = appendf(out, sizeof(out), off, "}");
@@ -906,7 +1033,7 @@ void push_notify_events(void) {
     return;
   }
   dsp_event_t ev[8];
-  uint32_t n = control_api_copy_events(ev, 8);
+  auto n = control_api_copy_events(ev, 8);
   if (n == 0) {
     return;
   }
@@ -952,7 +1079,7 @@ void push_notify_errors(void) {
     return;
   }
   dsp_error_t err[8];
-  uint32_t n = control_api_copy_errors(err, 8);
+  auto n = control_api_copy_errors(err, 8);
   if (n == 0) {
     return;
   }
@@ -980,7 +1107,7 @@ void push_notify_errors(void) {
 }
 
 void subscribe_poll(void) {
-  uint32_t now = millis();
+  auto now = millis();
   if (g_sub_metrics_hz > 0) {
     uint32_t period = 1000u / g_sub_metrics_hz;
     if ((now - g_last_metrics_ms) >= period) {
@@ -995,6 +1122,13 @@ void subscribe_poll(void) {
       push_notify_beat();
     }
   }
+  if (g_sub_timing_hz > 0 && !g_tx_active) {
+    uint32_t period = 1000u / g_sub_timing_hz;
+    if ((now - g_last_timing_ms) >= period) {
+      g_last_timing_ms = now;
+      push_notify_timing();
+    }
+  }
   push_notify_events();
   push_notify_errors();
 }
@@ -1005,8 +1139,8 @@ void on_host_report(uint8_t report_id, hid_report_type_t report_type,
   if (g_rx_ready) {
     return; /* drop while prior message pending */
   }
-  const uint8_t *p = buffer;
-  uint16_t n = bufsize;
+  const auto *p = buffer;
+  auto n = bufsize;
   /* Some stacks leave report ID as first byte. */
   if (n > 0 && report_id == 0 && p[0] == kReportId) {
     p++;
@@ -1030,16 +1164,16 @@ void on_host_report(uint8_t report_id, hid_report_type_t report_type,
     rx_reset();
     return;
   }
-  if ((uint16_t)frag_count * (uint16_t)kMaxChunk > kMaxJson) {
+  if (static_cast<uint16_t>(frag_count) * static_cast<uint16_t>(kMaxChunk) > kMaxJson) {
     rx_reset();
     return;
   }
-  if (n < (uint16_t)(kHeaderLen + payload_len)) {
+  if (n < static_cast<uint16_t>(kHeaderLen + payload_len)) {
     return;
   }
 
-  uint32_t now = millis();
-  if (g_rx_deadline_ms != 0 && (int32_t)(now - g_rx_deadline_ms) > 0) {
+  auto now = millis();
+  if (g_rx_deadline_ms != 0 && static_cast<int32_t>(now - g_rx_deadline_ms) > 0) {
     rx_reset();
   }
 
@@ -1058,17 +1192,17 @@ void on_host_report(uint8_t report_id, hid_report_type_t report_type,
     return; /* duplicate */
   }
   if (frag_index < sizeof(g_rx_seen) * 8) {
-    g_rx_seen[frag_index / 8] |= (uint8_t)(1u << (frag_index % 8));
+    g_rx_seen[frag_index / 8] |= static_cast<uint8_t>(1u << (frag_index % 8));
   }
 
-  uint16_t offset = (uint16_t)frag_index * kMaxChunk;
-  if ((uint32_t)offset + payload_len > kMaxJson) {
+  auto offset = static_cast<uint16_t>(frag_index) * kMaxChunk;
+  if (static_cast<uint32_t>(offset) + payload_len > kMaxJson) {
     rx_reset();
     return;
   }
   memcpy(&g_rx_json[offset], &p[kHeaderLen], payload_len);
   if (offset + payload_len > g_rx_len) {
-    g_rx_len = (uint16_t)(offset + payload_len);
+    g_rx_len = static_cast<uint16_t>(offset + payload_len);
   }
   g_rx_got++;
   if (g_rx_got >= g_rx_frag_count) {
@@ -1097,7 +1231,7 @@ bool hid_control_usb_begin(void) {
 
 void hid_control_task(void) {
   if (g_rx_deadline_ms != 0 && !g_rx_ready && g_rx_frag_count != 0) {
-    if ((int32_t)(millis() - g_rx_deadline_ms) > 0) {
+    if (static_cast<int32_t>(millis() - g_rx_deadline_ms) > 0) {
       rx_reset();
     }
   }

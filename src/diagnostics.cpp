@@ -11,11 +11,12 @@
 #include "app_config.h"
 #include "audio_source.h"
 #include "board_config.h"
+#include "perf_timing.h"
 #include "power_control.h"
 
 #include <Arduino.h>
-#include <limits.h>
-#include <string.h>
+#include <climits>
+#include <cstring>
 
 static diag_counters_t g_diag;
 static uint32_t g_suspend_entered_ms;
@@ -79,10 +80,12 @@ void diagnostics_reset_adc_stats(void) {
 static void diagnostics_print_line(Stream &out) {
   uint32_t mean = 0;
   if (g_diag.adc_mean_code_count > 0) {
-    mean = (uint32_t)(g_diag.adc_mean_code_accum / g_diag.adc_mean_code_count);
+    mean = static_cast<uint32_t>(g_diag.adc_mean_code_accum /
+                                 g_diag.adc_mean_code_count);
   }
   uint16_t amin =
-      g_diag.adc_min_code == UINT16_MAX ? (uint16_t)0 : g_diag.adc_min_code;
+      g_diag.adc_min_code == UINT16_MAX ? static_cast<uint16_t>(0)
+                                        : g_diag.adc_min_code;
   uint32_t ring_min =
       g_diag.ring_min_occupancy == UINT32_MAX ? 0u : g_diag.ring_min_occupancy;
 
@@ -134,6 +137,23 @@ static void diagnostics_print_line(Stream &out) {
   out.print(F(" sat="));
   out.print(g_diag.pcm1808_saturated_count);
 #endif
+  {
+    dsp_timing_t t{};
+    perf_timing_get(&t);
+    out.print(F(" dsp_us="));
+    out.print(t.dsp_block_us_last);
+    out.print('/');
+    out.print(t.dsp_block_us_mean);
+    out.print('/');
+    out.print(t.dsp_block_us_max);
+    out.print(F(" bud="));
+    out.print(t.dsp_block_budget_us);
+    out.print(F(" busy="));
+    out.print(t.loop_busy_pct);
+    out.print('%');
+    out.print(F(" short="));
+    out.print(t.short_writes);
+  }
   out.println();
 
   g_diag.adc_min_code = UINT16_MAX;
@@ -147,6 +167,7 @@ static void diagnostics_print_line(Stream &out) {
   g_diag.pcm1808_raw_left_peak_abs = 0;
   g_diag.pcm1808_raw_right_peak_abs = 0;
   g_diag.pcm1808_sample_peak_abs = 0;
+  perf_timing_clear_window_max();
 }
 #endif
 
@@ -167,8 +188,9 @@ void diagnostics_poll(void) {
   }
 
 #if DIAG_UART || DIAG_CDC
+  constexpr uint32_t kPrintIntervalMs = 2000u;
   static uint32_t last_ms = 0;
-  if ((now - last_ms) < 2000u) {
+  if ((now - last_ms) < kPrintIntervalMs) {
     return;
   }
 #if DIAG_CDC

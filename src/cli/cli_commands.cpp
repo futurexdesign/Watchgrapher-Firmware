@@ -14,7 +14,7 @@
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 namespace Cli {
 namespace {
@@ -110,7 +110,7 @@ void helpDsp(void) {
   Serial.println(F("    status | bypass [on|off]  Master process bypass (bare=on)"));
   Serial.println(F("    on|off|enable|disable <block>"));
   Serial.println(F("    get|set <block> <param> [value]"));
-  Serial.println(F("    events | beat|rate | metrics | match | spectrum"));
+  Serial.println(F("    events | beat|rate | metrics | timing|cpu | match | spectrum"));
   Serial.println(F("    errors [clear] | help [sub|block]"));
   Serial.println(F("  Shortcuts:"));
   Serial.println(F("    dsp set gain 12 | dsp on fir | dsp set fir preset 1"));
@@ -122,7 +122,7 @@ void helpDsp(void) {
  * @return true if {@code name} matched a known block (or alias).
  */
 bool helpDspBlock(const char *name) {
-  dsp_block_id_t id = control_api_block_from_name(name);
+  auto id = control_api_block_from_name(name);
   if (id >= DSP_BLOCK_COUNT) {
     return false;
   }
@@ -160,9 +160,10 @@ bool helpDspBlock(const char *name) {
     Serial.println(F("  Alias: event. Usage: dsp set event threshold 6"));
     break;
   case DSP_BLOCK_BEAT_RATE:
-    Serial.println(F("  Analysis: median inter-peak interval -> vph_raw / nearest common."));
+    Serial.println(F("  Analysis: unlock intervals -> vph, rate s/d, beat error ms, amplitude."));
     Serial.println(F("  Common: 14400 16200 18000 19800 21600 25200 28800 36000 43200 57600"));
-    Serial.println(F("  Alias: beat, rate, vph. Usage: dsp beat"));
+    Serial.println(F("  Params: liftAngle (10..90, default 51), vph (0=auto)"));
+    Serial.println(F("  Alias: beat, rate, vph. Usage: dsp beat  |  dsp set beat liftAngle 52"));
     break;
   case DSP_BLOCK_NOISE_FLOOR:
     Serial.println(F("  Analysis: slow EMA of quiet-block RMS used by event_detect/gate."));
@@ -267,12 +268,19 @@ void helpDspSub(const char *sub) {
     return;
   }
   if (equalsIgnoreCase(sub, "beat") || equalsIgnoreCase(sub, "rate")) {
-    Serial.println(F("CLI: dsp beat|rate — vph_raw / nearest common rate / lock"));
+    Serial.println(F("CLI: dsp beat|rate — vph / rate s/d / beat error / amplitude"));
     Serial.println(F("  Common: 14400 16200 18000 19800 21600 25200 28800 36000 43200 57600"));
     return;
   }
   if (equalsIgnoreCase(sub, "metrics")) {
     Serial.println(F("CLI: dsp metrics — pre/post peak & RMS, noise, agc_db, match, clip, lim"));
+    return;
+  }
+  if (equalsIgnoreCase(sub, "timing") || equalsIgnoreCase(sub, "cpu")) {
+    Serial.println(F("CLI: dsp timing|cpu        — DSP block + main-loop CPU headroom"));
+    Serial.println(F("CLI: dsp timing reset      — clear maxima / EMAs / busy window"));
+    Serial.println(F("  block_us last/mean/max vs budget_us (n/source_hz); loop busy%."));
+    Serial.println(F("  Also snapshots underrun/short-write/ring. PCM1808 path feeds DSP."));
     return;
   }
   if (equalsIgnoreCase(sub, "spectrum") || equalsIgnoreCase(sub, "fft") ||
@@ -353,8 +361,8 @@ void cmdDsp(int argc, char **argv) {
 
   if (equalsIgnoreCase(argv[1], "list")) {
     Serial.println(F("CLI: blocks:"));
-    for (int i = 0; i < (int)DSP_BLOCK_COUNT; i++) {
-      auto id = (dsp_block_id_t)i;
+    for (int i = 0; i < static_cast<int>(DSP_BLOCK_COUNT); i++) {
+      auto id = static_cast<dsp_block_id_t>(i);
       Serial.print(F("  "));
       Serial.print(control_api_block_name(id));
       Serial.print(F(" enabled="));
@@ -392,14 +400,14 @@ void cmdDsp(int argc, char **argv) {
       helpDspSub("enable");
       return;
     }
-    dsp_block_id_t id = control_api_block_from_name(argv[2]);
+    auto id = control_api_block_from_name(argv[2]);
     if (id >= DSP_BLOCK_COUNT) {
       Serial.println(F("CLI: unknown block (try: dsp list / dsp help <block>)"));
       return;
     }
     const bool turn_on = equalsIgnoreCase(argv[1], "enable") ||
                          equalsIgnoreCase(argv[1], "on");
-    bool ok = control_api_set_block_enabled(id, turn_on);
+    const bool ok = control_api_set_block_enabled(id, turn_on);
     Serial.println(ok ? F("CLI: ok") : F("CLI: failed (block not enableable)"));
     return;
   }
@@ -409,7 +417,7 @@ void cmdDsp(int argc, char **argv) {
       helpDspSub("get");
       return;
     }
-    dsp_block_id_t id = control_api_block_from_name(argv[2]);
+    auto id = control_api_block_from_name(argv[2]);
     float v = 0.f;
     if (!control_api_get_param(id, argv[3], &v)) {
       Serial.println(F("CLI: get failed (try: dsp help <block>)"));
@@ -479,9 +487,15 @@ void cmdDsp(int argc, char **argv) {
     Serial.println(n);
     for (uint32_t i = 0; i < n; i++) {
       Serial.print(F("  start="));
-      Serial.print((uint32_t)ev[i].start_sample);
+      Serial.print(static_cast<uint32_t>(ev[i].start_sample));
       Serial.print(F(" peak="));
-      Serial.print((uint32_t)ev[i].peak_sample);
+      Serial.print(static_cast<uint32_t>(ev[i].peak_sample));
+      Serial.print(F(" unlock="));
+      Serial.print(static_cast<uint32_t>(ev[i].unlock_sample));
+      Serial.print(F(" drop="));
+      Serial.print(static_cast<uint32_t>(ev[i].drop_sample));
+      Serial.print(F(" lift="));
+      Serial.print(ev[i].lift_samples);
       Serial.print(F(" dur="));
       Serial.print(ev[i].duration_samples);
       Serial.print(F(" rise="));
@@ -517,6 +531,37 @@ void cmdDsp(int argc, char **argv) {
     Serial.print(b.intervals_held);
     Serial.print(F(" src_hz="));
     Serial.println(b.source_hz);
+    auto print_window = [](const __FlashStringHelper *label,
+                           const dsp_beat_timing_window_t &w) {
+      Serial.print(label);
+      Serial.print(F(" rate="));
+      if (w.rate_valid) {
+        Serial.print(w.rate_s_day, 2);
+      } else {
+        Serial.print(F("n/a"));
+      }
+      Serial.print(F(" be_ms="));
+      if (w.beat_error_valid) {
+        Serial.print(w.beat_error_ms, 3);
+      } else {
+        Serial.print(F("n/a"));
+      }
+      Serial.print(F(" amp="));
+      if (w.amplitude_valid) {
+        Serial.print(w.amplitude_deg, 1);
+      } else {
+        Serial.print(F("n/a"));
+      }
+      Serial.print(F(" n="));
+      Serial.println(w.samples);
+    };
+    print_window(F("CLI: beat instant"), b.instant);
+    print_window(F("CLI: beat avg1s"), b.avg_1s);
+    print_window(F("CLI: beat avg10s"), b.avg_10s);
+    Serial.print(F("CLI: beat lift_angle="));
+    Serial.print(b.lift_angle_deg, 1);
+    Serial.print(F(" lift_ms="));
+    Serial.println(b.lift_time_ms, 3);
     if (b.events_seen == 0) {
       Serial.println(
           F("CLI: tip: no events yet - check dsp metrics noise_floor / threshold"));
@@ -547,6 +592,63 @@ void cmdDsp(int argc, char **argv) {
     Serial.print(m.clip_count);
     Serial.print(F(" lim="));
     Serial.println(m.limiter_count);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "timing") || equalsIgnoreCase(argv[1], "cpu")) {
+    if (argc > 2 && equalsIgnoreCase(argv[2], "reset")) {
+      control_api_reset_timing();
+      Serial.println(F("CLI: timing reset"));
+      return;
+    }
+    dsp_timing_t t{};
+    control_api_get_timing(&t);
+    uint32_t headroom = 0;
+    if (t.dsp_block_budget_us > 0) {
+      if (t.dsp_block_us_max < t.dsp_block_budget_us) {
+        headroom = static_cast<uint32_t>(
+            (static_cast<uint64_t>(t.dsp_block_budget_us - t.dsp_block_us_max) *
+             100ull) /
+            static_cast<uint64_t>(t.dsp_block_budget_us));
+      }
+    }
+    Serial.print(F("CLI: timing block_us last="));
+    Serial.print(t.dsp_block_us_last);
+    Serial.print(F(" mean="));
+    Serial.print(t.dsp_block_us_mean);
+    Serial.print(F(" max="));
+    Serial.print(t.dsp_block_us_max);
+    Serial.print(F(" budget="));
+    Serial.print(t.dsp_block_budget_us);
+    Serial.print(F(" (headroom_max≈"));
+    Serial.print(headroom);
+    Serial.print(F("%) n="));
+    Serial.print(t.dsp_block_samples);
+    Serial.print(F(" blocks="));
+    Serial.println(t.dsp_blocks);
+    Serial.print(F("         loop busy="));
+    Serial.print(t.loop_busy_pct);
+    Serial.print(F("% loop_us last="));
+    Serial.print(t.loop_us_last);
+    Serial.print(F(" mean="));
+    Serial.print(t.loop_us_mean);
+    Serial.print(F(" max="));
+    Serial.print(t.loop_us_max);
+    Serial.print(F(" idle_us/s="));
+    Serial.println(t.idle_us_per_s);
+    Serial.print(F("         und="));
+    Serial.print(t.underruns);
+    Serial.print(F(" short="));
+    Serial.print(t.short_writes);
+    Serial.print(F(" ring["));
+    Serial.print(t.ring_min);
+    Serial.print(',');
+    Serial.print(t.ring_max);
+    Serial.println(']');
+    if (t.dsp_blocks == 0) {
+      Serial.println(
+          F("CLI: tip: dsp_graph_process not called yet (PCM1808 path feeds it)"));
+    }
     return;
   }
 
@@ -605,7 +707,7 @@ void cmdDsp(int argc, char **argv) {
       Serial.print(F("  block="));
       Serial.print(control_api_block_name(err[i].block));
       Serial.print(F(" reason="));
-      Serial.print((int)err[i].reason);
+      Serial.print(static_cast<int>(err[i].reason));
       Serial.print(F(" t_ms="));
       Serial.println(err[i].uptime_ms);
     }
@@ -627,14 +729,15 @@ static const CliCommand kCommands[] = {
     {"diag", nullptr, cmdDiag, F("Periodic diagnostic dump on|off"),
      F("diag [on|off]"), helpDiag},
     {"dsp", nullptr, cmdDsp, F("DSP control plane"),
-     F("dsp list|bypass|on|off|get|set|events|beat|metrics|match|spectrum|errors|help"),
+     F("dsp list|bypass|on|off|get|set|events|beat|metrics|timing|match|spectrum|errors|help"),
      helpDsp},
 };
 
 } // namespace
 
 void registerAllCommands() {
-  registerCommands(kCommands, sizeof(kCommands) / sizeof(kCommands[0]));
+  constexpr size_t kCount = sizeof(kCommands) / sizeof(kCommands[0]);
+  registerCommands(kCommands, kCount);
 }
 
 } // namespace Cli

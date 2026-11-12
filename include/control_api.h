@@ -77,6 +77,12 @@ bool control_api_get_param(dsp_block_id_t id, const char *param, float *out);
 /** Copies current level / clip meters. */
 void control_api_get_metrics(dsp_metrics_t *out);
 
+/** Copies DSP block + main-loop CPU timing / headroom snapshot. */
+void control_api_get_timing(dsp_timing_t *out);
+
+/** Clears timing maxima, EMAs, and the 1 s busy window. */
+void control_api_reset_timing(void);
+
 /** Copies the current beat-rate estimate. */
 void control_api_get_beat_rate(dsp_beat_rate_t *out);
 

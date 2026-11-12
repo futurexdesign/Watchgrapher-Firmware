@@ -7,9 +7,9 @@
 
 #include "cli/cli_core.h"
 
-#include <ctype.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
 
 namespace Cli {
 namespace {
@@ -246,7 +246,7 @@ void dispatchLine(char *line) {
     return;
   }
 
-  const CliCommand *cmd = findCommand(argv[0]);
+  const auto *cmd = findCommand(argv[0]);
   if (cmd == nullptr || cmd->handler == nullptr) {
     Serial.println(F("CLI: unknown command (try 'help')"));
     return;
@@ -260,7 +260,7 @@ void printHelp(const char *topic) {
   }
 
   if (topic != nullptr && topic[0] != '\0') {
-    const CliCommand *cmd = findCommand(topic);
+    const auto *cmd = findCommand(topic);
     if (cmd == nullptr) {
       Serial.print(F("CLI: no help for '"));
       Serial.print(topic);
