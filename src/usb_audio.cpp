@@ -15,6 +15,7 @@
 #include "audio_ring.h"
 #include "audio_source.h"
 #include "diagnostics.h"
+#include "fw_identity.h"
 #include "hid_control.h"
 
 #include <Adafruit_TinyUSB.h>
@@ -29,14 +30,13 @@ static int16_t g_volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX + 1];
 static uint32_t g_samp_freq = CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE;
 static uint8_t g_clk_valid = 1;
 
-static const char *kUsbManufacturer = "TimegrapherStand";
-static const char *kUsbProduct = "Watch Timing Microphone (Prototype)";
-
 static audio_control_range_4_n_t(1) g_sample_freq_rng;
 static audio_sample_t g_samp_buf[APP_PKT_SAMPLES_NOM];
 static uint8_t g_pkt_bytes[APP_PKT_SAMPLES_NOM * APP_BYTES_PER_SAMPLE];
 static audio_sample_t g_last_sample;
 static uint32_t g_feed_ms;
+/** False until the first frame of a stream sets {@code g_feed_ms}. */
+static bool g_feed_primed;
 
 bool usb_audio_streaming(void) { return g_streaming; }
 
@@ -97,9 +97,9 @@ bool usb_audio_init(void) {
    * the Arduino port to link). We add UAC2 mic alongside it — documented
    * Arduino-path divergence from the audio-only spec.
    */
-  TinyUSBDevice.setID(0xCafe, 0x4003);
-  TinyUSBDevice.setManufacturerDescriptor(kUsbManufacturer);
-  TinyUSBDevice.setProductDescriptor(kUsbProduct);
+  TinyUSBDevice.setID(USB_VENDOR_ID, USB_PRODUCT_ID);
+  TinyUSBDevice.setManufacturerDescriptor(USB_MANUFACTURER_STRING);
+  TinyUSBDevice.setProductDescriptor(USB_PRODUCT_STRING);
 
   if (!usb_audio_register_interface()) {
     return false;
@@ -126,19 +126,18 @@ void usb_audio_task(void) {
   if (audio_source_state() == STREAM_STATE_USB_SUSPENDED) {
     return;
   }
-  uint32_t now = millis();
-  if (now == g_feed_ms) {
+  const uint32_t now = millis();
+  if (g_feed_primed && now == g_feed_ms) {
     return;
   }
   /* Catch up at most a few frames if the loop stalled briefly. */
-  uint32_t lag = now - g_feed_ms;
-  if (lag > 5u) {
-    lag = 5u;
-  }
-  if (g_feed_ms == 0) {
-    lag = 1u;
+  constexpr uint32_t kMaxCatchUpFrames = 5u;
+  uint32_t lag = g_feed_primed ? (now - g_feed_ms) : 1u;
+  if (lag > kMaxCatchUpFrames) {
+    lag = kMaxCatchUpFrames;
   }
   g_feed_ms = now;
+  g_feed_primed = true;
   for (uint32_t i = 0; i < lag; i++) {
     usb_audio_feed_frame();
   }
@@ -176,7 +175,7 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *req) {
   /* SET_INTERFACE: wValue low byte = alternate setting (not high byte). */
   uint8_t const alt = tu_u16_low(req->wValue);
   if (alt != 0) {
-    g_feed_ms = 0;
+    g_feed_primed = false;
     g_last_sample = 0;
     diagnostics_get()->usb_audio_stream_open_count++;
     audio_source_on_stream_open();
@@ -190,7 +189,7 @@ bool tud_audio_set_itf_close_ep_cb(uint8_t rhport,
   (void)rhport;
   (void)req;
   g_streaming = false;
-  g_feed_ms = 0;
+  g_feed_primed = false;
   diagnostics_get()->usb_audio_stream_close_count++;
   audio_source_on_stream_close();
   return true;

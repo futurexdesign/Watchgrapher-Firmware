@@ -4,18 +4,18 @@
 
 ```bash
 arecord -l
-arecord -D hw:CARD=WatchTiming,DEV=0 -c 1 -f S16_LE -r 48000 -d 60 watch_test.wav
+arecord -D hw:CARD=WatchTiming,DEV=0 -c 1 -f S24_3LE -r 48000 -d 60 watch_test.wav
 # Card name varies — use arecord -l after plugging in.
 python3 tests/host_analyze.py watch_test.wav
 ```
 
 ## macOS / Windows
 
-Record uncompressed 16-bit mono 48 kHz WAV. Disable enhancements, noise suppression, and automatic mic level.
+Record uncompressed 24-bit mono 48 kHz WAV. Disable enhancements, noise suppression, and automatic mic level.
 
 ## Synthetic expect
 
-997 Hz tone near −12 dBFS, stable amplitude, no periodic dropouts.
+The looped `tick-tock.wav` clip (19,192 samples, ~400 ms period), stable amplitude, no periodic dropouts.
 
 ## ADC expect
 

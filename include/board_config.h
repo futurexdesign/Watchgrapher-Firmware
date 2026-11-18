@@ -10,7 +10,7 @@
  * | kiwi*      | RP2350B | GPIO40 / ch0 |
  *
  * Override {@code ADC_GPIO}, {@code ADC_CHANNEL}, and {@code PCM1808_*} pins
- * via {@code -D} as needed. {@code BOARD_NAME} / {@code AUDIO_SOURCE_NAME}
+ * via {@code -D} as needed. {@code TG_BOARD_NAME} / {@code AUDIO_SOURCE_NAME}
  * feed diagnostic banners.
  */
 
@@ -27,11 +27,11 @@
 #endif
 
 #if defined(BOARD_PICO2)
-#define BOARD_NAME "Pico2"
+#define TG_BOARD_NAME "Pico2"
 #elif defined(BOARD_KIWI)
-#define BOARD_NAME "KiwiBoard"
+#define TG_BOARD_NAME "KiwiBoard"
 #else
-#define BOARD_NAME "RP2350"
+#define TG_BOARD_NAME "RP2350"
 #endif
 
 #if AUDIO_SOURCE == SYNTHETIC
@@ -102,4 +102,30 @@
 #endif
 #ifndef PCM1808_DOUT_GPIO
 #define PCM1808_DOUT_GPIO 4
+#endif
+
+/*
+ * SH1107 128x128 I2C OLED, driven from core 1 (display_ui.cpp).
+ * DISPLAY_SDA_GPIO / DISPLAY_SCL_GPIO must be an SDA / SCL pair of the same
+ * I2C block (GPIO n: block (n / 2) % 2, SDA when n is even), e.g. GP4/GP5
+ * (I2C0) or GP6/GP7 (I2C1). DISPLAY_ROTATION (0..3, quarter turns) orients
+ * the panel. DISPLAY_I2C_ADDR is tried first, then its 0x3C/0x3D sibling.
+ * DISPLAY_CONTRAST is the streaming brightness (CLI: display contrast <n>).
+ */
+#ifndef DISPLAY_SH1107
+#define DISPLAY_SH1107 0
+#endif
+#if DISPLAY_SH1107
+#if !defined(DISPLAY_SDA_GPIO) || !defined(DISPLAY_SCL_GPIO)
+#error "DISPLAY_SH1107=1 needs DISPLAY_SDA_GPIO and DISPLAY_SCL_GPIO"
+#endif
+#ifndef DISPLAY_I2C_ADDR
+#define DISPLAY_I2C_ADDR 0x3D /* this board's module; 0x3C is also tried */
+#endif
+#ifndef DISPLAY_ROTATION
+#define DISPLAY_ROTATION 0
+#endif
+#ifndef DISPLAY_CONTRAST
+#define DISPLAY_CONTRAST 0x7F /* while streaming, 1..255; idle uses 0x04 */
+#endif
 #endif

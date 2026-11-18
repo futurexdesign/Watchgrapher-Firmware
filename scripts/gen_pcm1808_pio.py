@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate board-specific pcm1808_i2s_*.pio.h from src/pcm1808_i2s.pio."""
+"""Regenerate board-specific pcm1808_i2s_*.pio.h from scripts/pcm1808_i2s.pio.in."""
 
 from __future__ import annotations
 

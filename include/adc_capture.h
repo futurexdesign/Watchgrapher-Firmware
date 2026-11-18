@@ -28,7 +28,7 @@ extern "C" {
  * Does not start conversions; call {@link adc_capture_start} when the host
  * opens the UAC streaming alternate setting.
  *
- * @return {@code true} on success (always, unless channel claim fails hard).
+ * @return {@code false} if no DMA channel is free.
  */
 bool adc_capture_init(void);
 

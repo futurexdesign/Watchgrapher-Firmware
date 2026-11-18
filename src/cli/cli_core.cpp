@@ -8,6 +8,7 @@
 #include "cli/cli_core.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -211,6 +212,19 @@ bool parseLong(const char *s, long &out) {
   char *end = nullptr;
   const long v = strtol(s, &end, 10);
   if (end == s || end == nullptr || *end != '\0') {
+    return false;
+  }
+  out = v;
+  return true;
+}
+
+bool parseFloat(const char *s, float &out) {
+  if (s == nullptr || *s == '\0') {
+    return false;
+  }
+  char *end = nullptr;
+  const float v = strtof(s, &end);
+  if (end == s || end == nullptr || *end != '\0' || !std::isfinite(v)) {
     return false;
   }
   out = v;

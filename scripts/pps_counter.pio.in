@@ -1,0 +1,44 @@
+; GPS 1 PPS period counter (template for scripts/gen_pps_pio.py).
+;
+; Counts 2-cycle loop iterations between consecutive rising edges of the pin
+; mapped as both IN base and JMP pin, and pushes the down-counter value. The
+; main loop recovers clk_sys cycles per period as 2 * (0xFFFFFFFF - x) plus a
+; fixed overhead (pps_counter_OVERHEAD_CYCLES). Edge sampling error is ±2
+; cycles per edge and does not accumulate across periods, because each period
+; starts exactly where the previous one ended. No IRQ: the FIFO is polled.
+
+.program pps_counter
+
+.define public OVERHEAD_CYCLES 4
+
+    wait 0 pin 0        ; align to the first rising edge
+    wait 1 pin 0
+.wrap_target
+    mov x, ~null        ; x = 0xFFFFFFFF
+high:
+    jmp x-- high_chk    ; 2 cycles per iteration while the pulse is high
+high_chk:
+    jmp pin high
+low:
+    jmp pin done        ; 2 cycles per iteration while low
+    jmp x-- low
+done:
+    mov isr, x
+    push noblock
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+static inline void pps_counter_program_init(PIO pio, uint sm, uint offset,
+                                            uint pps_gpio) {
+  pio_sm_config c = pps_counter_program_get_default_config(offset);
+  sm_config_set_in_pins(&c, pps_gpio);
+  sm_config_set_jmp_pin(&c, pps_gpio);
+  sm_config_set_in_shift(&c, false, false, 32);
+  sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+  sm_config_set_clkdiv(&c, 1.0f); /* count raw clk_sys cycles */
+  pio_gpio_init(pio, pps_gpio);
+  pio_sm_set_consecutive_pindirs(pio, sm, pps_gpio, 1, false);
+  pio_sm_init(pio, sm, offset, &c);
+}
+%}

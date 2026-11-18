@@ -157,7 +157,8 @@ Notifications **omit** `id`. Do not treat them as replies to in-flight requests.
 | `badParam` | Param name/value rejected by graph |
 | `notFound` | Unknown block name |
 | `tooLarge` | Reassembled JSON > 2048 or absurd `fragCount` |
-| `busy` | Prior request still processing (should be rare) |
+| `busy` | Prior request still processing, or `saveTimebase` while audio is streaming |
+| `flashError` | `saveTimebase` flash write or read-back failed |
 | `internal` | Unexpected firmware failure |
 
 ---
@@ -180,6 +181,28 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
 | `getErrors` | — | `{ "errors": DspError[] }` newest first |
 | `clearErrors` | — | `{ "cleared": true }` |
 | `subscribe` | rates/flags (§7) | Echo of active subscription |
+| `getTime` | — | `{ "tUs": N, "uptimeMs": N }`, the device µs timer, sampled first (calibration probe) |
+| `getTimebase` | — | `Timebase` (§5.2) |
+| `setTimebase` | `ppm` (−1000..1000), optional `source` (`"manual"` / `"ntp"`), `dateUnix`, `durationS` | `Timebase`; RAM only |
+| `saveTimebase` | — | `Timebase`; writes flash. `busy` while streaming |
+| `clearTimebase` | — | `Timebase`; 0 ppm / `"none"` in RAM |
+
+### 5.2 `Timebase`
+
+Sample-clock calibration (ppm, + = board clock fast). It applies to every timing result. See [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md).
+
+```json
+{
+  "ppm": -23.412, "source": "ntp",
+  "calPpm": -23.412, "calSource": "ntp", "dateUnix": 1763000000, "durationS": 1800,
+  "saved": true,
+  "pps": { "enabled": false, "locked": false, "ppm": 0, "window": 0, "good": 0, "rejects": 0, "noFix": 0 },
+  "gps": { "enabled": false, "fix": false, "quality": 0, "sats": 0, "hdop": 0, "utcUnix": 0,
+           "ageMs": -1, "sentences": 0, "errors": 0, "overruns": 0 }
+}
+```
+
+`ppm` / `source` is the correction in effect: PPS while it is locked, otherwise the stored `cal*` values. `gps` is the NMEA status in builds with `-DGPS_UART_RX=N` (PPS then only counts while `gps.fix` is true; `pps.noFix` counts discarded pulses); `ageMs` is the time since the last RMC sentence, -1 = never. `saved` is true when flash holds exactly the stored values.
 
 ### 5.1 `hello` result
 
@@ -226,7 +249,7 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
       "enabled": true,
       "params": { "threshold": 6, "prerollMs": 25, "tailMs": 25 }
     },
-    "beatRate": { "enabled": true, "params": { "liftAngle": 51, "vph": 0 } },
+    "beatRate": { "enabled": true, "params": { "liftAngle": 51, "vph": 0, "calPpm": 0, "windowS": 6, "avgS": 10 } },
     "noiseFloor": { "enabled": true, "params": {} },
     "eventLog": { "enabled": false, "params": {} },
     "softGate": {
@@ -293,6 +316,9 @@ JSON uses camelCase. Firmware maps to existing C/CLI names:
 | `notch` | `notch` |
 | `agc` | `agc` |
 
+The authoritative block / parameter name table is `src/dsp_blocks.cpp`
+(`dsp_block_info()`); the tables below mirror it.
+
 | JSON param | C / CLI param |
 |---|---|
 | `db` | `db` |
@@ -309,10 +335,22 @@ JSON uses camelCase. Firmware maps to existing C/CLI names:
 | `gainDb` | `gain_db` (get only) |
 | `liftAngle` | `liftAngle` / `lift_angle` |
 | `vph` | `vph` (`0` = auto nearest A/h) |
+| `calPpm` | `calPpm` / `cal_ppm` (get only over HID) |
+| `windowS` | `windowS` / `window_s` |
 
 `filterBank.preset`: `0`=bypass/off, `1`=wide, `2`=medium, `3`=narrow.  
 `notch.hz`: `50` or `60` only.  
 `beatRate.liftAngle`: degrees, 10..90 (default 51).
+`beatRate.calPpm`: sample-clock correction in effect, in ppm (+ = clock fast; the PPS
+value while PPS is locked). Read-only here: `patchState` ignores it, so echoing state
+back cannot overwrite a stored NTP calibration. Change it with `setTimebase`.
+`beatRate.windowS`: rate/beat-error fit window in seconds, 2..30 (default 6).  
+`beatRate.avgS`: integration time of the reported long average (`avgLong`, and the OLED readout) in seconds, 1..60 (default 10). Changing it keeps the sample history, so a longer window fills in as ticks arrive. Not persisted.  
+`gain.db`: -40..40. `eventDetect.threshold`: 1..100 (× noise floor);
+`prerollMs`: 0..100; `tailMs`: 1..200. `softGate.floorDb`: -60..0;
+`attackMs`: 0.1..50; `releaseMs`: 1..500. Non-finite values are rejected.
+An out-of-range value makes `patchState` reply `badParam`; fields applied
+earlier in the same patch are not rolled back.
 
 ---
 
@@ -412,15 +450,27 @@ Omitted subscribe fields leave the previous value unchanged. Response `result` e
 ### 8.2 `DspBeatRate`
 
 Unlock-based Witschi-style timing (rate s/d, beat error ms, amplitude °).  
-`beatRate.params.liftAngle` (default 51) and `beatRate.params.vph` (`0` = auto) are set via `patchState`.
+`beatRate.params` `liftAngle`, `vph` (`0` = auto), `windowS` and `avgS` are set via `patchState`; `calPpm` is reported there but set with `setTimebase`.
 
-Top-level `rateSDay` / `beatErrorMs` / `amplitudeDeg` are the **instant** view (last tick set). Nested windows:
+Rate and beat error come from a least-squares fit of sub-sample unlock times over the last `windowS` seconds, not from single intervals. Each tick refines the fit, so the instant values are already smoothed over that window. Fields that describe the fit and the timebase:
+
+| Key | Meaning |
+|---|---|
+| `sourceHz` | Analysis sample rate used for all timing math |
+| `sourceHzMeasured` | Measured capture frame rate (PCM1808), `0` where the rate is fixed by design |
+| `timebaseOk` | `false` while the capture rate is unverified or unsupported. In that case `locked` stays `false` and no timing is reported |
+| `ratePoints` | Ticks used in the fit (0 = no fit yet; at least 8 needed) |
+| `jitterUs` | RMS scatter of unlock times about the fit (µs). This is a signal-quality indicator |
+| `calPpm` / `calSource` | Sample-clock correction applied to all timing, and where it came from (`none` / `manual` / `ntp` / `pps`) |
+
+Top-level `rateSDay` / `beatErrorMs` / `amplitudeDeg` are the **instant** view (latest fit). Nested windows:
 
 | Key | Meaning |
 |---|---|
 | `instant` | Same values as the top-level rate/BE/amp fields |
 | `avg1s` | Arithmetic mean of instant samples over the last ~1 s |
-| `avg10s` | Arithmetic mean of instant samples over the last ~10 s |
+| `avgS` | Integration time of `avgLong` in seconds (the `beatRate.avgS` param) |
+| `avgLong` | Arithmetic mean of instant samples over the last `avgS` seconds. Replaces the fixed-10 s `avg10s` of earlier firmware |
 
 Rolling windows need ≥2 contributing samples per metric before `*Valid` is true. `samples` is the contributing tick count (max of the three metric counts).
 
@@ -434,6 +484,12 @@ Rolling windows need ≥2 contributing samples per metric before `*Valid` is tru
   "eventsSeen": 12,
   "intervalsHeld": 8,
   "sourceHz": 24000,
+  "sourceHzMeasured": 24000.012,
+  "timebaseOk": true,
+  "ratePoints": 47,
+  "jitterUs": 18.5,
+  "calPpm": -23.412,
+  "calSource": "ntp",
   "rateSDay": 4.2,
   "beatErrorMs": 0.35,
   "amplitudeDeg": 288.0,
@@ -460,7 +516,8 @@ Rolling windows need ≥2 contributing samples per metric before `*Valid` is tru
     "beatErrorValid": true,
     "amplitudeValid": true
   },
-  "avg10s": {
+  "avgS": 10,
+  "avgLong": {
     "rateSDay": 3.7,
     "beatErrorMs": 0.30,
     "amplitudeDeg": 285.0,

@@ -21,6 +21,8 @@ static stream_state_t g_state = STREAM_STATE_USB_UNCONFIGURED;
 static volatile bool g_capture_request;
 static volatile bool g_stream_armed;
 static bool g_awaiting_preamp;
+/** False when the capture backend failed to initialize (sticky until reset). */
+static bool g_backend_ok = true;
 
 #if AUDIO_SOURCE == SYNTHETIC
 #include "tick_tock_pcm.h"
@@ -91,15 +93,21 @@ static void enter_prefill(void) {
   g_state = STREAM_STATE_STREAM_PREFILL;
 }
 
-static void arm_recording(void) {
+static bool backend_healthy(void) {
 #if AUDIO_SOURCE == PCM1808
-  if (!pcm1808_clock_is_ok() || g_state == STREAM_STATE_STREAM_ERROR) {
+  return g_backend_ok && pcm1808_clock_is_ok();
+#else
+  return g_backend_ok;
+#endif
+}
+
+static void arm_recording(void) {
+  if (!backend_healthy()) {
     g_stream_armed = false;
     power_down();
     g_state = STREAM_STATE_STREAM_ERROR;
     return;
   }
-#endif
   g_stream_armed = true;
   g_capture_request = false;
   audio_ring_reset();
@@ -124,16 +132,17 @@ void audio_source_init(void) {
   g_awaiting_preamp = false;
   audio_ring_init();
 #if AUDIO_SOURCE == ADC
-  adc_capture_init();
+  g_backend_ok = adc_capture_init();
 #elif AUDIO_SOURCE == PCM1808
-  if (!pcm1808_clock_start()) {
-    g_state = STREAM_STATE_STREAM_ERROR;
-    power_down();
-  }
-  pcm1808_capture_init();
+  g_backend_ok = pcm1808_clock_start();
+  g_backend_ok = pcm1808_capture_init() && g_backend_ok;
 #elif AUDIO_SOURCE == SYNTHETIC
   g_pcm_index = 0;
 #endif
+  if (!g_backend_ok) {
+    g_state = STREAM_STATE_STREAM_ERROR;
+    power_down();
+  }
 }
 
 void audio_source_set_configured(bool configured) {

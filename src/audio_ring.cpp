@@ -10,6 +10,9 @@
 #include <climits>
 #include <cstring>
 
+static_assert((APP_RING_CAPACITY & (APP_RING_CAPACITY - 1u)) == 0u,
+              "APP_RING_CAPACITY must be a power of two (index wrap relies on it)");
+
 static audio_sample_t g_ring[APP_RING_CAPACITY];
 static volatile uint32_t g_write;
 static volatile uint32_t g_read;
@@ -78,17 +81,3 @@ uint32_t audio_ring_pop(audio_sample_t *out, uint32_t count, bool pad_silence) {
   return read;
 }
 
-uint32_t audio_ring_packet_samples(void) {
-#if APP_FIXED_PACKET_48
-  return APP_PKT_SAMPLES_NOM;
-#else
-  uint32_t occ = occupancy_raw();
-  if (occ > (APP_RING_PREFILL_SAMPLES + APP_PKT_SAMPLES_NOM * 4u)) {
-    return APP_PKT_SAMPLES_MAX;
-  }
-  if (occ < (APP_RING_PREFILL_SAMPLES / 2u)) {
-    return APP_PKT_SAMPLES_MIN;
-  }
-  return APP_PKT_SAMPLES_NOM;
-#endif
-}

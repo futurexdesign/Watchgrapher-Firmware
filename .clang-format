@@ -1,0 +1,14 @@
+# Project formatting for first-party firmware (src/, include/, tests/).
+# Matches the existing hand-written style: LLVM base, 2-space indent,
+# attached braces, case labels flush with switch.
+# Not applied to third_party/ or generated headers (tick_tock_pcm.h,
+# pcm1808_i2s_*.pio.h) — see .clang-format-ignore.
+BasedOnStyle: LLVM
+IndentWidth: 2
+ColumnLimit: 80
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+AlignConsecutiveMacros: AcrossComments

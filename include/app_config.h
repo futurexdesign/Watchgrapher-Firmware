@@ -69,17 +69,17 @@
 #endif
 
 /*
- * Repeat each mono sample this many times into the 48 kHz USB ring.
- * Empirically the PCM1808 path was producing ~24 k frames/s (DMA ~100
- * blocks/s of 240 frames) — typically LRCK at 24 kHz from 512×fs straps
- * or half-rate MCLK. 2× upsample restores pitch and stops underrun holds.
- * Set to 1 if scope shows LRCK ≈ 48 kHz.
+ * Initial guess for how many times each PCM1808 frame is repeated into the
+ * 48 kHz USB ring (2 = codec at 24 kHz, 512 fs straps; 1 = 48 kHz, 256 fs).
+ * Used only until the capture path has measured the real frame rate (about
+ * 1 s after start), after which the measured value wins. Setting it right
+ * avoids a brief pitch / underrun glitch on the first stream after boot.
  */
 #ifndef PCM1808_OUTPUT_UPSAMPLE
 #define PCM1808_OUTPUT_UPSAMPLE     2
 #endif
-#if PCM1808_OUTPUT_UPSAMPLE < 1
-#error "PCM1808_OUTPUT_UPSAMPLE must be >= 1"
+#if PCM1808_OUTPUT_UPSAMPLE < 1 || PCM1808_OUTPUT_UPSAMPLE > 2
+#error "PCM1808_OUTPUT_UPSAMPLE must be 1 or 2"
 #endif
 
 /**
@@ -102,7 +102,7 @@
 /**
  * Multiplier from centered ADC counts in the historical 16-bit domain (no AGC).
  * Applied then left-shifted 8 bits into PCM24. 16 maps ±2048 onto ±32768
- * before the shift (unity into 24-bit). Values &gt; 16 boost quiet ticks but
+ * before the shift (unity into 24-bit). Values > 16 boost quiet ticks but
  * clip earlier. Override: {@code -DADC_PCM_SCALE=N}.
  */
 #ifndef ADC_PCM_SCALE
@@ -118,18 +118,11 @@
 #define ADC_LPF_SHIFT               0
 #endif
 
-/** Occupancy targets for optional 47/48/49 samples-per-USB-frame steering. */
-#define APP_PKT_SAMPLES_MIN         47u
-#define APP_PKT_SAMPLES_NOM         48u
-#define APP_PKT_SAMPLES_MAX         49u
-
 /**
- * When 1, {@link audio_ring_packet_samples} always returns 48 (hosts that
- * dislike variable ISO sizes).
+ * Samples pushed to TinyUSB per 1 ms software frame. ISO packet sizing
+ * (47/48/49) is done by TinyUSB flow control ({@code CFG_TUD_AUDIO_EP_IN_FLOW_CONTROL}).
  */
-#ifndef APP_FIXED_PACKET_48
-#define APP_FIXED_PACKET_48         0
-#endif
+#define APP_PKT_SAMPLES_NOM         48u
 
 #ifndef DIAG_UART
 #define DIAG_UART                   0

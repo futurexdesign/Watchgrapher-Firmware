@@ -39,7 +39,6 @@ typedef struct {
   uint32_t adc_conversion_error_count;
   uint32_t dma_complete_count;
   uint32_t dma_overrun_count;
-  uint32_t adc_fifo_overrun_or_discontinuity_count;
   uint32_t pcm_ring_underrun_count;
   uint32_t pcm_ring_overrun_count;
   uint32_t usb_in_packet_count;
@@ -71,13 +70,19 @@ typedef struct {
   uint32_t pcm1808_mono_samples_emitted;
   uint32_t pcm1808_dma_block_overruns;
   uint32_t pcm1808_pio_fifo_stall_or_overflow;
-  uint32_t pcm1808_frame_sync_errors;
-  uint32_t pcm1808_resync_count;
   uint32_t pcm1808_sample_peak_abs;
   uint32_t pcm1808_saturated_count;
   /** Max |left24| / |right24| in the current diag window (raw I²S, pre-DSP). */
   uint32_t pcm1808_raw_left_peak_abs;
   uint32_t pcm1808_raw_right_peak_abs;
+  /** Last measured codec frame rate, milli-hertz (0 = not measured yet). */
+  uint32_t pcm1808_frame_rate_mhz;
+  /** Accepted {@code pcm1808_rate_status_t} (0 pending, 1 ok, 2 unsupported, 3 unknown). */
+  uint32_t pcm1808_rate_status;
+  /** Accepted MCLK / fs ratio (256, 384, 512) or 0. */
+  uint32_t pcm1808_mclk_ratio;
+  /** Sample repeat currently applied into the 48 kHz ring. */
+  uint32_t pcm1808_upsample;
 } diag_counters_t;
 
 /**

@@ -39,7 +39,13 @@ uint32_t audio_ring_push(const audio_sample_t *samples, uint32_t count);
  */
 uint32_t audio_ring_pop(audio_sample_t *out, uint32_t count, bool pad_silence);
 
-uint32_t audio_ring_packet_samples(void);
+/**
+ * Magnitude of a signed 24-bit sample. {@code APP_PCM24_MIN} maps to 2^23
+ * (no overflow, unlike negating an int32 at INT32_MIN).
+ */
+static inline uint32_t audio_pcm24_abs(audio_sample_t s) {
+  return (s < 0) ? (0u - static_cast<uint32_t>(s)) : static_cast<uint32_t>(s);
+}
 
 /**
  * Packs one signed 24-bit sample to 3-byte little-endian USB PCM.

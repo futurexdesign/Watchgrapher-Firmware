@@ -30,6 +30,7 @@ uint8_t g_busy_pct = 0;
 uint32_t g_idle_us_per_s = kUsPerSecond;
 
 uint32_t g_win_start_us = 0;
+bool g_win_started = false;
 uint64_t g_win_busy_us = 0;
 
 /** Integer EMA: mean += (sample - mean) / 8. */
@@ -41,9 +42,10 @@ uint32_t ema_update(uint32_t mean, uint32_t sample) {
 }
 
 void roll_busy_window(uint32_t now_us) {
-  if (g_win_start_us == 0u) {
+  if (!g_win_started) {
     g_win_start_us = now_us;
     g_win_busy_us = 0;
+    g_win_started = true;
     return;
   }
   uint32_t elapsed = now_us - g_win_start_us;
@@ -137,6 +139,7 @@ void perf_timing_reset(void) {
   g_idle_us_per_s = kUsPerSecond;
   g_win_start_us = time_us_32();
   g_win_busy_us = 0;
+  g_win_started = true;
 }
 
 void perf_timing_clear_window_max(void) {

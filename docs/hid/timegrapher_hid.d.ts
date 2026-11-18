@@ -24,6 +24,7 @@ export type HidErrorCode =
   | 'notFound'
   | 'tooLarge'
   | 'busy'
+  | 'flashError'
   | 'internal';
 
 /** CamelCase block keys in getState / patchState. */
@@ -106,6 +107,18 @@ export interface BeatRateParams {
   liftAngle: number;
   /** Nominal A/h; 0 = auto nearest common rate. */
   vph: number;
+  /**
+   * Sample-clock correction in effect (ppm, + = board fast; PPS while locked).
+   * Read-only: patchState ignores it. Use setTimebase to change it.
+   */
+  readonly calPpm?: number;
+  /** Rate / beat-error fit window in seconds, 2..30. Default 6. */
+  windowS?: number;
+  /**
+   * Integration time of {@link DspBeatRate.avgLong} in seconds, 1..60.
+   * Default 10. Also the averaging shown on the OLED. Not persisted.
+   */
+  avgS?: number;
 }
 
 export interface DspBlocksState {
@@ -214,7 +227,20 @@ export interface DspBeatRate {
   intervalSamples: number;
   eventsSeen: number;
   intervalsHeld: number;
+  /** Analysis sample rate used for all timing math (Hz). */
   sourceHz: number;
+  /** Measured capture frame rate (PCM1808), 0 where fixed by design. */
+  sourceHzMeasured: number;
+  /** False while the capture rate is unverified; no lock or timing then. */
+  timebaseOk: boolean;
+  /** Ticks in the least-squares rate fit (0 = no fit yet). */
+  ratePoints: number;
+  /** RMS unlock-time scatter about the fit (µs). */
+  jitterUs: number;
+  /** Sample-clock correction applied to all timing (ppm, + = board fast). */
+  calPpm: number;
+  /** Where calPpm came from. */
+  calSource: TimebaseSource;
   /** Instant daily rate (s/d); same as instant.rateSDay. */
   rateSDay: number;
   /** Instant beat error (ms); same as instant.beatErrorMs. */
@@ -232,8 +258,69 @@ export interface DspBeatRate {
   instant: DspBeatTimingWindow;
   /** Rolling ~1 s arithmetic mean of instant values. */
   avg1s: DspBeatTimingWindow;
-  /** Rolling ~10 s arithmetic mean of instant values. */
-  avg10s: DspBeatTimingWindow;
+  /** Integration time of {@link avgLong} in seconds (beatRate param avgS). */
+  avgS: number;
+  /**
+   * Rolling arithmetic mean of instant values over the last {@link avgS}
+   * seconds. (Replaces the fixed 10 s `avg10s` of earlier firmware.)
+   */
+  avgLong: DspBeatTimingWindow;
+}
+
+/** Origin of a sample-clock correction. */
+export type TimebaseSource = 'none' | 'manual' | 'ntp' | 'pps';
+
+/** getTime result: device µs timer, sampled first (calibration probe). */
+export interface HidTimeResult {
+  tUs: number;
+  uptimeMs: number;
+}
+
+/** getTimebase / setTimebase / saveTimebase / clearTimebase result. */
+export interface Timebase {
+  /** Correction in effect (PPS while locked, else stored), ppm, + = board fast. */
+  ppm: number;
+  source: TimebaseSource;
+  /** Stored calibration (RAM; `saved` says whether flash matches). */
+  calPpm: number;
+  calSource: Exclude<TimebaseSource, 'pps'>;
+  /** UNIX time the stored value was measured, 0 = unknown. */
+  dateUnix: number;
+  /** Measurement length (s), 0 = unknown / manual. */
+  durationS: number;
+  saved: boolean;
+  pps: {
+    enabled: boolean;
+    locked: boolean;
+    ppm: number;
+    /** Seconds in the current average (≤ 64). */
+    window: number;
+    good: number;
+    rejects: number;
+    /** Pulses ignored because GPS NMEA reported no fix (GPS_UART_RX builds). */
+    noFix: number;
+  };
+  /** GPS NMEA status; `enabled` false unless built with GPS_UART_RX. */
+  gps: {
+    enabled: boolean;
+    /** Valid fix now: RMC 'A', and GGA quality > 0 with ≥ GPS_MIN_SATS (default 4). */
+    fix: boolean;
+    /** GGA fix quality, 0 = none / no recent GGA. */
+    quality: number;
+    /** Satellites in use (GGA). */
+    sats: number;
+    /** HDOP, 0 = unknown. */
+    hdop: number;
+    /** Current UTC from GPS (UNIX s), 0 = never received. */
+    utcUnix: number;
+    /** Since the last RMC sentence (ms), -1 = never. */
+    ageMs: number;
+    sentences: number;
+    /** Bad checksum / overlong / UART framing errors. */
+    errors: number;
+    /** UART FIFO overruns (characters lost). */
+    overruns: number;
+  };
 }
 
 export interface DspEvent {
@@ -305,7 +392,12 @@ export type HidOp =
   | 'getEvents'
   | 'getErrors'
   | 'clearErrors'
-  | 'subscribe';
+  | 'subscribe'
+  | 'getTime'
+  | 'getTimebase'
+  | 'setTimebase'
+  | 'saveTimebase'
+  | 'clearTimebase';
 
 interface HidEnvelopeBase {
   v: HidProtocolVersion;
@@ -367,6 +459,33 @@ export interface HidSubscribeRequest extends HidRequestBase, HidSubscribePatch {
   op: 'subscribe';
 }
 
+export interface HidGetTimeRequest extends HidRequestBase {
+  op: 'getTime';
+}
+
+export interface HidGetTimebaseRequest extends HidRequestBase {
+  op: 'getTimebase';
+}
+
+export interface HidSetTimebaseRequest extends HidRequestBase {
+  op: 'setTimebase';
+  /** -1000..1000, + = board clock fast. */
+  ppm: number;
+  /** Default 'manual'. */
+  source?: 'manual' | 'ntp';
+  dateUnix?: number;
+  durationS?: number;
+}
+
+/** Fails with `busy` while audio is streaming, `flashError` on write failure. */
+export interface HidSaveTimebaseRequest extends HidRequestBase {
+  op: 'saveTimebase';
+}
+
+export interface HidClearTimebaseRequest extends HidRequestBase {
+  op: 'clearTimebase';
+}
+
 export type HidRequest =
   | HidHelloRequest
   | HidPingRequest
@@ -379,7 +498,12 @@ export type HidRequest =
   | HidGetEventsRequest
   | HidGetErrorsRequest
   | HidClearErrorsRequest
-  | HidSubscribeRequest;
+  | HidSubscribeRequest
+  | HidGetTimeRequest
+  | HidGetTimebaseRequest
+  | HidSetTimebaseRequest
+  | HidSaveTimebaseRequest
+  | HidClearTimebaseRequest;
 
 export interface HidSuccessResponse<T = unknown> extends HidEnvelopeBase {
   id: number;

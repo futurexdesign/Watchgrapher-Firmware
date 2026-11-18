@@ -29,13 +29,26 @@ MCLK starts in `audio_source_init()` on PCM1808 builds so GP21 toggles **without
 
 ## Strap levels (before module power)
 
-| Strap | Level | Meaning |
-|---|---|---|
-| MD1 | High | Master mode |
-| MD0 | High | 256×fs system clock (with FMT) |
-| FMT | Low | I²S format |
+MD1/MD0 select master or slave mode and the SCKI ratio (TI SLES177). With 12.288 MHz SCKI:
 
-Confirm against the module silkscreen / TI PCM1808 datasheet (SLES177B) for the exact MD1/MD0/FMT encoding on your board revision.
+| MD1 | MD0 | Mode | LRCK (fs) | Firmware |
+|---|---|---|---|---|
+| L | L | Slave | — | Not supported (the RP2350 does not drive BCK/LRCK) |
+| L | H | Master, 512×fs | 24 kHz | Supported: each frame repeated ×2 to USB |
+| H | L | Master, 384×fs | 32 kHz | Detected and reported, timing refused (48/32 is not an integer repeat) |
+| H | H | Master, 256×fs | 48 kHz | Supported: frames passed 1:1 to USB |
+
+FMT = L selects I²S, which the PIO program expects. Check the module silkscreen too, since many modules have their own pull resistors on these pins.
+
+The intended straps are MD1=H, MD0=H (48 kHz). The bench module measured about 24 k frames/s, which is consistent with 512×fs. The firmware no longer depends on which is true. About 1 s after capture starts, it measures the frame rate from DMA block timestamps, snaps it to one of the ratios above, and sets both the DSP analysis rate and the USB sample repeat to match. Until a rate is confirmed, or if it matches no supported ratio, `beat_rate` refuses to lock, so no rate, beat error or amplitude is ever computed against a guessed clock. Check the result with the CLI `status` command:
+
+```
+CLI: pcm1808 rate=ok measured_hz=24000.012 mclk_ratio=512 upsample=2 dsp_hz=24000 timebase=ok
+```
+
+The measurement counts frames as the PIO delivers them. If it reports 24 kHz while a scope shows LRCK at 48 kHz, the PIO is dropping frames: that is a capture bug, not a strap setting.
+
+SCKI and the timer both come from the same crystal, so the measurement identifies the ratio but cannot see crystal error. To correct for that, see [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md).
 
 ## Wiring tables
 
@@ -72,7 +85,7 @@ BCK/LRCK wait immediates are **baked into board-specific PIO headers** (`pcm1808
 1. Straps MD1=H, MD0=H, FMT=L **before** applying module power.
 2. Power module; verify 5 V analog / 3.3 V digital rails; no MCU pin backfeed.
 3. Flash `pico2_pcm1808` or `kiwi_pcm1808`; measure **GP21** ≈ 12.288 MHz average.
-4. With module clocked: **BCK ≈ 3.072 MHz**, **LRCK ≈ 48 kHz** (Pico 2: probe GP18 / GP20).
+4. With module clocked: **BCK ≈ 3.072 MHz**, **LRCK ≈ 48 kHz** (Pico 2: probe GP18 / GP20). At 512×fs straps expect half of both. Then confirm CLI `status` reports the same rate with `rate=ok`.
 5. Only then proceed to USB recording / capture soak.
 
 BCK/LRCK appear only after the module is powered with correct straps and receives SCKI.

@@ -37,7 +37,7 @@ pio run -e kiwi -t upload
 
 1. Flash `pico2_synthetic` or `kiwi_synthetic`.
 2. Confirm host sees **Watch Timing Microphone (Prototype)** (and a CDC serial port — Arduino TinyUSB side effect).
-3. Record 60 s WAV; run `tests/host_analyze.py` — expect ~997 Hz tone.
+3. Record 60 s WAV; run `tests/host_analyze.py` — expect the looped `tick-tock.wav` clip (~400 ms period).
 4. Verify analog bias on ADC pin **before** connecting TL071 SIG.
 5. Flash ADC env; capture silence + watch ticks.
 

@@ -3,13 +3,15 @@
  * @brief Thin transport-agnostic façade over {@link dsp_graph}.
  *
  * Keeps CDC / HID formatting out of the graph. Every call here is a straight
- * pass-through except name ↔ id helpers used by the CLI parser.
+ * pass-through except name ↔ id helpers (backed by {@link dsp_block_info})
+ * used by the CLI parser.
  *
  * @see control_api.h, dsp_graph.cpp
  */
 
 #include "control_api.h"
 
+#include "dsp_blocks.h"
 #include "dsp_graph.h"
 #include "perf_timing.h"
 
@@ -55,40 +57,7 @@ bool control_api_set_block_enabled(dsp_block_id_t id, bool on) {
 }
 
 const char *control_api_block_name(dsp_block_id_t id) {
-  switch (id) {
-  case DSP_BLOCK_BYPASS:
-    return "bypass";
-  case DSP_BLOCK_LEVEL_METER:
-    return "level_meter";
-  case DSP_BLOCK_GAIN:
-    return "gain";
-  case DSP_BLOCK_LIMITER:
-    return "limiter";
-  case DSP_BLOCK_FILTER_BANK:
-    return "filter_bank";
-  case DSP_BLOCK_EVENT_DETECT:
-    return "event_detect";
-  case DSP_BLOCK_BEAT_RATE:
-    return "beat_rate";
-  case DSP_BLOCK_NOISE_FLOOR:
-    return "noise_floor";
-  case DSP_BLOCK_EVENT_LOG:
-    return "event_log";
-  case DSP_BLOCK_SOFT_GATE:
-    return "soft_gate";
-  case DSP_BLOCK_NOTCH:
-    return "notch";
-  case DSP_BLOCK_AGC:
-    return "agc";
-  case DSP_BLOCK_MATCHED_FILTER:
-    return "matched_filter";
-  case DSP_BLOCK_FIR_BANK:
-    return "fir_bank";
-  case DSP_BLOCK_SPECTRUM:
-    return "spectrum";
-  default:
-    return "unknown";
-  }
+  return dsp_block_name(id);
 }
 
 dsp_block_id_t control_api_block_from_name(const char *name) {

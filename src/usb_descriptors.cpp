@@ -15,6 +15,10 @@
 #include <Arduino.h>
 #include <cstring>
 
+/* TinyUSB sizes its audio function buffers from this -D flag (platformio.ini). */
+static_assert(CFG_TUD_AUDIO_FUNC_1_DESC_LEN == TUD_AUDIO_MIC_ONE_CH_DESC_LEN,
+              "CFG_TUD_AUDIO_FUNC_1_DESC_LEN must match TUD_AUDIO_MIC_ONE_CH_DESC_LEN");
+
 /**
  * Adafruit_USBD_Interface that injects TinyUSB's UAC2 mono mic descriptor
  * into the configuration built by TinyUSBDevice.

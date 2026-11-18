@@ -176,6 +176,23 @@
     .tabs { display: flex; gap: 0.25rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
     .tabs button.active { background: var(--accent); border-color: var(--accent); color: #04140e; font-weight: 600; }
     .hidden { display: none !important; }
+    .cal-progress {
+      height: 0.35rem; background: var(--panel2); border: 1px solid var(--border);
+      border-radius: 999px; overflow: hidden; margin: 0.5rem 0;
+    }
+    .cal-progress > div { height: 100%; width: 0%; background: var(--accent); transition: width 0.4s; }
+    .cal-result {
+      font-family: var(--mono); font-size: 1.1rem; font-weight: 600; margin: 0.35rem 0;
+    }
+    .cal-result .sub { color: var(--muted); font-size: 0.78rem; font-weight: 500; }
+    .tb-manual { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-top: 0.6rem; }
+    .tb-manual input {
+      width: 6.5rem; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.4rem;
+    }
+    .hint.warn { color: var(--accent2); }
+    .hint.bad { color: var(--danger); }
+    .hint.good { color: var(--ok); }
   </style>
 </head>
 <body>
@@ -212,6 +229,13 @@
         <h2>Beat / timing</h2>
         <div class="toolbar" style="margin-bottom:0.45rem">
           <button id="btnBeat" disabled>getBeat</button>
+          <label title="Integration time of the averaged rate / beat error / amplitude (beatRate.avgS); also used by the OLED">average
+            <select id="avgS" disabled>
+              <option value="1">1 s</option><option value="2">2 s</option>
+              <option value="5">5 s</option><option value="10" selected>10 s</option>
+              <option value="20">20 s</option><option value="30">30 s</option>
+              <option value="60">60 s</option>
+            </select></label>
         </div>
         <div class="vph" id="beatVph">— <span class="nearest" id="beatNearest"></span></div>
         <div class="kv" id="beatKv"></div>
@@ -278,6 +302,40 @@
     </div>
 
     <div class="stack">
+      <section class="panel" id="timebasePanel">
+        <h2>Timebase calibration</h2>
+        <div class="toolbar" style="margin-bottom:0.5rem">
+          <button id="btnTbRefresh" disabled>getTimebase</button>
+          <button id="btnTbSave" disabled class="primary">Save to flash</button>
+          <button id="btnTbClear" disabled class="danger">Clear</button>
+        </div>
+        <div class="kv" id="tbKv"></div>
+        <div class="tb-manual">
+          <label class="hint" for="tbManualPpm" style="margin:0">ppm (+ = board fast)</label>
+          <input type="number" id="tbManualPpm" step="0.001" min="-1000" max="1000" value="0" />
+          <button id="btnTbSet" disabled>Set manual</button>
+        </div>
+        <p class="hint">Sets RAM only. Use Save to keep it across reboots; saving is refused while audio is streaming.</p>
+
+        <h2 style="margin-top:1rem">Measure against this computer's clock</h2>
+        <div class="sub-grid">
+          <label>duration (min) <input type="number" id="calDuration" min="2" max="240" value="30" /></label>
+          <label>interval (s) <input type="number" id="calInterval" min="0.5" max="10" step="0.5" value="2" /></label>
+          <label>bucket (s) <input type="number" id="calBucket" min="5" max="300" value="30" /></label>
+        </div>
+        <div class="toolbar">
+          <button id="btnCalStart" disabled class="primary">Start</button>
+          <button id="btnCalStop" disabled>Stop</button>
+          <button id="btnCalApply" disabled>Apply result</button>
+        </div>
+        <div class="cal-progress"><div id="calBar"></div></div>
+        <div class="cal-result" id="calResult">—</div>
+        <p class="hint" id="calStatus">Compares the device µs timer with this computer's NTP-synced clock
+          (Date.now). Warm the board up first. Keep this tab visible: background tabs throttle timers.
+          Browser clocks are coarse, so expect ±0.3–1 ppm in 30 min.
+          For the best result use scripts/calibrate_timebase.py.</p>
+      </section>
+
       <section class="panel">
         <h2>Subscribe (push)</h2>
         <div class="sub-grid">
@@ -354,6 +412,8 @@ const BLOCK_META = {
     params: [
       { key: 'liftAngle', type: 'number', step: 1, min: 10, max: 90 },
       { key: 'vph', type: 'number', step: 100, min: 0 },
+      { key: 'windowS', type: 'number', step: 1, min: 2, max: 30 },
+      { key: 'avgS', type: 'number', step: 1, min: 1, max: 60 },
     ],
   },
   eventLog: { label: 'eventLog', kind: 'analysis', params: [] },
@@ -496,6 +556,7 @@ const needConn = [
   'btnRefreshState', 'bypassChk', 'presetSafe', 'presetTiming', 'presetOffProcess',
   'btnMetrics', 'btnTiming', 'btnResetTiming', 'btnBeat', 'btnSpectrum', 'btnMatched',
   'btnSub', 'btnSubOff', 'btnEvents', 'btnErrors', 'btnClearErrors',
+  'btnTbRefresh', 'btnTbSave', 'btnTbClear', 'btnTbSet', 'btnCalStart', 'avgS',
 ];
 
 function setConnected(on) {
@@ -506,6 +567,9 @@ function setConnected(on) {
     const el = document.getElementById(id);
     if (el) el.disabled = !on;
   }
+  /* Calibration buttons also depend on whether a measurement is running. */
+  if (cal?.running) document.getElementById('btnCalStart').disabled = true;
+  if (!on) document.getElementById('btnCalApply').disabled = true;
 }
 
 function fmt(n, d = 4) {
@@ -561,6 +625,17 @@ function fmtWindow(w, key) {
   return w[validKey] ? fmt(w[key], key === 'beatErrorMs' ? 3 : key === 'amplitudeDeg' ? 1 : 2) : 'n/a';
 }
 
+/** Shows the device's avgS in the quick selector (adds an option for odd values). */
+function syncAvgSelect(v) {
+  const sel = document.getElementById('avgS');
+  if (v == null || !Number.isFinite(v) || document.activeElement === sel) return;
+  const s = String(v);
+  if (![...sel.options].some((o) => o.value === s)) {
+    sel.add(new Option(`${s} s`, s));
+  }
+  sel.value = s;
+}
+
 function renderBeat(b) {
   if (!b) return;
   const raw = b.vphRaw != null ? fmt(b.vphRaw, 1) : '—';
@@ -570,16 +645,18 @@ function renderBeat(b) {
     ` <span class="nearest">${rateStr}</span>`;
   const inst = b.instant || b;
   const a1 = b.avg1s;
-  const a10 = b.avg10s;
+  const aL = b.avgLong;
+  const L = b.avgS != null ? `${fmt(b.avgS, 0)}s` : 'avg';
+  syncAvgSelect(b.avgS);
   fillKv(document.getElementById('beatKv'), [
     ['locked', b.locked ? 'yes' : 'no', b.locked ? 'good' : 'warn'],
-    ['rate instant / 1s / 10s',
-      `${fmtWindow(inst, 'rateSDay')} / ${fmtWindow(a1, 'rateSDay')} / ${fmtWindow(a10, 'rateSDay')}`],
-    ['BE instant / 1s / 10s',
-      `${fmtWindow(inst, 'beatErrorMs')} / ${fmtWindow(a1, 'beatErrorMs')} / ${fmtWindow(a10, 'beatErrorMs')}`],
-    ['amp instant / 1s / 10s',
-      `${fmtWindow(inst, 'amplitudeDeg')} / ${fmtWindow(a1, 'amplitudeDeg')} / ${fmtWindow(a10, 'amplitudeDeg')}`],
-    ['avg samples 1s / 10s', `${a1?.samples ?? '—'} / ${a10?.samples ?? '—'}`],
+    [`rate instant / 1s / ${L}`,
+      `${fmtWindow(inst, 'rateSDay')} / ${fmtWindow(a1, 'rateSDay')} / ${fmtWindow(aL, 'rateSDay')}`],
+    [`BE instant / 1s / ${L}`,
+      `${fmtWindow(inst, 'beatErrorMs')} / ${fmtWindow(a1, 'beatErrorMs')} / ${fmtWindow(aL, 'beatErrorMs')}`],
+    [`amp instant / 1s / ${L}`,
+      `${fmtWindow(inst, 'amplitudeDeg')} / ${fmtWindow(a1, 'amplitudeDeg')} / ${fmtWindow(aL, 'amplitudeDeg')}`],
+    [`avg samples 1s / ${L}`, `${a1?.samples ?? '—'} / ${aL?.samples ?? '—'}`],
     ['liftAngleDeg', fmt(b.liftAngleDeg, 1)],
     ['liftTimeMs', fmt(b.liftTimeMs, 3)],
     ['confidence', fmt(b.confidence, 3)],
@@ -587,6 +664,12 @@ function renderBeat(b) {
     ['eventsSeen', fmt(b.eventsSeen, 0)],
     ['intervalsHeld', fmt(b.intervalsHeld, 0)],
     ['sourceHz', fmt(b.sourceHz, 0)],
+    ['sourceHzMeasured', b.sourceHzMeasured ? fmt(b.sourceHzMeasured, 3) : '—'],
+    ['timebaseOk', b.timebaseOk ? 'yes' : 'no', b.timebaseOk ? 'good' : 'bad'],
+    ['ratePoints', fmt(b.ratePoints, 0)],
+    ['jitterUs', fmt(b.jitterUs, 1)],
+    ['calPpm / source', `${fmt(b.calPpm, 3)} / ${b.calSource ?? '—'}`,
+      b.calSource && b.calSource !== 'none' ? 'good' : 'warn'],
   ]);
 }
 
@@ -699,6 +782,7 @@ async function patchState(patch) {
     const r = await client.request('patchState', { patch });
     state = r;
     renderBlocks();
+    syncAvgSelect(state.blocks?.beatRate?.params?.avgS);
     log('patchState ok', { bypass: r.bypass });
   } catch (e) {
     log('patchState err', e.message || e);
@@ -709,6 +793,7 @@ async function patchState(patch) {
 async function refreshState() {
   if (!client) return;
   state = await client.request('getState');
+  syncAvgSelect(state.blocks?.beatRate?.params?.avgS);
   renderBlocks();
   log('getState', { bypass: state.bypass, enabled: Object.entries(state.blocks || {})
     .filter(([, b]) => b.enabled).map(([k]) => k) });
@@ -720,6 +805,7 @@ async function refreshAll() {
   try { renderMetrics(await client.request('getMetrics')); } catch (e) { log('metrics', e.message); }
   try { renderTiming(await client.request('getTiming')); } catch (e) { log('timing', e.message); }
   try { renderBeat(await client.request('getBeat')); } catch (e) { log('beat', e.message); }
+  try { renderTimebase(await client.request('getTimebase')); } catch (e) { log('timebase', e.message); }
   try { renderMatched(await client.request('getMatched')); } catch (e) { log('matched', e.message); }
   try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log('spectrum', e.message); }
   try {
@@ -791,6 +877,7 @@ document.getElementById('btnConnect').onclick = async () => {
     };
     device.addEventListener('disconnect', () => {
       log('device disconnected');
+      calStop('device disconnected');
       if (client) { client.dispose(); client = null; }
       setConnected(false);
     });
@@ -809,6 +896,7 @@ document.getElementById('btnConnect').onclick = async () => {
 };
 
 document.getElementById('btnDisconnect').onclick = async () => {
+  calStop('disconnected');
   try {
     if (client) {
       try { await client.request('subscribe', { metricsHz: 0, beatHz: 0, timingHz: 0, events: false, errors: false }); } catch (_) {}
@@ -907,6 +995,10 @@ document.getElementById('btnResetTiming').onclick = async () => {
     renderTiming(await client.request('getTiming'));
   } catch (e) { log(e.message); }
 };
+document.getElementById('avgS').onchange = async (ev) => {
+  await patchState({ blocks: { beatRate: { params: { avgS: Number(ev.target.value) } } } });
+  ev.target.blur();
+};
 document.getElementById('btnBeat').onclick = async () => {
   try { renderBeat(await client.request('getBeat')); } catch (e) { log(e.message); }
 };
@@ -959,6 +1051,227 @@ document.getElementById('btnSubOff').onclick = async () => {
   document.getElementById('subEvents').value = '0';
   document.getElementById('subErrors').value = '0';
   document.getElementById('btnSub').click();
+};
+
+/* ---------------- Timebase calibration ----------------
+ * Same method as scripts/calibrate_timebase.py: poll getTime, stamp each
+ * reply with the round-trip midpoint of this computer's wall clock
+ * (Date.now, NTP-disciplined by the OS), keep the lowest-RTT sample per
+ * bucket, and fit device_us = a + b * host_us; ppm = (b - 1) * 1e6.
+ * performance.now() measures the RTT (fine resolution) and detects wall-clock
+ * steps; it is not used as the reference because on macOS / Windows it runs
+ * from an undisciplined counter.
+ */
+const S_PER_DAY_PER_PPM = 0.0864;
+const CAL_STEP_LIMIT_MS = 20;
+let cal = null;      // running or finished measurement
+let calFitResult = null;
+
+function renderTimebase(tb) {
+  if (!tb) return;
+  const date = tb.dateUnix ? new Date(tb.dateUnix * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—';
+  const rows = [
+    ['in effect', `${fmt(tb.ppm, 3)} ppm`, tb.source === 'none' ? 'warn' : 'good'],
+    ['source', tb.source],
+    ['stored', `${fmt(tb.calPpm, 3)} ppm (${tb.calSource})`],
+    ['saved to flash', tb.saved ? 'yes' : 'no', tb.saved ? 'good' : 'warn'],
+    ['measured', date],
+    ['duration', tb.durationS ? `${tb.durationS} s` : '—'],
+    ['rate effect', `${fmt(tb.ppm * S_PER_DAY_PER_PPM, 3)} s/d`],
+  ];
+  if (tb.pps?.enabled) {
+    rows.push(['GPS PPS', tb.pps.locked ? 'locked' : 'searching', tb.pps.locked ? 'good' : 'warn']);
+    rows.push(['PPS ppm', fmt(tb.pps.ppm, 4)]);
+    rows.push(['PPS window / good / rej', `${tb.pps.window} / ${tb.pps.good} / ${tb.pps.rejects}`]);
+    if (tb.gps?.enabled) rows.push(['PPS ignored (no fix)', fmt(tb.pps.noFix, 0)]);
+  }
+  if (tb.gps?.enabled) {
+    const g = tb.gps;
+    const fixTxt = g.ageMs < 0 ? 'no NMEA data' : g.fix ? `fix (q${g.quality})` : 'no fix';
+    rows.push(['GPS NMEA', fixTxt, g.fix ? 'good' : g.ageMs < 0 ? 'bad' : 'warn']);
+    rows.push(['satellites / HDOP', `${g.sats} / ${g.hdop ? fmt(g.hdop, 2) : '—'}`]);
+    rows.push(['GPS UTC', g.utcUnix ? new Date(g.utcUnix * 1000).toISOString().slice(0, 19).replace('T', ' ') : '—']);
+    rows.push(['NMEA ok / err / overrun', `${g.sentences} / ${g.errors} / ${g.overruns}`,
+      g.errors || g.overruns ? 'warn' : '']);
+  }
+  fillKv(document.getElementById('tbKv'), rows);
+}
+
+async function timebaseOp(op, extra = {}) {
+  try {
+    const tb = await client.request(op, extra);
+    renderTimebase(tb);
+    log(op, { ppm: tb.ppm, source: tb.source, saved: tb.saved });
+    return tb;
+  } catch (e) {
+    const msg = e.code === 'busy' ? 'close the audio stream (stop recording) before saving'
+      : (e.message || String(e));
+    log(`${op} err`, msg);
+    setCalStatus(`${op}: ${msg}`, 'bad');
+    return null;
+  }
+}
+
+function setCalStatus(text, cls = '') {
+  const el = document.getElementById('calStatus');
+  el.textContent = text;
+  el.className = `hint ${cls}`.trim();
+}
+
+/** Lowest-RTT sample in each bucketS slice of host time. */
+function calSelect(samples, bucketS) {
+  if (!samples.length) return [];
+  const t0 = samples[0].hostMs;
+  const best = new Map();
+  for (const s of samples) {
+    const k = Math.floor((s.hostMs - t0) / (bucketS * 1000));
+    const b = best.get(k);
+    if (!b || s.rttMs < b.rttMs) best.set(k, s);
+  }
+  return [...best.keys()].sort((a, b) => a - b).map((k) => best.get(k));
+}
+
+/** Least-squares slope of device µs against host µs (values centred first). */
+function calFit(points) {
+  const n = points.length;
+  if (n < 3) return null;
+  const h0 = points[0].hostMs, d0 = points[0].devUs;
+  const xs = points.map((p) => (p.hostMs - h0) * 1000);
+  const ys = points.map((p) => p.devUs - d0);
+  const xbar = xs.reduce((a, b) => a + b, 0) / n;
+  const ybar = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (xs[i] - xbar) ** 2;
+    sxy += (xs[i] - xbar) * (ys[i] - ybar);
+  }
+  if (sxx <= 0) return null;
+  const b = sxy / sxx, a = ybar - b * xbar;
+  let rss = 0;
+  for (let i = 0; i < n; i++) rss += (ys[i] - (a + b * xs[i])) ** 2;
+  const sigma = Math.sqrt(rss / (n - 2));
+  return {
+    ppm: (b - 1) * 1e6,
+    stderrPpm: sigma / Math.sqrt(sxx) * 1e6,
+    residUs: Math.sqrt(rss / n),
+    points: n,
+    spanS: (xs[n - 1] - xs[0]) / 1e6,
+  };
+}
+
+async function calSample() {
+  const p0 = performance.now(), w0 = Date.now();
+  const r = await client.request('getTime', {}, 2000);
+  const p1 = performance.now(), w1 = Date.now();
+  return { hostMs: (w0 + w1) / 2, devUs: r.tUs, rttMs: p1 - p0, wallMinusPerf: w1 - p1 };
+}
+
+function renderCalResult(fit, final) {
+  const el = document.getElementById('calResult');
+  if (!fit) { el.textContent = '—'; return; }
+  el.innerHTML = `${fit.ppm >= 0 ? '+' : ''}${fit.ppm.toFixed(3)} ppm ` +
+    `<span class="sub">± ${fit.stderrPpm.toFixed(3)} · ${(fit.ppm * S_PER_DAY_PER_PPM).toFixed(3)} s/d · ` +
+    `${fit.points} pts over ${Math.round(fit.spanS)} s${final ? '' : ' (running)'}</span>`;
+}
+
+function calStop(reason) {
+  if (cal && cal.running) {
+    cal.running = false;
+    cal.stopReason = reason;
+  }
+}
+
+async function calRun() {
+  const durationS = Math.max(120, Number(document.getElementById('calDuration').value) * 60 || 1800);
+  const intervalS = Math.max(0.5, Number(document.getElementById('calInterval').value) || 2);
+  const bucketS = Math.max(5, Number(document.getElementById('calBucket').value) || 30);
+  cal = { running: true, samples: [], startPerf: performance.now(), prevOffset: null,
+          hiddenSeen: false, stopReason: null, timeouts: 0 };
+  calFitResult = null;
+  document.getElementById('btnCalStart').disabled = true;
+  document.getElementById('btnCalStop').disabled = false;
+  document.getElementById('btnCalApply').disabled = true;
+  renderCalResult(null);
+  log('calibration start', { durationS, intervalS, bucketS });
+
+  const bar = document.getElementById('calBar');
+  while (cal.running && client) {
+    const elapsedS = (performance.now() - cal.startPerf) / 1000;
+    if (elapsedS >= durationS) break;
+    bar.style.width = `${(100 * elapsedS / durationS).toFixed(1)}%`;
+    try {
+      const s = await calSample();
+      if (cal.prevOffset != null && Math.abs(s.wallMinusPerf - cal.prevOffset) > CAL_STEP_LIMIT_MS) {
+        log('calibration: wall clock stepped', (s.wallMinusPerf - cal.prevOffset).toFixed(1), 'ms; restarting');
+        cal.samples = [];
+        cal.startPerf = performance.now();
+      }
+      cal.prevOffset = s.wallMinusPerf;
+      cal.samples.push(s);
+    } catch (e) {
+      cal.timeouts++;
+    }
+    const fit = calFit(calSelect(cal.samples, bucketS));
+    renderCalResult(fit, false);
+    const warn = cal.hiddenSeen ? ' Tab was hidden: sampling may have been throttled.' : '';
+    setCalStatus(`${Math.round(elapsedS)} / ${durationS} s · ${cal.samples.length} samples` +
+      (cal.timeouts ? ` · ${cal.timeouts} timeouts` : '') + warn, cal.hiddenSeen ? 'warn' : '');
+    await new Promise((r) => setTimeout(r, intervalS * 1000));
+  }
+
+  const stopped = cal.stopReason;
+  cal.running = false;
+  document.getElementById('btnCalStop').disabled = true;
+  document.getElementById('btnCalStart').disabled = !client;
+  const kept = calSelect(cal.samples, bucketS);
+  const fit = calFit(kept);
+  renderCalResult(fit, true);
+  if (!fit || fit.spanS < 60) {
+    setCalStatus(`Not enough data${stopped ? ` (${stopped})` : ''}. Run at least a few minutes.`, 'bad');
+    return;
+  }
+  bar.style.width = stopped ? bar.style.width : '100%';
+  calFitResult = fit;
+  document.getElementById('btnCalApply').disabled = !client;
+  const rtts = cal.samples.map((s) => s.rttMs).sort((a, b) => a - b);
+  const med = rtts[Math.floor(rtts.length / 2)];
+  let msg = `${stopped ? `Stopped early (${stopped}). ` : 'Done. '}` +
+    `RTT min ${rtts[0].toFixed(2)} / median ${med.toFixed(2)} ms; residual ${Math.round(fit.residUs)} µs.`;
+  let cls = 'good';
+  if (fit.stderrPpm > 0.5) { msg += ' Uncertainty > 0.5 ppm: run longer.'; cls = 'warn'; }
+  if (cal.hiddenSeen) { msg += ' Tab was hidden during the run.'; cls = 'warn'; }
+  setCalStatus(msg + ' Apply sends it to the device (RAM); then Save to flash.', cls);
+  log('calibration result', { ppm: fit.ppm, stderrPpm: fit.stderrPpm, points: fit.points, spanS: fit.spanS });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && cal?.running) cal.hiddenSeen = true;
+});
+
+document.getElementById('btnTbRefresh').onclick = () => timebaseOp('getTimebase');
+document.getElementById('btnTbSave').onclick = () => timebaseOp('saveTimebase');
+document.getElementById('btnTbClear').onclick = () => timebaseOp('clearTimebase');
+document.getElementById('btnTbSet').onclick = () => {
+  const ppm = Number(document.getElementById('tbManualPpm').value);
+  if (!Number.isFinite(ppm) || Math.abs(ppm) > 1000) {
+    setCalStatus('ppm must be between -1000 and 1000', 'bad');
+    return;
+  }
+  timebaseOp('setTimebase', { ppm, source: 'manual' });
+};
+document.getElementById('btnCalStart').onclick = () => {
+  calRun().catch((e) => { log('calibration err', e.message || e); calStop('error'); });
+};
+document.getElementById('btnCalStop').onclick = () => calStop('stopped by user');
+document.getElementById('btnCalApply').onclick = async () => {
+  if (!calFitResult) return;
+  const tb = await timebaseOp('setTimebase', {
+    ppm: Number(calFitResult.ppm.toFixed(3)),
+    source: 'ntp',
+    dateUnix: Math.floor(Date.now() / 1000),
+    durationS: Math.round(calFitResult.spanS),
+  });
+  if (tb) setCalStatus(`Applied ${tb.calPpm.toFixed(3)} ppm (RAM). Press Save to flash to keep it.`, 'good');
 };
 
 document.getElementById('btnClearLog').onclick = () => { logEl.textContent = ''; };

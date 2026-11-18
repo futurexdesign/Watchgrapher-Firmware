@@ -96,10 +96,8 @@ void power_control_begin_preamp_warmup(uint32_t now_ms) {
 
 void power_control_abort_preamp(uint32_t now_ms) {
   (void)now_ms;
-  if (g_settling || g_ready || g_requested || g_actual_on) {
-    if (g_settling) {
-      diagnostics_get()->preamp_start_aborted_count++;
-    }
+  if (g_settling) {
+    diagnostics_get()->preamp_start_aborted_count++;
   }
   g_settling = false;
   g_ready = false;

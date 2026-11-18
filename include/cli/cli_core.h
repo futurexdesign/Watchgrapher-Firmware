@@ -90,4 +90,13 @@ bool equalsIgnoreCase(const char *a, const char *b);
  */
 bool parseLong(const char *s, long &out);
 
+/**
+ * Parses a full-string finite decimal float (no trailing junk).
+ *
+ * @param s Input token.
+ * @param out Parsed value on success.
+ * @return {@code false} if {@code s} is null/empty/non-numeric/non-finite.
+ */
+bool parseFloat(const char *s, float &out);
+
 } // namespace Cli

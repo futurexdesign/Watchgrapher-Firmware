@@ -68,7 +68,7 @@ def stats(samples, full_scale: float, clip_lo: int, clip_hi: int):
 
 
 def estimate_tone_hz(samples, rate: int) -> float | None:
-    """Zero-crossing estimate — good enough for 997 Hz synthetic check."""
+    """Zero-crossing frequency estimate (rough; for tonal test signals)."""
     if len(samples) < rate // 10:
         return None
     # High-pass-ish: remove mean

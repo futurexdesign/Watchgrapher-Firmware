@@ -33,18 +33,39 @@ extern "C" {
 void dsp_graph_init(void);
 
 /**
+ * Clears per-stream analysis state (detector, event/beat history, timing
+ * averages, meters, filter delay lines) while keeping enable flags and
+ * parameters. Call when capture (re)starts so a new recording does not inherit
+ * intervals or events from the previous one; source indices restart at 0.
+ */
+void dsp_graph_reset_stream(void);
+
+/**
  * Sets the sample rate of samples fed to {@link dsp_graph_process} for timing
- * math (event pre-roll/tail, beat intervals → vph).
+ * math (event pre-roll/tail, beat intervals → vph, filter design).
  *
  * USB / ring rate is always {@code APP_SAMPLE_RATE_HZ} (48 kHz). On the
- * PCM1808 path with {@code PCM1808_OUTPUT_UPSAMPLE=2}, analysis runs on
- * pre-upsample frames (~24 kHz) — call this with {@code 48000/upsample}.
+ * PCM1808 path analysis runs on codec frames before the sample repeat, at
+ * the measured nominal rate (24 or 48 kHz). Callers changing the rate of a
+ * running stream should also call {@link dsp_graph_reset_stream}.
  * Default after init is {@code DSP_SAMPLE_RATE_HZ} (48000).
  */
 void dsp_graph_set_source_rate(uint32_t hz);
 
 /** @return Rate last set by {@link dsp_graph_set_source_rate}. */
 uint32_t dsp_graph_source_rate(void);
+
+/**
+ * Reports whether the source rate is verified, plus the measured rate.
+ *
+ * While {@code ok} is false the beat_rate block refuses to lock, so no rate,
+ * beat error or amplitude is reported against a guessed clock. A change of
+ * {@code ok} clears beat history. Default after init: verified, measured 0.
+ *
+ * @param ok True when the capture clock matches {@link dsp_graph_source_rate}.
+ * @param measured_hz Last measured frame rate (Hz), or 0 if not measured.
+ */
+void dsp_graph_set_timebase(bool ok, float measured_hz);
 
 /**
  * Runs one DSP block on mono float full-scale input and writes PCM24 out.
@@ -156,12 +177,6 @@ bool dsp_graph_pop_async_message(char *buf, size_t buflen);
  * Scale is {@code 1/8388608} so ±full-scale maps to ~±1.0.
  */
 float dsp_sample_from_pcm1808_left24(int32_t left24);
-
-/**
- * Converts DC-centered onboard ADC counts to approximate float full-scale.
- * Scale is {@code 1/2048} (±2048 counts ≈ ±1.0).
- */
-float dsp_sample_from_adc_centered(int32_t centered_counts);
 
 #ifdef __cplusplus
 }

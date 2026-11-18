@@ -126,8 +126,6 @@ static void diagnostics_print_line(Stream &out) {
   out.print(g_diag.pcm1808_dma_blocks);
   out.print(F(" mono="));
   out.print(g_diag.pcm1808_mono_samples_emitted);
-  out.print(F(" resync="));
-  out.print(g_diag.pcm1808_resync_count);
   out.print(F(" rawL="));
   out.print(g_diag.pcm1808_raw_left_peak_abs);
   out.print(F(" rawR="));
@@ -136,6 +134,12 @@ static void diagnostics_print_line(Stream &out) {
   out.print(g_diag.pcm1808_sample_peak_abs);
   out.print(F(" sat="));
   out.print(g_diag.pcm1808_saturated_count);
+  out.print(F(" fs="));
+  out.print(g_diag.pcm1808_frame_rate_mhz / 1000u);
+  out.print(F(" ratio="));
+  out.print(g_diag.pcm1808_mclk_ratio);
+  out.print(F(" up="));
+  out.print(g_diag.pcm1808_upsample);
 #endif
   {
     dsp_timing_t t{};

@@ -18,7 +18,12 @@
 | Test | Result |
 |---|---|
 | `tests/test_pcm_conversion.c` | OK (ADC mirror) |
-| `tests/test_pcm1808_pcm_conversion.c` | OK (P3.0 §5.5 vectors) |
+| `tests/test_pcm1808_pcm_conversion.cpp` | OK (P3.0 §5.5 vectors) |
+| `tests/test_pcm1808_rate.cpp` | OK (256/384/512 fs classification) |
+| `tests/test_beat_fit.cpp` | OK (≈0.1 s/d on whole-sample ticks; dropouts, spurious events, long runs) |
+| `tests/test_pps_filter.cpp` | OK (23.4 ppm ± 0.001; glitch / missed-pulse rejection) |
+| `tests/test_ui_format.cpp` | OK (rate / amplitude / BE / bph formatting, widths, trend scale) |
+| `tests/test_calibrate_timebase.py` | OK (30 min synthetic: 23.4 ppm ± 0.02; min-RTT 6× better with latency spikes) |
 | `tests/test_ring_buffer.c` | OK (if run) |
 
 ## Checklist
@@ -53,4 +58,4 @@
 2. Host-side success (enumeration, ALSA/CoreAudio/WASAPI) is unverified here for PCM1808.
 3. Fractional MCLK has edge jitter by design; measure average frequency.
 4. PIO BCK/LRCK waits are hardcoded to GPIO 2/3; pin changes need PIO regen.
-5. `APP_FIXED_PACKET_48` can be set to `1` if a host rejects variable ISO packet sizes.
+5. ISO packet sizing (47/48/49) is handled by TinyUSB flow control (`CFG_TUD_AUDIO_EP_IN_FLOW_CONTROL=1`); the former `APP_FIXED_PACKET_48` knob was unused and has been removed.

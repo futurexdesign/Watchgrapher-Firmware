@@ -1,0 +1,3 @@
+third_party/*
+include/tick_tock_pcm.h
+include/pcm1808_i2s_*.pio.h

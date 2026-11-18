@@ -10,18 +10,19 @@
 #include "cli/cli_core.h"
 #include "control_api.h"
 #include "diagnostics.h"
+#include "display_ui.h"
+#include "fw_identity.h"
+#include "pcm1808_rate.h"
+#include "timebase.h"
 #include "usb_audio.h"
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <cstdlib>
+#include <hardware/timer.h>
 
 namespace Cli {
 namespace {
-
-#ifndef FW_VERSION
-#define FW_VERSION "0.1.0-dev"
-#endif
 
 const __FlashStringHelper *streamStateName(stream_state_t s) {
   switch (s) {
@@ -102,7 +103,7 @@ void cmdDiag(int argc, char **argv) {
  * Prints the full DSP subcommand reference (also used by {@code dsp help}).
  */
 void helpDsp(void) {
-  Serial.println(F("  DSP control plane (transport-agnostic; same API later via HID)."));
+  Serial.println(F("  DSP control plane (transport-agnostic; same API over WebHID)."));
   Serial.println(F("  Analysis never changes PCM. Process mutates only when enabled"));
   Serial.println(F("  and master bypass is off. Order: notch iir fir gate gain agc lim."));
   Serial.println(F("  Subcommands:"));
@@ -140,7 +141,7 @@ bool helpDspBlock(const char *name) {
     break;
   case DSP_BLOCK_GAIN:
     Serial.println(F("  Process: fixed make-up gain in dB applied to every sample."));
-    Serial.println(F("  Params: db"));
+    Serial.println(F("  Params: db (-40..40)"));
     Serial.println(F("  Usage: dsp set gain 12   |  dsp set gain db 12  |  dsp get gain db"));
     break;
   case DSP_BLOCK_LIMITER:
@@ -156,14 +157,18 @@ bool helpDspBlock(const char *name) {
   case DSP_BLOCK_EVENT_DETECT:
     Serial.println(F("  Analysis: opens a window on impulsive peaks above noise*threshold."));
     Serial.println(F("  Feeds event_log and beat_rate. Does not change PCM."));
-    Serial.println(F("  Params: threshold, preroll_ms, tail_ms"));
+    Serial.println(F("  Params: threshold (1..100, x noise), preroll_ms (0..100), tail_ms (1..200)"));
     Serial.println(F("  Alias: event. Usage: dsp set event threshold 6"));
     break;
   case DSP_BLOCK_BEAT_RATE:
-    Serial.println(F("  Analysis: unlock intervals -> vph, rate s/d, beat error ms, amplitude."));
+    Serial.println(F("  Analysis: unlock intervals -> vph lock; least-squares fit of"));
+    Serial.println(F("  sub-sample unlock times -> rate s/d, beat error ms; lift -> amplitude."));
     Serial.println(F("  Common: 14400 16200 18000 19800 21600 25200 28800 36000 43200 57600"));
-    Serial.println(F("  Params: liftAngle (10..90, default 51), vph (0=auto)"));
-    Serial.println(F("  Alias: beat, rate, vph. Usage: dsp beat  |  dsp set beat liftAngle 52"));
+    Serial.println(F("  Params: lift_angle (10..90, default 51), vph (0=auto),"));
+    Serial.println(F("    window_s (2..30 fit window, default 6),"));
+    Serial.println(F("    avg_s (1..60 reported average / display, default 10),"));
+    Serial.println(F("    cal_ppm (-1000..1000 clock error; same as 'timebase set')"));
+    Serial.println(F("  Alias: beat, rate, vph. Usage: dsp beat  |  dsp set beat lift_angle 52"));
     break;
   case DSP_BLOCK_NOISE_FLOOR:
     Serial.println(F("  Analysis: slow EMA of quiet-block RMS used by event_detect/gate."));
@@ -176,7 +181,7 @@ bool helpDspBlock(const char *name) {
   case DSP_BLOCK_SOFT_GATE:
     Serial.println(F("  Process: attenuates between ticks; opens fast on impulses."));
     Serial.println(F("  Preserves transients while lowering hiss between beats."));
-    Serial.println(F("  Params: floor_db, attack_ms, release_ms"));
+    Serial.println(F("  Params: floor_db (-60..0), attack_ms (0.1..50), release_ms (1..500)"));
     Serial.println(F("  Alias: gate. Usage: dsp on gate  |  dsp set gate floor_db -12"));
     break;
   case DSP_BLOCK_NOTCH:
@@ -310,7 +315,7 @@ void cmdVersion(int argc, char **argv) {
   Serial.print(F("CLI: timegrapher-stand fw "));
   Serial.print(F(FW_VERSION));
   Serial.print(F(" board="));
-  Serial.print(F(BOARD_NAME));
+  Serial.print(F(TG_BOARD_NAME));
   Serial.print(F(" source="));
   Serial.print(F(AUDIO_SOURCE_NAME));
   Serial.print(F(" built "));
@@ -337,6 +342,24 @@ void cmdStatus(int argc, char **argv) {
   Serial.print(control_api_get_bypass() ? F("true") : F("false"));
   Serial.print(F(" uptime_ms="));
   Serial.println(millis());
+#if AUDIO_SOURCE == PCM1808
+  const auto *d = diagnostics_get();
+  Serial.print(F("CLI: pcm1808 rate="));
+  Serial.print(pcm1808_rate_status_name(
+      static_cast<pcm1808_rate_status_t>(d->pcm1808_rate_status)));
+  Serial.print(F(" measured_hz="));
+  Serial.print(static_cast<double>(d->pcm1808_frame_rate_mhz) / 1000.0, 3);
+  Serial.print(F(" mclk_ratio="));
+  Serial.print(d->pcm1808_mclk_ratio);
+  Serial.print(F(" upsample="));
+  Serial.print(d->pcm1808_upsample);
+  dsp_beat_rate_t b{};
+  control_api_get_beat_rate(&b);
+  Serial.print(F(" dsp_hz="));
+  Serial.print(b.source_hz);
+  Serial.print(F(" timebase="));
+  Serial.println(b.timebase_ok ? F("ok") : F("unverified"));
+#endif
 }
 
 void cmdDsp(int argc, char **argv) {
@@ -440,36 +463,33 @@ void cmdDsp(int argc, char **argv) {
      */
     dsp_block_id_t id = DSP_BLOCK_COUNT;
     const char *param = nullptr;
-    float v = 0.f;
+    const char *value_text = nullptr;
     if (argc >= 5) {
       id = control_api_block_from_name(argv[2]);
       if (id == DSP_BLOCK_GAIN && equalsIgnoreCase(argv[4], "db") &&
           !equalsIgnoreCase(argv[3], "db")) {
         param = "db";
-        v = strtof(argv[3], nullptr);
+        value_text = argv[3];
       } else {
         param = argv[3];
-        v = strtof(argv[4], nullptr);
+        value_text = argv[4];
       }
-    } else if (argc == 4 && equalsIgnoreCase(argv[2], "gain")) {
+    } else if (argc == 4 && control_api_block_from_name(argv[2]) == DSP_BLOCK_GAIN) {
       id = DSP_BLOCK_GAIN;
       param = "db";
-      v = strtof(argv[3], nullptr);
-    } else if (argc == 4 &&
-               (equalsIgnoreCase(argv[2], "notch") ||
-                control_api_block_from_name(argv[2]) == DSP_BLOCK_NOTCH)) {
+      value_text = argv[3];
+    } else if (argc == 4 && control_api_block_from_name(argv[2]) == DSP_BLOCK_NOTCH) {
       id = DSP_BLOCK_NOTCH;
       param = "hz";
-      v = strtof(argv[3], nullptr);
-    } else if (argc == 5 &&
-               (equalsIgnoreCase(argv[2], "fir") ||
-                control_api_block_from_name(argv[2]) == DSP_BLOCK_FIR_BANK) &&
-               equalsIgnoreCase(argv[3], "preset")) {
-      id = DSP_BLOCK_FIR_BANK;
-      param = "preset";
-      v = strtof(argv[4], nullptr);
+      value_text = argv[3];
     } else {
       helpDspSub("set");
+      return;
+    }
+    float v = 0.f;
+    if (!parseFloat(value_text, v)) {
+      Serial.print(F("CLI: not a number: "));
+      Serial.println(value_text);
       return;
     }
     if (!control_api_set_param(id, param, v)) {
@@ -530,7 +550,21 @@ void cmdDsp(int argc, char **argv) {
     Serial.print(F(" intervals="));
     Serial.print(b.intervals_held);
     Serial.print(F(" src_hz="));
-    Serial.println(b.source_hz);
+    Serial.print(b.source_hz);
+    if (b.source_hz_measured > 0.f) {
+      Serial.print(F(" measured_hz="));
+      Serial.print(b.source_hz_measured, 3);
+    }
+    Serial.print(F(" timebase="));
+    Serial.println(b.timebase_ok ? F("ok") : F("unverified"));
+    Serial.print(F("CLI: beat fit_points="));
+    Serial.print(b.rate_points);
+    Serial.print(F(" jitter_us="));
+    Serial.print(b.jitter_us, 1);
+    Serial.print(F(" cal_ppm="));
+    Serial.print(b.cal_ppm, 3);
+    Serial.print(F(" cal_source="));
+    Serial.println(b.cal_source ? b.cal_source : "none");
     auto print_window = [](const __FlashStringHelper *label,
                            const dsp_beat_timing_window_t &w) {
       Serial.print(label);
@@ -557,12 +591,20 @@ void cmdDsp(int argc, char **argv) {
     };
     print_window(F("CLI: beat instant"), b.instant);
     print_window(F("CLI: beat avg1s"), b.avg_1s);
-    print_window(F("CLI: beat avg10s"), b.avg_10s);
+    {
+      char label[32];
+      snprintf(label, sizeof(label), "CLI: beat avg%gs", static_cast<double>(b.avg_s));
+      Serial.print(label);
+      print_window(F(""), b.avg_long);
+    }
     Serial.print(F("CLI: beat lift_angle="));
     Serial.print(b.lift_angle_deg, 1);
     Serial.print(F(" lift_ms="));
     Serial.println(b.lift_time_ms, 3);
-    if (b.events_seen == 0) {
+    if (!b.timebase_ok) {
+      Serial.println(F("CLI: tip: capture rate not verified yet - no lock "
+                       "(see status)"));
+    } else if (b.events_seen == 0) {
       Serial.println(
           F("CLI: tip: no events yet - check dsp metrics noise_floor / threshold"));
     } else if (b.intervals_held < 4) {
@@ -719,6 +761,221 @@ void cmdDsp(int argc, char **argv) {
   Serial.println(F("' (try: dsp help)"));
 }
 
+/** Extended help for {@code time}. */
+void helpTime(void) {
+  Serial.println(F("  Prints the device microsecond timer (time_us_64) at once."));
+  Serial.println(F("  Used by scripts/calibrate_timebase.py to measure clock error"));
+  Serial.println(F("  against the host's NTP-disciplined clock."));
+}
+
+/**
+ * Prints {@code time_us_64()} as the first output of the handler so the
+ * host's round-trip midpoint is as close as possible to the sample.
+ */
+void cmdTime(int, char **) {
+  const uint64_t t = time_us_64();
+  char buf[40];
+  snprintf(buf, sizeof(buf), "CLI: time t_us=%llu",
+           static_cast<unsigned long long>(t));
+  Serial.println(buf);
+}
+
+/** Extended help for {@code timebase}. */
+void helpTimebase(void) {
+  Serial.println(F("  Sample-clock calibration (ppm, + = board clock fast). One value"));
+  Serial.println(F("  corrects every capture path: all clocks share the 12 MHz crystal."));
+  Serial.println(F("  Measure it with scripts/calibrate_timebase.py (NTP), or a GPS"));
+  Serial.println(F("  PPS input on builds with -DPPS_GPIO=N (overrides while locked)."));
+  Serial.println(F("  With -DGPS_UART_RX=N the NMEA fix gates PPS and dates calibrations."));
+  Serial.println(F("  Examples:"));
+  Serial.println(F("    timebase                         # show"));
+  Serial.println(F("    timebase set -23.4 [manual|ntp] [unix_date] [duration_s]"));
+  Serial.println(F("    timebase save                    # to flash (not while streaming)"));
+  Serial.println(F("    timebase clear                   # 0 ppm in RAM (save to persist)"));
+  Serial.println(F("  If an exact reference reads R s/d: ppm = -R / 0.0864."));
+}
+
+void printTimebase(void) {
+  timebase_info_t tb{};
+  timebase_get(&tb);
+  char buf[200];
+  snprintf(buf, sizeof(buf),
+           "CLI: timebase ppm=%.3f source=%s cal_ppm=%.3f cal_source=%s "
+           "date_unix=%lu duration_s=%lu saved=%s",
+           static_cast<double>(tb.ppm), timebase_source_name(tb.source),
+           static_cast<double>(tb.cal_ppm), timebase_source_name(tb.cal_source),
+           static_cast<unsigned long>(tb.cal_date_unix),
+           static_cast<unsigned long>(tb.cal_duration_s),
+           tb.cal_saved ? "yes" : "no");
+  Serial.println(buf);
+  if (tb.pps_enabled) {
+    snprintf(buf, sizeof(buf),
+             "CLI: timebase pps locked=%s ppm=%.4f window=%lu good=%lu rejects=%lu",
+             tb.pps_locked ? "yes" : "no", static_cast<double>(tb.pps_ppm),
+             static_cast<unsigned long>(tb.pps_pulses),
+             static_cast<unsigned long>(tb.pps_good),
+             static_cast<unsigned long>(tb.pps_rejects));
+    Serial.println(buf);
+    if (tb.gps_enabled) {
+      snprintf(buf, sizeof(buf), "CLI: timebase pps ignored_no_fix=%lu",
+               static_cast<unsigned long>(tb.pps_no_fix));
+      Serial.println(buf);
+    }
+  }
+  if (tb.gps_enabled) {
+    char age[16];
+    if (tb.gps_age_ms == 0xFFFFFFFFu) {
+      snprintf(age, sizeof(age), "never");
+    } else {
+      snprintf(age, sizeof(age), "%lums", static_cast<unsigned long>(tb.gps_age_ms));
+    }
+    snprintf(buf, sizeof(buf),
+             "CLI: timebase gps fix=%s quality=%u sats=%u hdop=%.2f utc=%lu "
+             "last_rmc=%s sentences=%lu errors=%lu overruns=%lu",
+             tb.gps_fix ? "yes" : "no", tb.gps_quality, tb.gps_sats,
+             static_cast<double>(tb.gps_hdop), static_cast<unsigned long>(tb.gps_utc_unix),
+             age, static_cast<unsigned long>(tb.gps_sentences),
+             static_cast<unsigned long>(tb.gps_errors),
+             static_cast<unsigned long>(tb.gps_overruns));
+    Serial.println(buf);
+  }
+}
+
+/** Parses a non-negative decimal integer into {@code out}. */
+bool parseU32(const char *s, uint32_t &out) {
+  if (!s || !*s) {
+    return false;
+  }
+  char *end = nullptr;
+  const unsigned long v = strtoul(s, &end, 10);
+  if (*end != '\0' || s[0] == '-') {
+    return false;
+  }
+  out = static_cast<uint32_t>(v);
+  return true;
+}
+
+void cmdTimebase(int argc, char **argv) {
+  if (argc < 2) {
+    printTimebase();
+    return;
+  }
+  if (equalsIgnoreCase(argv[1], "help") || equalsIgnoreCase(argv[1], "?")) {
+    printHelp("timebase");
+    return;
+  }
+  if (equalsIgnoreCase(argv[1], "set")) {
+    float ppm = 0.f;
+    timebase_source_t src = TIMEBASE_SRC_MANUAL;
+    uint32_t date = 0, dur = 0;
+    if (argc < 3 || !parseFloat(argv[2], ppm) ||
+        (argc > 3 && !timebase_source_from_name(argv[3], &src)) ||
+        (argc > 4 && !parseU32(argv[4], date)) ||
+        (argc > 5 && !parseU32(argv[5], dur)) ||
+        !timebase_set(ppm, src, date, dur)) {
+      Serial.println(F("CLI: ERR usage: timebase set <ppm -1000..1000> "
+                       "[manual|ntp] [unix_date] [duration_s]"));
+      return;
+    }
+    printTimebase();
+    return;
+  }
+  if (equalsIgnoreCase(argv[1], "save")) {
+    switch (timebase_save()) {
+    case TIMEBASE_SAVE_OK:
+      Serial.println(F("CLI: timebase saved"));
+      break;
+    case TIMEBASE_SAVE_BUSY:
+      Serial.println(F("CLI: ERR timebase save refused while streaming "
+                       "(close the audio stream first)"));
+      break;
+    case TIMEBASE_SAVE_FAILED:
+      Serial.println(F("CLI: ERR timebase flash write failed"));
+      break;
+    }
+    return;
+  }
+  if (equalsIgnoreCase(argv[1], "clear")) {
+    timebase_clear();
+    printTimebase();
+    return;
+  }
+  Serial.println(F("CLI: ERR usage: timebase [set|save|clear|help]"));
+}
+
+/** Extended help for {@code display}. */
+void helpDisplay(void) {
+  Serial.println(F("  OLED status as seen by core 1: pins, configured / answering"));
+  Serial.println(F("  I2C address, init counts, and the addresses that ACKed in the"));
+  Serial.println(F("  last bus scan. The display is probed every 2 s until found."));
+  Serial.println(F("  display contrast <1-255>  brightness while streaming (not saved)"));
+  Serial.println(F("  display period <ms>       frame period 100..5000 (default 500)"));
+  Serial.println(F("  Unchanged frames are not re-sent (sent/skipped counts)."));
+}
+
+void cmdDisplay(int argc, char **argv) {
+  if (argc >= 2 && (equalsIgnoreCase(argv[1], "help") || equalsIgnoreCase(argv[1], "?"))) {
+    printHelp("display");
+    return;
+  }
+  if (argc >= 3 && (equalsIgnoreCase(argv[1], "contrast") || equalsIgnoreCase(argv[1], "period"))) {
+    char *end = nullptr;
+    const long v = strtol(argv[2], &end, 0);
+    const bool contrast = equalsIgnoreCase(argv[1], "contrast");
+    if (end == argv[2] || *end != '\0' || (contrast && (v < 1 || v > 255)) ||
+        (!contrast && (v < 100 || v > 5000))) {
+      Serial.println(contrast ? F("CLI: error contrast must be 1..255")
+                              : F("CLI: error period must be 100..5000 ms"));
+      return;
+    }
+    if (contrast) {
+      display_ui_set_contrast(static_cast<uint8_t>(v));
+    } else {
+      display_ui_set_period_ms(static_cast<uint32_t>(v));
+    }
+  }
+  display_ui_status_t st{};
+  display_ui_get_status(&st);
+  if (!st.enabled) {
+    Serial.println(F("CLI: display not running (built with DISPLAY_SH1107=0, or "
+                     "core 1 has not started)"));
+    return;
+  }
+  char addr[8];
+  snprintf(addr, sizeof(addr), st.addr_active ? "0x%02x" : "none", st.addr_active);
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "CLI: display sh1107 sda=GP%u scl=GP%u i2c%u addr_cfg=0x%02x addr=%s "
+           "ready=%s probes=%lu inits=%lu init_fail=%lu lost=%lu",
+           st.sda_gpio, st.scl_gpio, st.i2c_port, st.addr_config, addr,
+           st.ready ? "yes" : "no", static_cast<unsigned long>(st.probes),
+           static_cast<unsigned long>(st.inits),
+           static_cast<unsigned long>(st.init_failures), static_cast<unsigned long>(st.lost));
+  Serial.println(buf);
+  uint8_t contrast = 0;
+  uint32_t period = 0;
+  display_ui_get_settings(&contrast, &period);
+  snprintf(buf, sizeof(buf), "CLI: display contrast=%u period_ms=%lu sent=%lu skipped=%lu",
+           contrast, static_cast<unsigned long>(period),
+           static_cast<unsigned long>(st.frames_sent),
+           static_cast<unsigned long>(st.frames_skipped));
+  Serial.println(buf);
+  if (st.last_scan_ms == 0u) {
+    Serial.println(F("CLI: display scan: not run yet"));
+    return;
+  }
+  Serial.print(F("CLI: display scan: "));
+  if (st.found_n == 0u) {
+    Serial.println(F("no devices ACK (check SDA/SCL wiring, power, pull-ups)"));
+    return;
+  }
+  for (uint8_t i = 0; i < st.found_n; i++) {
+    snprintf(buf, sizeof(buf), "%s0x%02x", i ? " " : "", st.found[i]);
+    Serial.print(buf);
+  }
+  Serial.println(st.addr_active ? "" : "  (no 0x3c/0x3d: wrong address or not an SH1107?)");
+}
+
 static const CliCommand kCommands[] = {
     {"help", "?", cmdHelp, F("Show command list or help <cmd>"), F("help [command]"),
      helpHelp},
@@ -726,6 +983,13 @@ static const CliCommand kCommands[] = {
      helpVersion},
     {"status", nullptr, cmdStatus, F("USB / stream / DSP summary"), F("status"),
      helpStatus},
+    {"time", nullptr, cmdTime, F("Device microsecond timer (calibration probe)"),
+     F("time"), helpTime},
+    {"timebase", "tb", cmdTimebase, F("Sample-clock calibration (ppm)"),
+     F("timebase [set <ppm> [src] [date] [dur]|save|clear]"), helpTimebase},
+    {"display", "oled", cmdDisplay, F("OLED status, bus scan, contrast / period"),
+     F("display [contrast <1-255>|period <ms>]"),
+     helpDisplay},
     {"diag", nullptr, cmdDiag, F("Periodic diagnostic dump on|off"),
      F("diag [on|off]"), helpDiag},
     {"dsp", nullptr, cmdDsp, F("DSP control plane"),

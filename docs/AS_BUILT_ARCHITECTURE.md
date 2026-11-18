@@ -41,7 +41,7 @@ Three compile-time audio sources (`-DAUDIO_SOURCE=…`):
 | DSP lib | Vendored **CMSIS-DSP** (`third_party/CMSIS-DSP`), `ARM_MATH_CM33`, framework softfp ABI |
 | Language | C++ application modules + C-style APIs; Arduino `setup()` / `loop()` |
 | RTOS | None |
-| Second core | Parked at boot (`multicore_reset_core1()`); all work on core 0 today |
+| Second core | Core 1 runs only the SH1107 128×128 OLED readout (`setup1`/`loop1` → `display_ui`), reading a seqlocked `ui_snapshot` that core 0 publishes. Core 0 keeps everything time-critical (TinyUSB, capture, DSP, CLI, HID). Built with `DISPLAY_SH1107=0`, core 1 is held in reset. See [DISPLAY.md](DISPLAY.md) |
 
 **Not used:** pure Pico SDK CMake project without Arduino.
 
@@ -62,7 +62,7 @@ PCM1808 pins: **Pico 2 PCB** MCLK **GP21**, LRCK **GP20**, DOUT **GP19**, BCK **
 
 ### 2.3 TinyUSB config mechanism
 
-`CFG_TUSB_CONFIG_FILE` is unreliable under PlatformIO (project `include/` is not first for library compiles). Live TinyUSB knobs are **`-DCFG_TUD_*` flags in `platformio.ini`**. [`include/tusb_config.h`](../include/tusb_config.h) is a reference mirror.
+`CFG_TUSB_CONFIG_FILE` is unreliable under PlatformIO (project `include/` is not first for library compiles). TinyUSB is configured **only** by the `-DCFG_TUD_*` flags in `platformio.ini` (the former `include/tusb_config.h` mirror was removed; it was never compiled). `usb_descriptors.cpp` asserts `CFG_TUD_AUDIO_FUNC_1_DESC_LEN` against the real descriptor length.
 
 Key audio flags: `N_BYTES_PER_SAMPLE_TX=3`, `EP_SZ_IN=147` (49×3), `EP_IN_SW_BUF_SZ=588`, `EP_IN_FLOW_CONTROL=1`.
 
@@ -80,14 +80,19 @@ timegrapher-stand/
     app_config.h              # rates, ring, ADC/PCM1808 knobs, PCM24 limits
     board_config.h            # board name, pins, BOOST_SWITCH, PCM1808 pins
     tick_tock_pcm.h           # generated S16 table (SYNTHETIC)
-    tusb_config.h             # reference TinyUSB mirror
     audio_ring.h              # PCM24 int32 ring + 3-byte pack helper
     audio_source.h            # stream FSM
     adc_capture.h / pcm1808_*.h / pcm1808_format.h
+    pcm1808_rate.h            # measured frame rate → MCLK ratio / USB repeat
+    beat_fit.h                # least-squares rate + beat-error fit
+    timebase.h / pps_filter.h # crystal ppm calibration (flash, NTP, GPS PPS)
+    ui_snapshot.h / display_ui.h / ui_format.h  # core 0 → core 1 OLED readout
+    pps_counter.pio.h         # generated: scripts/gen_pps_pio.py
     usb_audio.h / diagnostics.h / power_control.h
     dsp_types.h / dsp_graph.h / control_api.h / perf_timing.h
+    dsp_blocks.h              # block + parameter name table (CLI / HID / faults)
+    fw_identity.h             # FW_VERSION, USB VID/PID, USB strings
     serial_cli.h / cli/*.h
-    dsp_cmsis_smoke.h
   src/
     TimegrapherStand_main.cpp # setup/loop: power, USB, CLI, LED
     usb_audio.cpp             # UAC callbacks, 1 ms PCM24 feed
@@ -97,7 +102,9 @@ timegrapher-stand/
     adc_capture.cpp
     pcm1808_capture.cpp / pcm1808_clock.cpp
     # PIO: scripts/pcm1808_i2s.pio.in → include/pcm1808_i2s_{pico2,legacy}.pio.h
-    dsp_graph.cpp / control_api.cpp / perf_timing.cpp / dsp_cmsis_smoke.cpp
+    dsp_graph.cpp / dsp_blocks.cpp / control_api.cpp / perf_timing.cpp
+    beat_fit.cpp / timebase.cpp
+    ui_snapshot.cpp / display_ui.cpp   # display_ui runs on core 1
     serial_cli.cpp / cli/cli_core.cpp / cli/cli_commands.cpp
     diagnostics.cpp / power_control.cpp
   third_party/CMSIS-DSP/      # vendored CMSIS-DSP sources
@@ -117,7 +124,12 @@ timegrapher-stand/
     host_analyze.py           # S16 or S24 WAV stats
     host_capture.md
     test_pcm_conversion.c     # ADC → PCM24 mirror
-    test_pcm1808_pcm_conversion.c
+    test_pcm1808_pcm_conversion.cpp  # includes include/pcm1808_format.h
+    test_pcm1808_rate.cpp     # frame-rate → MCLK ratio classification
+    test_beat_fit.cpp         # rate / beat-error fit (with src/beat_fit.cpp)
+    test_pps_filter.cpp       # GPS PPS period averaging
+    test_ui_format.cpp        # OLED number formatting
+    test_calibrate_timebase.py  # NTP calibration fit (scripts/calibrate_timebase.py)
     test_ring_buffer.c
 ```
 
@@ -153,7 +165,7 @@ flowchart LR
 5. `diagnostics_poll()` — ~2 s CDC/UART status line when enabled
 6. Status LED blink (rate depends on mount/stream; off while suspended)
 
-Init in `setup()`: `multicore_reset_core1()` → `power_control_init()` → diagnostics → `audio_source_init()` → `usb_audio_init()` → `serial_cli_init()`.
+Init in `setup()`: (`multicore_reset_core1()` only when there is no display) → `power_control_init()` → diagnostics → `audio_source_init()` → `usb_audio_init()` → `serial_cli_init()`.
 
 ### 4.2 Stream state machine ([`audio_source`](../src/audio_source.cpp))
 
@@ -271,8 +283,8 @@ Wire packing (int32 → 3 LE bytes) happens only in the USB feeder, not in the r
 | Block | 240 stereo frames (480 `uint32` slot words) per DMA buffer |
 | Mono | Left slot only: arithmetic `>> 8` → sign-extended 24-bit |
 | DSP | Always through `dsp_graph_process` (float FS → PCM24) |
-| Upsample | `PCM1808_OUTPUT_UPSAMPLE` default **2** (bench fix when LRCK ≈ 24 kHz); set to 1 if LRCK is truly 48 kHz |
-| Format helper | `pcm1808_left_slot_to_pcm24()` in `pcm1808_format.h` (host-tested); live path uses DSP unpack |
+| Frame rate | **Measured**, not assumed. The DMA IRQ timestamps each block. Every 50 blocks the main loop computes frames/s and snaps it to SCKI/256, /384 or /512 (`pcm1808_rate.h`). Two agreeing windows (about 1 s) confirm a rate, which then sets the DSP source rate and the USB sample repeat (×1 at 48 kHz, ×2 at 24 kHz). The DSP timebase stays *unverified* until a rate is confirmed, or whenever the rate is unsupported (32 kHz) or unknown, and while it is unverified `beat_rate` will not lock. `PCM1808_OUTPUT_UPSAMPLE` (default 2) is only the guess used before the first confirmation. The result is shown by CLI `status` and in HID `beat.sourceHzMeasured` / `timebaseOk`. See [PCM1808_WIRING_AND_CLOCKS.md](PCM1808_WIRING_AND_CLOCKS.md). |
+| Format helper | `pcm1808_slot_to_pcm24()` in `pcm1808_format.h` — used by the live capture path and the host test |
 
 Boot checks `clk_sys == 150e6` and `clk_usb == 48e6`. MCLK starts in `audio_source_init()` so GP21 runs without opening a USB stream. Capture may defer until MCLK warmup / ready.
 
@@ -290,7 +302,7 @@ PCM1808 left24 → float FS (/8388608)
   → process  (notch → IIR filter → FIR → soft_gate → gain → AGC → limiter)
                                                             [only if bypass off]
   → quantize to signed PCM24 (int32)
-  → optional PCM1808_OUTPUT_UPSAMPLE repeat
+  → repeat ×1 / ×2 (measured frame rate → 48 kHz)
   → audio_ring
 ```
 
@@ -327,7 +339,7 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 - **Noise EMA:** adapts on quiet blocks only (peak below open threshold).
 - **Open event:** `|x| > max(noise×threshold, 4×pre_rms, 1e-3)` (default threshold **6**). Window start = onset − `preroll_ms` (default 25 ms).
 - **Close event:** hysteresis (`0.35×` open thr) for `tail_ms`, or max duration **80 ms**. Reject peaks below `max(open_thr, 0.25×tick_peak_ema)`. Log rise, snr_db, energy, confidence.
-- **Beat rate:** Keep up to 16 unlock-to-unlock half-intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of nominal A/h (auto common table `{14400…57600}` or manual `vph` param). When locked: TIC/TAC full-period average → instant `rateSDay`; `|T1−T2|/2` → instant `beatErrorMs`; unlock→drop lift time + `liftAngle` (default 51°) → instant `amplitudeDeg` via `A = λ / (2 sin(π f t))`. Instant values are also averaged into rolling **`avg1s`** (~1 s) and **`avg10s`** (~10 s) windows (arithmetic mean, ≥2 samples per metric).
+- **Beat rate:** Keep up to 16 unlock-to-unlock half-intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of nominal A/h (auto common table `{14400…57600}` or manual `vph` param). Lock also requires a verified timebase. When locked, each tick's unlock time is refined to sub-sample precision (a parabolic vertex on the three-point peak) and assigned a half-beat number on the nominal grid, so a missed tick leaves a gap rather than a doubled interval. A least-squares fit of `t_k = a + P·k + c·(−1)^k` is then run over the last `windowS` seconds (default 6 s, range 2–30, capped at 256 ticks), with one 3.5σ outlier-rejection pass. `P` against the nominal half-period gives instant `rateSDay`, and `2|c|` gives instant `beatErrorMs`. The residual RMS is reported as `jitterUs` and the inlier count as `ratePoints`. On whole-sample timestamps this resolves about 0.1 s/d, where the old median of integer periods stepped in about 14 s/d at 24 kHz (host test `tests/test_beat_fit.cpp`). `calPpm` (±1000) removes sample-clock error. It comes from the `timebase` module: stored in flash, measured against NTP by `scripts/calibrate_timebase.py`, or measured live from GPS PPS. See [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md). Unlock→drop lift time (also sub-sample) + `liftAngle` (default 51°) → instant `amplitudeDeg` via `A = λ / (2 sin(π f t))`. Instant values are also averaged into rolling **`avg1s`** (~1 s) and **`avgLong`** windows (arithmetic mean, ≥2 samples per metric). The `avgLong` integration time is the `avgS` param (1–60 s, default 10; ring of 1024 tick samples, enough for 60 s at 57,600 A/h).
 
 ### 8.4 Continuity watchdog / auto-eject
 
@@ -339,7 +351,7 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 ### 8.5 What is *not* in the DSP path yet
 
 - Phase 4 STFT spectral denoising (deferred)
-- Multicore offload (core 1 parked)
+- Multicore DSP offload (core 1 runs only the display)
 - ADC / SYNTHETIC producers calling `dsp_graph_process`
 
 ---
@@ -428,7 +440,7 @@ Periodic print ~every **2 s** when `DIAG_CDC=1` (default) and/or `DIAG_UART=1`. 
 | `ADC_OVERSAMPLE` | 8 |
 | `ADC_PCM_SCALE` | 48 (then `<< 8` into PCM24) |
 | `APP_PCM1808_DMA_FRAMES` | 240 |
-| `PCM1808_OUTPUT_UPSAMPLE` | 2 |
+| `PCM1808_OUTPUT_UPSAMPLE` | 2 (pre-measurement guess only) |
 | `PCM1808_PCM_GAIN` | 1 |
 | `APP_PKT_SAMPLES_NOM` | 48 |
 | `DSP_MAX_BLOCK` | 240 |
@@ -476,10 +488,10 @@ Hardware soak / codec quality acceptance remain per [`acceptance_results.md`](ac
 |---|---|
 | New board | New PlatformIO env; ADC/PCM1808 pins; package macros; LED |
 | New synthetic asset | Replace `tick-tock.wav` → `python3 scripts/gen_tick_tock_pcm.py` |
-| True 48 kHz LRCK on PCM1808 | Confirm straps/MCLK; set `-DPCM1808_OUTPUT_UPSAMPLE=1` |
+| True 48 kHz LRCK on PCM1808 | Automatic (measured). Optionally set `-DPCM1808_OUTPUT_UPSAMPLE=1` to avoid a ~1 s glitch on the first stream |
 | Wire BOOST_EN | `-DBOOST_SWITCH_PRESENT=1 -DBOOST_EN_GPIO=N` |
 | Run ADC through DSP | Call `dsp_graph_process` from `adc_capture` like PCM1808 |
-| Core 1 offload | Prefer heavy DSP/analysis first; marshal CDC/`Serial` if CLI moves |
+| More on core 1 | Core 1 already runs the display and may block freely. Anything added there must not touch TinyUSB, `Serial` or `dsp_graph` directly: read through `ui_snapshot`, and send changes back to core 0 through a queue applied via `control_api` |
 | PCM1809 | See [`PORTING_TO_PCM1809.md`](PORTING_TO_PCM1809.md); keep USB/ring/feed contracts |
 | HID / WebHID control | Follow [`HID_CONTROL_PLANE.md`](HID_CONTROL_PLANE.md); `hid_control` → `control_api`; keep CDC CLI |
 
@@ -489,7 +501,7 @@ Hardware soak / codec quality acceptance remain per [`acceptance_results.md`](ac
 
 | Module | Responsibility |
 |---|---|
-| `TimegrapherStand_main.cpp` | Arduino entry, core1 park, init order, LED |
+| `TimegrapherStand_main.cpp` | Arduino entry, init order, UI snapshot publish, core 1 `setup1`/`loop1`, LED |
 | `power_control.cpp` | Boost enable + nonblocking preamp settle |
 | `usb_descriptors.cpp` | UAC2 mic descriptor injection (24-bit) |
 | `usb_audio.cpp` | Device IDs/strings, UAC controls, 1 ms PCM24 feed |

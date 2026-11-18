@@ -95,6 +95,8 @@ typedef struct {
   uint32_t duration_samples;
   uint32_t rise_samples; /**< Samples from onset to peak. */
   uint32_t lift_samples; /**< drop - unlock when both valid; else 0. */
+  float unlock_frac;     /**< Sub-sample offset of unlock (-0.5..0.5). */
+  float drop_frac;       /**< Sub-sample offset of drop (-0.5..0.5). */
   float peak_abs;        /**< Peak magnitude in float full-scale (~[-1,1]). */
   float noise_floor;     /**< Noise EMA at close time. */
   float snr_db;          /**< 20*log10(peak / noise). */
@@ -120,9 +122,15 @@ typedef struct {
  * Escapement timing estimate from unlock-based intervals (Witschi-style).
  * Updated when enough recent intervals exist and beat_rate is enabled.
  *
+ * Lock and {@code vph_raw} come from the median unlock interval. Once locked,
+ * rate and beat error come from a least-squares fit of sub-sample unlock
+ * times over the last {@code window_s} seconds (see beat_fit.h), so they
+ * resolve well below one sample period.
+ *
  * Top-level rate/beat-error/amplitude fields are the <em>instant</em> view
- * (last computed tick set). {@code avg_1s} / {@code avg_10s} are arithmetic
- * means of those instant values over rolling wall-clock windows.
+ * (last computed tick set). {@code avg_1s} / {@code avg_long} are arithmetic
+ * means of those instant values over rolling wall-clock windows: 1 s, and
+ * the configurable integration time {@code avg_s} (beat param, default 10 s).
  */
 typedef struct {
   float vph_raw;             /**< Vibrations per hour from median half-interval. */
@@ -133,6 +141,20 @@ typedef struct {
   uint32_t events_seen;      /**< Events currently held in the event log. */
   uint32_t intervals_held;   /**< Accepted half-intervals in beat history. */
   uint32_t source_hz;        /**< Analysis sample rate used for timing math. */
+  /**
+   * Measured frame rate of the capture clock (Hz), or 0 where the source
+   * rate is fixed by design (ADC, synthetic).
+   */
+  float source_hz_measured;
+  /**
+   * False while the capture rate is unverified or does not match
+   * {@code source_hz}; no lock or timing results are produced then.
+   */
+  bool timebase_ok;
+  uint32_t rate_points; /**< Ticks in the rate fit window (0 = no fit). */
+  float jitter_us;      /**< RMS unlock-time residual about the fit (µs). */
+  float cal_ppm;          /**< Sample-clock correction applied (ppm, + = fast). */
+  const char *cal_source; /**< "none" / "manual" / "ntp" / "pps" (static string). */
 
   float rate_s_day;     /**< Instant daily rate (s/d); alias of instant.rate_s_day. */
   float beat_error_ms;  /**< Instant beat error (ms). */
@@ -145,7 +167,8 @@ typedef struct {
 
   dsp_beat_timing_window_t instant; /**< Last computed tick set (same as top-level). */
   dsp_beat_timing_window_t avg_1s;  /**< Rolling ~1 s mean of instant values. */
-  dsp_beat_timing_window_t avg_10s; /**< Rolling ~10 s mean of instant values. */
+  dsp_beat_timing_window_t avg_long; /**< Rolling mean over {@code avg_s} seconds. */
+  float avg_s;                       /**< Integration time of {@code avg_long} (s). */
 } dsp_beat_rate_t;
 
 /**

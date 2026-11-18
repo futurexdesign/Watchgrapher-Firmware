@@ -20,16 +20,33 @@
 
 #include <cstring>
 
+/**
+ * Scales DC-centered ADC counts into a clamped PCM24 sample.
+ *
+ * {@code ADC_PCM_SCALE} is applied in the historical 16-bit domain, then the
+ * result is multiplied by 256 (an 8-bit left shift, written as a multiply so
+ * negative values are well-defined) into the signed 24-bit container.
+ */
+static int32_t adc_scale_centered(int32_t centered) {
+  int32_t pcm = centered * static_cast<int32_t>(ADC_PCM_SCALE) * 256;
+  if (pcm > APP_PCM24_FULL_SCALE) {
+    pcm = APP_PCM24_FULL_SCALE;
+  }
+  if (pcm < APP_PCM24_MIN) {
+    pcm = APP_PCM24_MIN;
+  }
+  return pcm;
+}
+
 #if AUDIO_SOURCE == ADC
 
 static uint16_t g_dma_buf[APP_ADC_DMA_BUF_COUNT][APP_ADC_DMA_BUF_RAW_SAMPLES]
     __attribute__((aligned(4)));
 static volatile bool g_buf_ready[APP_ADC_DMA_BUF_COUNT];
-static volatile uint32_t g_buf_seq[APP_ADC_DMA_BUF_COUNT];
-static volatile uint32_t g_seq;
 static volatile bool g_running;
 static volatile uint32_t g_active;
-static int g_dma_chan;
+static int g_dma_chan = -1;
+static bool g_inited;
 static uint16_t g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
 
 /**
@@ -38,9 +55,15 @@ static uint16_t g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
  */
 static int32_t g_dc_counts;
 static bool g_dc_ready;
-static uint32_t g_pcm_peak_abs;
 static int32_t g_lpf_y;
 static bool g_lpf_primed;
+
+/*
+ * Per-block scratch for adc_capture_process (~4.8 KB). File-scope rather than
+ * stack: core 0 only has a 4 KB stack (SCRATCH_Y). Main loop only.
+ */
+static uint16_t g_block_raw[APP_ADC_DMA_BUF_RAW_SAMPLES];
+static audio_sample_t g_block_pcm[APP_ADC_DMA_BUF_SAMPLES];
 
 /**
  * Pulls a 12-bit code from a FIFO word; on ERR (bit 15) reuses the last
@@ -83,26 +106,10 @@ static int32_t adc_code_to_pcm(uint16_t code) {
 #else
   int32_t dc = 0;
 #endif
-  int32_t centered = static_cast<int32_t>(code) - dc;
-  int32_t pcm = (centered * static_cast<int32_t>(ADC_PCM_SCALE)) << 8;
-  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
-    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
-  }
-  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
-    pcm = static_cast<int32_t>(APP_PCM24_MIN);
-  }
+  const int32_t centered = static_cast<int32_t>(code) - dc;
+  int32_t pcm = adc_scale_centered(centered);
 
-  uint32_t abs_pcm;
-  if (pcm == static_cast<int32_t>(APP_PCM24_MIN)) {
-    abs_pcm = 8388608u;
-  } else if (pcm < 0) {
-    abs_pcm = static_cast<uint32_t>(-pcm);
-  } else {
-    abs_pcm = static_cast<uint32_t>(pcm);
-  }
-  if (abs_pcm > g_pcm_peak_abs) {
-    g_pcm_peak_abs = abs_pcm;
-  }
+  const uint32_t abs_pcm = audio_pcm24_abs(pcm);
   if (abs_pcm > d->adc_pcm_peak_abs) {
     d->adc_pcm_peak_abs = abs_pcm;
   }
@@ -120,11 +127,11 @@ static int32_t adc_code_to_pcm(uint16_t code) {
     g_lpf_y += (pcm - g_lpf_y) >> ADC_LPF_SHIFT;
   }
   pcm = g_lpf_y;
-  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
-    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
+  if (pcm > APP_PCM24_FULL_SCALE) {
+    pcm = APP_PCM24_FULL_SCALE;
   }
-  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
-    pcm = static_cast<int32_t>(APP_PCM24_MIN);
+  if (pcm < APP_PCM24_MIN) {
+    pcm = APP_PCM24_MIN;
   }
 #endif
 
@@ -159,16 +166,14 @@ static void __isr dma_handler(void) {
     diagnostics_get()->dma_overrun_count++;
   }
   g_buf_ready[done] = true;
-  g_buf_seq[done] = ++g_seq;
   diagnostics_get()->dma_complete_count++;
 }
 
-bool adc_capture_init(void) {
+/** Clears ping-pong flags, DC learning, and LPF state for a fresh stream. */
+static void reset_stream_state(void) {
   for (auto &ready : g_buf_ready) {
     ready = false;
   }
-  g_seq = 0;
-  g_running = false;
   g_active = 0;
 #if ADC_DC_REMOVE
   g_dc_ready = false;
@@ -178,9 +183,13 @@ bool adc_capture_init(void) {
   g_dc_counts = 0;
 #endif
   g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
-  g_pcm_peak_abs = 0;
   g_lpf_y = 0;
   g_lpf_primed = false;
+}
+
+bool adc_capture_init(void) {
+  g_running = false;
+  reset_stream_state();
 
   adc_init();
   adc_gpio_init(ADC_GPIO);
@@ -196,7 +205,10 @@ bool adc_capture_init(void) {
 
   adc_fifo_setup(true, true, 1, true, false);
 
-  g_dma_chan = dma_claim_unused_channel(true);
+  g_dma_chan = dma_claim_unused_channel(false);
+  if (g_dma_chan < 0) {
+    return false;
+  }
   dma_channel_config cfg = dma_channel_get_default_config(g_dma_chan);
   channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
   channel_config_set_read_increment(&cfg, false);
@@ -210,32 +222,21 @@ bool adc_capture_init(void) {
   irq_set_exclusive_handler(DMA_IRQ_0, dma_handler);
   irq_set_enabled(DMA_IRQ_0, true);
 
+  g_inited = true;
   return true;
 }
 
 void adc_capture_start(void) {
+  if (!g_inited) {
+    return;
+  }
   uint32_t irq = save_and_disable_interrupts();
   if (g_running) {
     restore_interrupts(irq);
     return;
   }
 
-  for (auto &ready : g_buf_ready) {
-    ready = false;
-  }
-  g_seq = 0;
-  g_active = 0;
-#if ADC_DC_REMOVE
-  g_dc_ready = false;
-  g_dc_counts = static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
-#else
-  g_dc_ready = true;
-  g_dc_counts = 0;
-#endif
-  g_last_valid_code = static_cast<uint16_t>(ADC_DC_OFFSET_COUNTS);
-  g_pcm_peak_abs = 0;
-  g_lpf_y = 0;
-  g_lpf_primed = false;
+  reset_stream_state();
   diagnostics_get()->adc_pcm_peak_abs = 0;
   diagnostics_get()->adc_ac_peak_counts = 0;
   diagnostics_get()->adc_dc_counts = static_cast<uint32_t>(g_dc_counts);
@@ -283,9 +284,11 @@ void adc_capture_process(void) {
       continue;
     }
 
-    uint16_t local[APP_ADC_DMA_BUF_RAW_SAMPLES];
-    memcpy(local, g_dma_buf[i], sizeof(local));
+    uint16_t *local = g_block_raw;
+    uint32_t irq = save_and_disable_interrupts();
+    memcpy(local, g_dma_buf[i], sizeof(g_block_raw));
     g_buf_ready[i] = false;
+    restore_interrupts(irq);
 
 #if ADC_DC_REMOVE
     if (!g_dc_ready) {
@@ -304,7 +307,7 @@ void adc_capture_process(void) {
     }
 #endif
 
-    audio_sample_t pcm[APP_ADC_DMA_BUF_SAMPLES];
+    audio_sample_t *pcm = g_block_pcm;
     for (uint32_t s = 0; s < APP_ADC_DMA_BUF_SAMPLES; s++) {
       uint32_t sum = 0;
       uint32_t base = s * static_cast<uint32_t>(ADC_OVERSAMPLE);
@@ -322,16 +325,9 @@ void adc_capture_process(void) {
 #else /* AUDIO_SOURCE != ADC */
 
 int32_t adc_convert_sample(uint16_t fifo_word) {
-  auto code = static_cast<uint16_t>(fifo_word & 0x0FFFu);
-  int32_t centered = static_cast<int32_t>(code) - static_cast<int32_t>(ADC_DC_OFFSET_COUNTS);
-  int32_t pcm = (centered * static_cast<int32_t>(ADC_PCM_SCALE)) << 8;
-  if (pcm > static_cast<int32_t>(APP_PCM24_FULL_SCALE)) {
-    pcm = static_cast<int32_t>(APP_PCM24_FULL_SCALE);
-  }
-  if (pcm < static_cast<int32_t>(APP_PCM24_MIN)) {
-    pcm = static_cast<int32_t>(APP_PCM24_MIN);
-  }
-  return pcm;
+  const auto code = static_cast<uint16_t>(fifo_word & 0x0FFFu);
+  return adc_scale_centered(static_cast<int32_t>(code) -
+                            static_cast<int32_t>(ADC_DC_OFFSET_COUNTS));
 }
 
 bool adc_capture_init(void) { return true; }

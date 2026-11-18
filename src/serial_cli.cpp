@@ -13,7 +13,6 @@
 #include <cstring>
 
 void serial_cli_init(void) {
-  control_api_init();
   Cli::registerAllCommands();
   Cli::coreInit();
 }
