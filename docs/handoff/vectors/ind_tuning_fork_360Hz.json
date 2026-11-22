@@ -1,0 +1,22 @@
+{
+ "description": "Tuning-fork watch, 360 Hz, +6 ppm (+0.518 s/d), 80 mV at the ADC with harmonics, hum",
+ "channel": "left",
+ "signal": "tone 360.0 Hz",
+ "nominal_frequency_hz": 360.0,
+ "true_frequency_hz": 360.00216,
+ "amplitude_at_adc_v": 0.08,
+ "expected": {
+  "rate_s_per_day": 0.5184
+ },
+ "file": "ind_tuning_fork_360Hz.wav",
+ "fs_hz": 48000,
+ "duration_s": 10.0,
+ "peak_codes": {
+  "left": 565919,
+  "right": 1492
+ },
+ "clipped": {
+  "left": false,
+  "right": false
+ }
+}

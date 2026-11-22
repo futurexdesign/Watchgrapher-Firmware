@@ -9,6 +9,7 @@
 
 #include "app_config.h"
 #include "audio_ring.h"
+#include "audio_source.h"
 #include "board_config.h"
 #include "diagnostics.h"
 
@@ -306,6 +307,13 @@ void adc_capture_process(void) {
       continue;
     }
 #endif
+
+    /* Nothing consumes the ring (STANDALONE, or no USB stream): skip the
+     * conversion and the push, keep the sample counter. */
+    if (!audio_source_feeds_ring()) {
+      diagnostics_get()->adc_total_sample_count += APP_ADC_DMA_BUF_SAMPLES;
+      continue;
+    }
 
     audio_sample_t *pcm = g_block_pcm;
     for (uint32_t s = 0; s < APP_ADC_DMA_BUF_SAMPLES; s++) {

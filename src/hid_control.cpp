@@ -12,15 +12,18 @@
 #include "dsp_blocks.h"
 #include "dsp_types.h"
 #include "fw_identity.h"
+#include "hid_json.h"
 #include "timebase.h"
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <hardware/timer.h>
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstdint>
-#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +42,8 @@ constexpr uint32_t kReasmTimeoutMs = 500;
 constexpr uint8_t kMetricsHzMax = 20;
 constexpr uint8_t kBeatHzMax = 5;
 constexpr uint8_t kTimingHzMax = 5;
+/** Same cap as {@code beatHz}: a snapshot is 0.8-1.3 KB (14-22 reports). */
+constexpr uint8_t kQuartzHzMax = 5;
 
 /* Report descriptor: Usage Page 0xFFA0, Usage 0x0001, Report ID 1, 63-byte IO. */
 uint8_t const kHidReportDesc[] = {
@@ -89,17 +94,47 @@ char g_patch_obj[1200];
 char g_blocks_obj[1024];
 dsp_event_t g_ev_scratch[DSP_EVENT_LOG_CAP];
 dsp_error_t g_err_scratch[DSP_ERROR_LOG_CAP];
+/** Quartz snapshot / pulse scratch (dsp_quartz_t is ~200 B; keep it off
+ * the 4 KB core-0 stack like the other scratch buffers). */
+dsp_quartz_t g_quartz;
+dsp_quartz_pulse_t g_quartz_pulses[DSP_QUARTZ_PULSE_LOG_CAP];
+/** The {@code quartz} member of a patchState patch. */
+char g_quartz_obj[256];
+/** Beats scratch ({@code getBeats} up to hid_json::kBeatsMax, notify 8). */
+dsp_beat_t g_beats[hid_json::kBeatsMax];
+/** GPS snapshot (~330 B) and timebase-log snapshot (~400 B). */
+timebase_gps_t g_gps;
+timebase_log_t g_tblog;
 
 uint8_t g_sub_metrics_hz = 0;
 uint8_t g_sub_beat_hz = 0;
 uint8_t g_sub_timing_hz = 0;
+uint8_t g_sub_quartz_hz = 0;
+bool g_sub_quartz_pulses = false;
 bool g_sub_events = false;
 bool g_sub_errors = false;
+bool g_sub_beats = false;
 uint32_t g_last_metrics_ms = 0;
 uint32_t g_last_beat_ms = 0;
 uint32_t g_last_timing_ms = 0;
+uint32_t g_last_quartz_ms = 0;
+/** Measurement the {@code quartzPulse} cursor belongs to. */
+uint32_t g_pulse_measurement = 0;
+/** First pulse sequence of {@link g_pulse_measurement} not yet pushed (or
+ * already present when the subscription was seeded). */
+uint32_t g_pulse_next_seq = 0;
+/** First beat seq not yet pushed (the {@code beats} baseline). */
+uint32_t g_beat_next_seq = 0;
+/**
+ * {@code event} notify cursor: {@code peak_sample} of the newest event
+ * already sent (or already present when the subscription was seeded, 0 when
+ * the log was empty). Events are sent oldest first and only those with a
+ * larger {@code peak_sample} are new; event windows close in order, so the
+ * peak sample is strictly increasing along the log. dsp_event_t has no
+ * sequence number (it lives in dsp_types.h / dsp_graph.cpp), so the peak
+ * sample is the key.
+ */
 uint64_t g_last_event_peak = 0;
-bool g_have_last_event_peak = false;
 uint32_t g_last_error_uptime = 0;
 bool g_have_last_error = false;
 
@@ -146,17 +181,37 @@ bool json_get_string(const char *json, const char *key, char *out, size_t outlen
   return true;
 }
 
-bool json_get_int(const char *json, const char *key, long *out) {
+/**
+ * Reads an integer member as a full 64-bit value ({@code long} is 32-bit on
+ * the RP2350). Used for {@code id} and {@code ping.t}, which carry a client
+ * timestamp / counter that exceeds 2^31.
+ *
+ * @param json Object text.
+ * @param key Member name.
+ * @param out Receives the value.
+ * @return true if present and numeric (and within int64).
+ */
+bool json_get_i64(const char *json, const char *key, int64_t *out) {
   const auto *v = json_find_key(json, key);
-  if (!v) {
+  return v && hid_json::parse_i64(v, out);
+}
+
+/**
+ * Reads an integer member that is really a 32-bit quantity (limits, rates,
+ * offsets): the 64-bit value saturates to the range of {@code long}, and
+ * callers range-check the result.
+ */
+bool json_get_int(const char *json, const char *key, long *out) {
+  int64_t n = 0;
+  if (!json_get_i64(json, key, &n)) {
     return false;
   }
-  char *end = nullptr;
-  auto n = strtol(v, &end, 10);
-  if (end == v) {
-    return false;
+  if (n > static_cast<int64_t>(LONG_MAX)) {
+    n = LONG_MAX;
+  } else if (n < static_cast<int64_t>(LONG_MIN)) {
+    n = LONG_MIN;
   }
-  *out = n;
+  *out = static_cast<long>(n);
   return true;
 }
 
@@ -316,41 +371,20 @@ void tx_pump(void) {
   }
 }
 
-/** Copies {@code in} to {@code out}, dropping characters unsafe in a JSON string. */
-void json_sanitize(const char *in, char *out, size_t outlen) {
-  size_t i = 0;
-  for (; in && *in && i + 1 < outlen; in++) {
-    const auto c = static_cast<unsigned char>(*in);
-    if (c >= 0x20 && c != '"' && c != '\\') {
-      out[i++] = static_cast<char>(c);
-    }
-  }
-  out[i] = '\0';
-}
+using hid_json::appendf;
+using hid_json::json_sanitize;
 
-void send_error(long id, const char *code, const char *message) {
+void send_error(int64_t id, const char *code, const char *message) {
   char safe[128];
   json_sanitize(message, safe, sizeof(safe));
+  char ids[24];
+  hid_json::i64_dec(id, ids);
   char buf[256];
   snprintf(buf, sizeof(buf),
-           "{\"v\":1,\"id\":%ld,\"ok\":false,\"error\":{\"code\":\"%s\","
+           "{\"v\":1,\"id\":%s,\"ok\":false,\"error\":{\"code\":\"%s\","
            "\"message\":\"%s\"}}",
-           id, code, safe);
+           ids, code, safe);
   tx_begin(buf, false);
-}
-
-int appendf(char *dst, size_t dstlen, int off, const char *fmt, ...) {
-  if (off < 0 || static_cast<size_t>(off) >= dstlen) {
-    return -1;
-  }
-  va_list ap;
-  va_start(ap, fmt);
-  auto n = vsnprintf(dst + off, dstlen - static_cast<size_t>(off), fmt, ap);
-  va_end(ap);
-  if (n < 0 || static_cast<size_t>(off) + static_cast<size_t>(n) >= dstlen) {
-    return -1;
-  }
-  return off + n;
 }
 
 int append_params_for_block(char *dst, size_t dstlen, int off, dsp_block_id_t id) {
@@ -380,6 +414,13 @@ int append_params_for_block(char *dst, size_t dstlen, int off, dsp_block_id_t id
   return off;
 }
 
+/**
+ * @return {@code true} when this build runs the quartz engine, i.e. quartz
+ *         modes other than mechanical exist ({@link
+ *         control_api_quartz_supported}).
+ */
+[[nodiscard]] bool quartz_supported() { return control_api_quartz_supported(); }
+
 int encode_state(char *dst, size_t dstlen, int off) {
   off = appendf(dst, dstlen, off, "{\"bypass\":%s,\"blocks\":{",
                 control_api_get_bypass() ? "true" : "false");
@@ -404,7 +445,13 @@ int encode_state(char *dst, size_t dstlen, int off) {
       return -1;
     }
   }
-  return appendf(dst, dstlen, off, "}}");
+  off = appendf(dst, dstlen, off, "}");
+  if (off >= 0 && quartz_supported()) {
+    control_api_get_quartz(&g_quartz);
+    off = appendf(dst, dstlen, off, ",\"quartz\":");
+    off = hid_json::encode_quartz_settings(dst, dstlen, off, g_quartz);
+  }
+  return appendf(dst, dstlen, off, "}");
 }
 
 int encode_metrics(char *dst, size_t dstlen, int off) {
@@ -429,7 +476,9 @@ int encode_timing(char *dst, size_t dstlen, int off) {
       "\"dspBlockBudgetUs\":%lu,\"dspBlockSamples\":%lu,\"dspBlocks\":%lu,"
       "\"loopUsLast\":%lu,\"loopUsMean\":%lu,\"loopUsMax\":%lu,"
       "\"loopCount\":%lu,\"idleUsPerS\":%lu,\"loopBusyPct\":%u,"
-      "\"underruns\":%lu,\"shortWrites\":%lu,\"ringMin\":%lu,\"ringMax\":%lu}",
+      "\"underruns\":%lu,\"shortWrites\":%lu,\"ringMin\":%lu,\"ringMax\":%lu,"
+      "\"quartzBlockUsLast\":%lu,\"quartzBlockUsMean\":%lu,"
+      "\"quartzBlockUsMax\":%lu,\"quartzBlocks\":%lu}",
       static_cast<unsigned long>(t.dsp_block_us_last), static_cast<unsigned long>(t.dsp_block_us_mean),
       static_cast<unsigned long>(t.dsp_block_us_max), static_cast<unsigned long>(t.dsp_block_budget_us),
       static_cast<unsigned long>(t.dsp_block_samples), static_cast<unsigned long>(t.dsp_blocks),
@@ -437,7 +486,11 @@ int encode_timing(char *dst, size_t dstlen, int off) {
       static_cast<unsigned long>(t.loop_us_max), static_cast<unsigned long>(t.loop_count),
       static_cast<unsigned long>(t.idle_us_per_s), static_cast<unsigned>(t.loop_busy_pct),
       static_cast<unsigned long>(t.underruns), static_cast<unsigned long>(t.short_writes),
-      static_cast<unsigned long>(t.ring_min), static_cast<unsigned long>(t.ring_max));
+      static_cast<unsigned long>(t.ring_min), static_cast<unsigned long>(t.ring_max),
+      static_cast<unsigned long>(t.quartz_block_us_last),
+      static_cast<unsigned long>(t.quartz_block_us_mean),
+      static_cast<unsigned long>(t.quartz_block_us_max),
+      static_cast<unsigned long>(t.quartz_blocks));
 }
 
 int encode_spectrum(char *dst, size_t dstlen, int off) {
@@ -534,25 +587,6 @@ int encode_beat(char *dst, size_t dstlen, int off) {
   return appendf(dst, dstlen, off, "}");
 }
 
-int encode_event(char *dst, size_t dstlen, int off, const dsp_event_t &ev) {
-  char s0[24], s1[24], s2[24], s3[24];
-  u64_to_dec(ev.start_sample, s0, sizeof(s0));
-  u64_to_dec(ev.peak_sample, s1, sizeof(s1));
-  u64_to_dec(ev.unlock_sample, s2, sizeof(s2));
-  u64_to_dec(ev.drop_sample, s3, sizeof(s3));
-  return appendf(dst, dstlen, off,
-                 "{\"startSample\":\"%s\",\"peakSample\":\"%s\","
-                 "\"unlockSample\":\"%s\",\"dropSample\":\"%s\","
-                 "\"durationSamples\":%lu,\"riseSamples\":%lu,"
-                 "\"liftSamples\":%lu,"
-                 "\"peakAbs\":%.6g,\"noiseFloor\":%.6g,\"snrDb\":%.6g,"
-                 "\"energy\":%.6g,\"confidence\":%.6g}",
-                 s0, s1, s2, s3, static_cast<unsigned long>(ev.duration_samples),
-                 static_cast<unsigned long>(ev.rise_samples), static_cast<unsigned long>(ev.lift_samples),
-                 static_cast<double>(ev.peak_abs), static_cast<double>(ev.noise_floor),
-                 static_cast<double>(ev.snr_db), static_cast<double>(ev.energy), static_cast<double>(ev.confidence));
-}
-
 const char *reason_str(dsp_error_reason_t r) {
   switch (r) {
   case DSP_ERR_UNDERRUN:
@@ -595,18 +629,113 @@ bool apply_block_params(dsp_block_id_t id, const char *obj) {
   return ok;
 }
 
-bool apply_patch(const char *patch_json) {
+/** {@code badParam} message for a rejected {@code blocks} patch. */
+constexpr const char *kPatchRejected = "patch rejected";
+
+/** One {@code quartz} patch key and the control_api parameter it sets. */
+struct QuartzPatchParam {
+  const char *json_name; /**< Key inside the {@code quartz} object. */
+  const char *api_name;  /**< {@link control_api_set_quartz_param} name. */
+  const char *range;     /**< Accepted values, for the error message. */
+};
+
+/** Numeric quartz settings accepted by patchState (tsMethod is separate). */
+constexpr std::array<QuartzPatchParam, 3> kQuartzPatchParams = {{
+    {"gateS", "gate", "quartz.gateS must be 0 or 3..960"},
+    {"forkHz", "forkHz", "quartz.forkHz must be 300, 341.33, 360, 480 or 720"},
+    {"kSigma", "kSigma", "quartz.kSigma must be 4..20"},
+}};
+
+/**
+ * Applies the {@code quartz} member of a patch: the parameters first, then
+ * the mode, so a mode change starts its measurement with the new values.
+ * {@code mode} and {@code tsMethod} names are checked before anything is
+ * applied; a range error from control_api leaves earlier fields of the
+ * same object applied (as for blocks, §6.3).
+ *
+ * @param obj The extracted {@code quartz} object.
+ * @return {@code nullptr} on success, else the {@code badParam} message.
+ */
+[[nodiscard]] const char *apply_quartz_patch(const char *obj) {
+  char name[16];
+  auto mode = DSP_QUARTZ_MODE_COUNT;
+  const bool has_mode = json_get_string(obj, "mode", name, sizeof(name));
+  if (has_mode) {
+    mode = control_api_quartz_mode_from_name(name);
+    if (mode == DSP_QUARTZ_MODE_COUNT) {
+      return "quartz.mode must be mechanical, motor, lcd or fork";
+    }
+  } else if (json_find_key(obj, "mode") != nullptr) {
+    return "quartz.mode must be a string";
+  }
+  constexpr const char *kBadTs = "quartz.tsMethod must be threshold or xcorr";
+  auto ts = DSP_QUARTZ_TS_COUNT;
+  const bool has_ts = json_find_key(obj, "tsMethod") != nullptr;
+  if (has_ts) {
+    double v = -1.0;
+    if (json_get_string(obj, "tsMethod", name, sizeof(name))) {
+      ts = control_api_quartz_ts_method_from_name(name);
+    } else if (json_get_double(obj, "tsMethod", &v) && (v == 0.0 || v == 1.0)) {
+      ts = static_cast<dsp_quartz_ts_method_t>(static_cast<int>(v));
+    }
+    if (ts == DSP_QUARTZ_TS_COUNT) {
+      return kBadTs;
+    }
+  }
+  const bool supported = quartz_supported();
+  if (!supported &&
+      (has_ts || (has_mode && mode != DSP_QUARTZ_MODE_MECHANICAL))) {
+    return "quartz timing needs the PCM1808 source";
+  }
+  for (const auto &prm : kQuartzPatchParams) {
+    double v = 0.0;
+    if (!json_get_double(obj, prm.json_name, &v)) {
+      continue;
+    }
+    if (!supported) {
+      return "quartz timing needs the PCM1808 source";
+    }
+    if (!control_api_set_quartz_param(prm.api_name, static_cast<float>(v))) {
+      return prm.range;
+    }
+  }
+  if (has_ts &&
+      !control_api_set_quartz_param("tsMethod", static_cast<float>(ts))) {
+    return kBadTs;
+  }
+  if (has_mode && !control_api_set_quartz_mode(mode)) {
+    return "quartz timing needs the PCM1808 source";
+  }
+  return nullptr;
+}
+
+/**
+ * Applies a merge patch: {@code bypass}, then {@code quartz}, then
+ * {@code blocks}.
+ *
+ * @param patch_json The extracted {@code patch} object.
+ * @return {@code nullptr} on success, else the {@code badParam} message.
+ */
+[[nodiscard]] const char *apply_patch(const char *patch_json) {
   bool bypass;
   if (json_get_bool(patch_json, "bypass", &bypass)) {
     control_api_set_bypass(bypass);
   }
+  if (const char *quartz = json_find_key(patch_json, "quartz")) {
+    if (!json_extract_object(quartz, g_quartz_obj, sizeof(g_quartz_obj))) {
+      return "quartz must be an object";
+    }
+    if (const char *why = apply_quartz_patch(g_quartz_obj)) {
+      return why;
+    }
+  }
   const char *blocks = json_find_key(patch_json, "blocks");
   if (!blocks) {
-    return true;
+    return nullptr;
   }
   char *blocks_obj = g_blocks_obj;
   if (!json_extract_object(blocks, blocks_obj, sizeof(g_blocks_obj))) {
-    return false;
+    return kPatchRejected;
   }
   for (int i = 1; i < static_cast<int>(DSP_BLOCK_COUNT); i++) {
     const auto id = static_cast<dsp_block_id_t>(i);
@@ -616,12 +745,12 @@ bool apply_patch(const char *patch_json) {
     }
     char bobj[384];
     if (!json_extract_object(bv, bobj, sizeof(bobj))) {
-      return false;
+      return kPatchRejected;
     }
     bool en;
     if (json_get_bool(bobj, "enabled", &en)) {
       if (!control_api_set_block_enabled(id, en)) {
-        return false;
+        return kPatchRejected;
       }
     }
     const char *params = json_find_key(bobj, "params");
@@ -629,41 +758,51 @@ bool apply_patch(const char *patch_json) {
       char pobj[256];
       if (json_extract_object(params, pobj, sizeof(pobj))) {
         if (!apply_block_params(id, pobj)) {
-          return false;
+          return kPatchRejected;
         }
       }
     }
   }
-  return true;
+  return nullptr;
 }
 
 /* --- Request handlers: each appends the "result" value at {@code off}. --- */
 
 using ResultEncoder = int (*)(const char *req, char *dst, size_t dstlen, int off);
 
+/** {@code ping}: echoes {@code t} as a full int64 plus the uptime. */
 int result_ping(const char *req, char *dst, size_t dstlen, int off) {
-  long t = 0;
-  json_get_int(req, "t", &t);
-  return appendf(dst, dstlen, off, "{\"t\":%ld,\"uptimeMs\":%lu}", t,
-                 static_cast<unsigned long>(millis()));
+  int64_t t = 0;
+  json_get_i64(req, "t", &t);
+  return hid_json::encode_ping(dst, dstlen, off, t, millis());
 }
 
+/**
+ * {@code hello}: identity and capabilities, including the pipeline graph
+ * ({@link hid_json::encode_hello}).
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
 int result_hello(const char *, char *dst, size_t dstlen, int off) {
-  off = appendf(dst, dstlen, off,
-                "{\"protocolVersion\":1,\"fwVersion\":\"%s\",\"board\":\"%s\","
-                "\"source\":\"%s\",\"vid\":%u,\"pid\":%u,\"caps\":{"
-                "\"maxJsonBytes\":%u,\"metricsHzMax\":%u,\"beatHzMax\":%u,"
-                "\"timingHzMax\":%u,\"timing\":true,\"blocks\":[",
-                FW_VERSION, TG_BOARD_NAME, AUDIO_SOURCE_NAME,
-                static_cast<unsigned>(USB_VENDOR_ID),
-                static_cast<unsigned>(USB_PRODUCT_ID),
-                static_cast<unsigned>(kMaxJson), static_cast<unsigned>(kMetricsHzMax),
-                static_cast<unsigned>(kBeatHzMax), static_cast<unsigned>(kTimingHzMax));
-  for (int i = 1; i < static_cast<int>(DSP_BLOCK_COUNT) && off >= 0; i++) {
-    off = appendf(dst, dstlen, off, "%s\"%s\"", i > 1 ? "," : "",
-                  dsp_block_json_name(static_cast<dsp_block_id_t>(i)));
-  }
-  return (off < 0) ? off : appendf(dst, dstlen, off, "]}}");
+  hid_json::HelloParams p{};
+  p.fw_version = FW_VERSION;
+  p.board = TG_BOARD_NAME;
+  p.source = AUDIO_SOURCE_NAME;
+  p.vid = static_cast<unsigned>(USB_VENDOR_ID);
+  p.pid = static_cast<unsigned>(USB_PRODUCT_ID);
+  p.max_json = static_cast<unsigned>(kMaxJson);
+  p.metrics_hz_max = kMetricsHzMax;
+  p.beat_hz_max = kBeatHzMax;
+  p.timing_hz_max = kTimingHzMax;
+  p.quartz_hz_max = kQuartzHzMax;
+  p.quartz_pulses_max = static_cast<unsigned>(hid_json::kQuartzPulsesMax);
+  p.quartz = quartz_supported();
+  p.gps = control_api_gps_built();
+  p.pps = control_api_pps_built();
+  return hid_json::encode_hello(dst, dstlen, off, p);
 }
 
 int result_get_state(const char *, char *dst, size_t dstlen, int off) {
@@ -695,6 +834,137 @@ int result_matched(const char *, char *dst, size_t dstlen, int off) {
   return encode_matched(dst, dstlen, off);
 }
 
+/**
+ * {@code getQuartz} result and {@code quartz} notify data: the full quartz
+ * snapshot ({@link hid_json::encode_quartz}).
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
+int encode_quartz(char *dst, size_t dstlen, int off) {
+  control_api_get_quartz(&g_quartz);
+  return hid_json::encode_quartz(dst, dstlen, off, g_quartz);
+}
+
+/**
+ * {@code getQuartz} / {@code quartzRestart}: the quartz snapshot.
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
+int result_quartz(const char *, char *dst, size_t dstlen, int off) {
+  return encode_quartz(dst, dstlen, off);
+}
+
+/**
+ * {@code getQuartzPulses}: up to {@code max} recent motor pulses (1..
+ * {@link hid_json::kQuartzPulsesMax}, default the maximum), newest first.
+ * Empty outside motor mode.
+ *
+ * @param req Request JSON (optional {@code max}).
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
+int result_quartz_pulses(const char *req, char *dst, size_t dstlen, int off) {
+  long max = static_cast<long>(hid_json::kQuartzPulsesMax);
+  json_get_int(req, "max", &max);
+  if (max < 1) {
+    max = 1;
+  }
+  if (max > static_cast<long>(hid_json::kQuartzPulsesMax)) {
+    max = static_cast<long>(hid_json::kQuartzPulsesMax);
+  }
+  const auto n = control_api_copy_quartz_pulses(g_quartz_pulses,
+                                                static_cast<uint32_t>(max));
+  return hid_json::encode_quartz_pulses(dst, dstlen, off, g_quartz_pulses, n);
+}
+
+/**
+ * {@code getDevice} / {@code setDevice} / {@code start} / {@code stop}:
+ * the {@code DeviceStatus} object.
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
+int result_device(const char *, char *dst, size_t dstlen, int off) {
+  device_status_t st{};
+  control_api_get_device(&st);
+  return hid_json::encode_device_status(dst, dstlen, off, st);
+}
+
+/**
+ * {@code getBeats}: the newest {@code max} beats (1..
+ * {@link hid_json::kBeatsMax}, default 8), newest first. The reply holds as
+ * many of them as fit the message limit.
+ *
+ * @param req Request JSON (optional {@code max}).
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
+int result_beats(const char *req, char *dst, size_t dstlen, int off) {
+  long max = 8;
+  json_get_int(req, "max", &max);
+  if (max < 1) {
+    max = 1;
+  }
+  if (max > static_cast<long>(hid_json::kBeatsMax)) {
+    max = static_cast<long>(hid_json::kBeatsMax);
+  }
+  const auto n = control_api_copy_beats(g_beats, static_cast<uint32_t>(max));
+  return hid_json::encode_beats(dst, dstlen, off, g_beats, n, nullptr);
+}
+
+/** {@code getGps}: the {@code GpsInfo} object ({@link hid_json::encode_gps}). */
+int result_gps(const char *, char *dst, size_t dstlen, int off) {
+  control_api_get_gps(&g_gps);
+  return hid_json::encode_gps(dst, dstlen, off, g_gps);
+}
+
+/**
+ * {@code getTimebaseLog}: one page of the {@code TimebaseLog} object
+ * (optional {@code offset}, default 0; see hid_json::encode_timebase_log).
+ */
+int result_timebase_log(const char *req, char *dst, size_t dstlen, int off) {
+  long offset = 0;
+  json_get_int(req, "offset", &offset);
+  if (offset < 0) {
+    offset = 0;
+  }
+  control_api_timebase_log(&g_tblog);
+  return hid_json::encode_timebase_log(
+      dst, dstlen, off, g_tblog, static_cast<uint32_t>(offset),
+      control_api_timebase_log_pending(),
+      control_api_timebase_log_delta_ppm(),
+      control_api_timebase_log_last_write_unix(), nullptr);
+}
+
+/** {@code clearTimebaseLog} reply: the (empty) log as offset 0. */
+int result_timebase_log_first(const char *, char *dst, size_t dstlen,
+                              int off) {
+  return result_timebase_log("", dst, dstlen, off);
+}
+
+/**
+ * {@code getEvents}: the newest {@code limit} events (1..DSP_EVENT_LOG_CAP,
+ * default 8), newest first. The reply holds as many of them as fit the
+ * message limit ({@link hid_json::encode_events}), always the newest ones.
+ *
+ * @param req Request JSON (optional {@code limit}).
+ * @param dst Output buffer.
+ * @param dstlen Capacity.
+ * @param off Current length.
+ * @return New length, or -1 if it does not fit.
+ */
 int result_events(const char *req, char *dst, size_t dstlen, int off) {
   long limit = 8;
   json_get_int(req, "limit", &limit);
@@ -705,16 +975,7 @@ int result_events(const char *req, char *dst, size_t dstlen, int off) {
     limit = static_cast<long>(DSP_EVENT_LOG_CAP);
   }
   const auto n = control_api_copy_events(g_ev_scratch, static_cast<uint32_t>(limit));
-  off = appendf(dst, dstlen, off, "{\"events\":[");
-  for (uint32_t i = 0; i < n && off >= 0; i++) {
-    if (i) {
-      off = appendf(dst, dstlen, off, ",");
-    }
-    if (off >= 0) {
-      off = encode_event(dst, dstlen, off, g_ev_scratch[i]);
-    }
-  }
-  return (off < 0) ? off : appendf(dst, dstlen, off, "]}");
+  return hid_json::encode_events(dst, dstlen, off, g_ev_scratch, n, nullptr);
 }
 
 int result_errors(const char *, char *dst, size_t dstlen, int off) {
@@ -753,39 +1014,72 @@ void read_rate(const char *req, const char *key, uint8_t max_hz, uint8_t *out) {
   *out = static_cast<uint8_t>(hz);
 }
 
+/**
+ * Seeds the {@code quartzPulse} cursor past the pulses already logged, so
+ * subscribing does not replay the pulse history. With no pulse yet, the
+ * cursor points at sequence 0 of the current measurement.
+ */
+void seed_quartz_pulse_baseline() {
+  dsp_quartz_pulse_t newest{};
+  if (control_api_copy_quartz_pulses(&newest, 1) > 0) {
+    g_pulse_measurement = newest.measurement_id;
+    g_pulse_next_seq = newest.sequence + 1u;
+    return;
+  }
+  control_api_get_quartz(&g_quartz);
+  g_pulse_measurement = g_quartz.measurement_id;
+  g_pulse_next_seq = 0;
+}
+
 int result_subscribe(const char *req, char *dst, size_t dstlen, int off) {
   read_rate(req, "metricsHz", kMetricsHzMax, &g_sub_metrics_hz);
   read_rate(req, "beatHz", kBeatHzMax, &g_sub_beat_hz);
   read_rate(req, "timingHz", kTimingHzMax, &g_sub_timing_hz);
+  read_rate(req, "quartzHz", kQuartzHzMax, &g_sub_quartz_hz);
   bool flag;
+  if (json_get_bool(req, "quartzPulses", &flag)) {
+    g_sub_quartz_pulses = flag;
+  }
+  if (!quartz_supported()) {
+    g_sub_quartz_hz = 0;
+    g_sub_quartz_pulses = false;
+  }
   if (json_get_bool(req, "events", &flag)) {
     g_sub_events = flag;
   }
   if (json_get_bool(req, "errors", &flag)) {
     g_sub_errors = flag;
   }
+  if (json_get_bool(req, "beats", &flag)) {
+    g_sub_beats = flag;
+  }
   /* Seed baselines so we don't dump history on subscribe. */
   dsp_event_t last_ev;
-  g_have_last_event_peak = control_api_copy_events(&last_ev, 1) > 0;
-  if (g_have_last_event_peak) {
-    g_last_event_peak = last_ev.peak_sample;
-  }
+  g_last_event_peak =
+      control_api_copy_events(&last_ev, 1) > 0 ? last_ev.peak_sample : 0u;
   dsp_error_t last_err;
   g_have_last_error = control_api_copy_errors(&last_err, 1) > 0;
   if (g_have_last_error) {
     g_last_error_uptime = last_err.uptime_ms;
   }
+  seed_quartz_pulse_baseline();
+  g_beat_next_seq = control_api_beat_seq();
   const auto now = millis();
   g_last_metrics_ms = now;
   g_last_beat_ms = now;
   g_last_timing_ms = now;
-  return appendf(dst, dstlen, off,
-                 "{\"metricsHz\":%u,\"beatHz\":%u,\"timingHz\":%u,"
-                 "\"events\":%s,\"errors\":%s}",
-                 static_cast<unsigned>(g_sub_metrics_hz),
-                 static_cast<unsigned>(g_sub_beat_hz),
-                 static_cast<unsigned>(g_sub_timing_hz),
-                 g_sub_events ? "true" : "false", g_sub_errors ? "true" : "false");
+  g_last_quartz_ms = now;
+  return appendf(
+      dst, dstlen, off,
+      "{\"metricsHz\":%u,\"beatHz\":%u,\"timingHz\":%u,"
+      "\"quartzHz\":%u,\"events\":%s,\"errors\":%s,"
+      "\"quartzPulses\":%s,\"beats\":%s}",
+      static_cast<unsigned>(g_sub_metrics_hz),
+      static_cast<unsigned>(g_sub_beat_hz),
+      static_cast<unsigned>(g_sub_timing_hz),
+      static_cast<unsigned>(g_sub_quartz_hz), g_sub_events ? "true" : "false",
+      g_sub_errors ? "true" : "false", g_sub_quartz_pulses ? "true" : "false",
+      g_sub_beats ? "true" : "false");
 }
 
 /** {@code getTime}: device µs timer, sampled first to minimise latency. */
@@ -804,7 +1098,8 @@ int result_timebase(const char *, char *dst, size_t dstlen, int off) {
       dst, dstlen, off,
       "{\"ppm\":%.6g,\"source\":\"%s\",\"calPpm\":%.6g,"
       "\"calSource\":\"%s\",\"dateUnix\":%lu,\"durationS\":%lu,"
-      "\"saved\":%s,\"pps\":{\"enabled\":%s,\"locked\":%s,\"ppm\":%.6g,"
+      "\"saved\":%s,\"logDeltaPpm\":%.6g,\"logPending\":%s,"
+      "\"pps\":{\"enabled\":%s,\"locked\":%s,\"ppm\":%.6g,"
       "\"window\":%lu,\"good\":%lu,\"rejects\":%lu,\"noFix\":%lu},"
       "\"gps\":{\"enabled\":%s,\"fix\":%s,\"quality\":%u,\"sats\":%u,"
       "\"hdop\":%.3g,\"utcUnix\":%lu,\"ageMs\":%ld,\"sentences\":%lu,"
@@ -813,6 +1108,7 @@ int result_timebase(const char *, char *dst, size_t dstlen, int off) {
       static_cast<double>(tb.cal_ppm), timebase_source_name(tb.cal_source),
       static_cast<unsigned long>(tb.cal_date_unix),
       static_cast<unsigned long>(tb.cal_duration_s), tb.cal_saved ? "true" : "false",
+      static_cast<double>(tb.log_delta_ppm), tb.log_pending ? "true" : "false",
       tb.pps_enabled ? "true" : "false", tb.pps_locked ? "true" : "false",
       static_cast<double>(tb.pps_ppm), static_cast<unsigned long>(tb.pps_pulses),
       static_cast<unsigned long>(tb.pps_good), static_cast<unsigned long>(tb.pps_rejects),
@@ -828,34 +1124,70 @@ int result_timebase(const char *, char *dst, size_t dstlen, int off) {
  * Optional pre-step for an op: validates / applies the request and returns
  * {@code false} after sending its own error reply.
  */
-using RequestApplier = bool (*)(long id, const char *req);
+using RequestApplier = bool (*)(int64_t id, const char *req);
 
-bool apply_set_timebase(long id, const char *req) {
+bool apply_set_timebase(int64_t id, const char *req) {
   double ppm = 0.0;
-  if (!json_get_double(req, "ppm", &ppm)) {
+  double delta = 0.0;
+  const bool has_ppm = json_get_double(req, "ppm", &ppm);
+  const bool has_delta = json_get_double(req, "logDeltaPpm", &delta);
+  if (!has_ppm && !has_delta) {
     send_error(id, "badRequest", "missing ppm");
     return false;
   }
-  timebase_source_t src = TIMEBASE_SRC_MANUAL;
-  char name[16];
-  if (json_get_string(req, "source", name, sizeof(name)) &&
-      !timebase_source_from_name(name, &src)) {
-    send_error(id, "badParam", "source must be manual or ntp");
+  /* Validate everything before applying anything. */
+  if (has_delta && !timebase_log_delta_valid(static_cast<float>(delta))) {
+    send_error(id, "badParam", "logDeltaPpm must be 0.05..10");
     return false;
   }
+  timebase_source_t src = TIMEBASE_SRC_MANUAL;
   double date = 0.0, dur = 0.0;
-  json_get_double(req, "dateUnix", &date);
-  json_get_double(req, "durationS", &dur);
-  if (date < 0.0 || date > 4294967295.0 || dur < 0.0 || dur > 4294967295.0 ||
-      !timebase_set(static_cast<float>(ppm), src, static_cast<uint32_t>(date),
-                    static_cast<uint32_t>(dur))) {
+  if (has_ppm) {
+    char name[16];
+    if (json_get_string(req, "source", name, sizeof(name)) &&
+        !timebase_source_from_name(name, &src)) {
+      send_error(id, "badParam", "source must be none, manual or ntp");
+      return false;
+    }
+    json_get_double(req, "dateUnix", &date);
+    json_get_double(req, "durationS", &dur);
+    if (!(std::fabs(ppm) <= static_cast<double>(TIMEBASE_PPM_MAX)) ||
+        date < 0.0 || date > 4294967295.0 || dur < 0.0 ||
+        dur > 4294967295.0) {
+      send_error(id, "badParam", "ppm must be -1000..1000");
+      return false;
+    }
+  }
+  /* The flash write goes first: if it is refused nothing is applied. It is
+   * skipped when the value is unchanged, so a client that always sends it
+   * neither wears flash nor gets 'busy'. */
+  if (has_delta &&
+      static_cast<float>(delta) != control_api_timebase_log_delta_ppm()) {
+    switch (control_api_set_timebase_log_delta_ppm(static_cast<float>(delta))) {
+    case TIMEBASE_LOGDELTA_OK:
+      break;
+    case TIMEBASE_LOGDELTA_BAD_PARAM:
+      send_error(id, "badParam", "logDeltaPpm must be 0.05..10");
+      return false;
+    case TIMEBASE_LOGDELTA_BUSY:
+      send_error(id, "busy", "close the audio stream before saving");
+      return false;
+    case TIMEBASE_LOGDELTA_FAILED:
+      send_error(id, "flashError", "flash write failed");
+      return false;
+    }
+  }
+  /* With logDeltaPpm alone the stored calibration is left untouched. */
+  if (has_ppm && !timebase_set(static_cast<float>(ppm), src,
+                               static_cast<uint32_t>(date),
+                               static_cast<uint32_t>(dur))) {
     send_error(id, "badParam", "ppm must be -1000..1000");
     return false;
   }
   return true;
 }
 
-bool apply_save_timebase(long id, const char *) {
+bool apply_save_timebase(int64_t id, const char *) {
   switch (timebase_save()) {
   case TIMEBASE_SAVE_OK:
     return true;
@@ -869,9 +1201,116 @@ bool apply_save_timebase(long id, const char *) {
   return false;
 }
 
-bool apply_clear_timebase(long, const char *) {
+bool apply_clear_timebase(int64_t, const char *) {
   timebase_clear();
   return true;
+}
+
+/**
+ * {@code setDevice}: selects and persists the device mode.
+ *
+ * @param id Request id, for the error reply.
+ * @param req Request JSON ({@code mode}).
+ * @return {@code false} after replying {@code badParam} (missing or unknown
+ *         mode), {@code busy} (a USB stream is open) or {@code flashError}.
+ */
+bool apply_set_device(int64_t id, const char *req) {
+  constexpr const char *kBadMode = "device.mode must be usbMic or standalone";
+  char name[16];
+  device_mode_t mode;
+  if (!json_get_string(req, "mode", name, sizeof(name)) ||
+      !control_api_device_mode_from_name(name, &mode)) {
+    send_error(id, "badParam", kBadMode);
+    return false;
+  }
+  switch (control_api_set_device_mode(mode)) {
+  case DEVICE_SET_OK:
+    return true;
+  case DEVICE_SET_BUSY:
+    send_error(id, "busy", "close the audio stream before changing mode");
+    return false;
+  case DEVICE_SET_BAD_PARAM:
+    send_error(id, "badParam", kBadMode);
+    return false;
+  case DEVICE_SET_FAILED:
+    break;
+  }
+  send_error(id, "flashError", "flash write failed");
+  return false;
+}
+
+/**
+ * {@code start}: sets the run latch.
+ *
+ * @param id Request id, for the error reply.
+ * @return {@code false} after replying {@code badRequest} when the capture
+ *         backend is unhealthy.
+ */
+bool apply_start(int64_t id, const char *) {
+  if (control_api_run_start() == DEVICE_RUN_OK) {
+    return true;
+  }
+  send_error(id, "badRequest", "capture backend error (stream state: error)");
+  return false;
+}
+
+/**
+ * {@code stop}: clears the run latch. Always succeeds; while a USB stream is
+ * open capture keeps running and the reply still says {@code running}.
+ */
+bool apply_stop(int64_t, const char *) {
+  control_api_run_stop();
+  return true;
+}
+
+/**
+ * {@code getGps} pre-step: refuses with {@code badRequest} on a build
+ * without GPS_UART_RX.
+ */
+bool apply_require_gps(int64_t id, const char *) {
+  if (control_api_gps_built()) {
+    return true;
+  }
+  send_error(id, "badRequest", "GPS not built in");
+  return false;
+}
+
+/**
+ * {@code clearTimebaseLog}: clears the log in RAM and flash.
+ *
+ * @return {@code false} after replying {@code busy} while a USB stream is
+ *         open, or {@code flashError}.
+ */
+bool apply_clear_timebase_log(int64_t id, const char *) {
+  switch (control_api_timebase_log_clear()) {
+  case TIMEBASE_SAVE_OK:
+    return true;
+  case TIMEBASE_SAVE_BUSY:
+    send_error(id, "busy", "close the audio stream before saving");
+    return false;
+  case TIMEBASE_SAVE_FAILED:
+    break;
+  }
+  send_error(id, "flashError", "flash write failed");
+  return false;
+}
+
+/**
+ * {@code quartzRestart}: starts a new measurement in the active quartz mode
+ * (also after a motor gate froze the result).
+ *
+ * @param id Request id, for the error reply.
+ * @return {@code false} after replying {@code badRequest} in mechanical
+ *         mode or on a build without the quartz engine.
+ */
+bool apply_quartz_restart(int64_t id, const char *) {
+  if (control_api_quartz_restart()) {
+    return true;
+  }
+  send_error(id, "badRequest",
+             quartz_supported() ? "quartzRestart needs motor, lcd or fork mode"
+                                : "quartz timing needs the PCM1808 source");
+  return false;
 }
 
 struct OpHandler {
@@ -899,25 +1338,36 @@ const OpHandler kOps[] = {
     {"setTimebase", result_timebase, apply_set_timebase},
     {"saveTimebase", result_timebase, apply_save_timebase},
     {"clearTimebase", result_timebase, apply_clear_timebase},
+    {"getQuartz", result_quartz},
+    {"getQuartzPulses", result_quartz_pulses},
+    {"quartzRestart", result_quartz, apply_quartz_restart},
+    {"getDevice", result_device},
+    {"setDevice", result_device, apply_set_device},
+    {"start", result_device, apply_start},
+    {"stop", result_device, apply_stop},
+    {"getBeats", result_beats},
+    {"getGps", result_gps, apply_require_gps},
+    {"getTimebaseLog", result_timebase_log},
+    {"clearTimebaseLog", result_timebase_log_first, apply_clear_timebase_log},
 };
 
 /** Applies a patchState request; replies with an error and returns false on failure. */
-bool apply_patch_request(long id, const char *json) {
+bool apply_patch_request(int64_t id, const char *json) {
   const char *patch = json_find_key(json, "patch");
   if (!patch || !json_extract_object(patch, g_patch_obj, sizeof(g_patch_obj))) {
     send_error(id, "badRequest", "missing patch object");
     return false;
   }
-  if (!apply_patch(g_patch_obj)) {
-    send_error(id, "badParam", "patch rejected");
+  if (const char *why = apply_patch(g_patch_obj)) {
+    send_error(id, "badParam", why);
     return false;
   }
   return true;
 }
 
 void handle_request(const char *json) {
-  long id = 0;
-  if (!json_get_int(json, "id", &id)) {
+  int64_t id = 0;
+  if (!json_get_i64(json, "id", &id)) {
     send_error(0, "badRequest", "missing id");
     return;
   }
@@ -954,8 +1404,10 @@ void handle_request(const char *json) {
     return;
   }
 
+  char ids[24];
+  hid_json::i64_dec(id, ids);
   int off = appendf(g_out, sizeof(g_out), 0,
-                    "{\"v\":1,\"id\":%ld,\"ok\":true,\"result\":", id);
+                    "{\"v\":1,\"id\":%s,\"ok\":true,\"result\":", ids);
   if (off >= 0) {
     off = encode(json, g_out, sizeof(g_out), off);
   }
@@ -990,44 +1442,50 @@ void push_notify(const char *op, int (*encode_data)(char *, size_t, int)) {
   }
 }
 
+/**
+ * Pushes the events not yet sent as one {@code event} notify, oldest first
+ * (consistent with {@code beats} and {@code quartzPulse}). The reply holds as
+ * many as fit one message; the cursor advances only past the events actually
+ * encoded, so the rest follow on the next polls and none is lost.
+ *
+ * New events are those resident in the log with {@code peak_sample} above
+ * {@link g_last_event_peak}. If the log lapped the cursor (more than
+ * DSP_EVENT_LOG_CAP events since the last push) the evicted ones are gone
+ * and the push starts at the oldest resident event. If the newest resident
+ * event is older than the cursor the sample clock restarted, so the cursor is
+ * reset and every resident event is new.
+ */
 void push_notify_events(void) {
   if (g_tx_active || !g_sub_events) {
     return;
   }
   dsp_event_t *ev = g_ev_scratch;
-  const auto n = control_api_copy_events(ev, 8);
+  const auto n = control_api_copy_events(ev, DSP_EVENT_LOG_CAP); /* newest first */
   if (n == 0) {
     return;
   }
-  if (!g_have_last_event_peak) {
-    /* First observation after subscribe already seeded; nothing to push. */
-    g_last_event_peak = ev[0].peak_sample;
-    g_have_last_event_peak = true;
-    return;
+  if (ev[0].peak_sample < g_last_event_peak) {
+    g_last_event_peak = 0;
   }
-  uint32_t neu = 0;
-  while (neu < n && ev[neu].peak_sample != g_last_event_peak) {
+  uint32_t neu = 0; /* newest-first prefix that is newer than the cursor */
+  while (neu < n && ev[neu].peak_sample > g_last_event_peak) {
     neu++;
   }
   if (neu == 0) {
     return;
   }
-  g_last_event_peak = ev[0].peak_sample;
+  std::reverse(ev, ev + neu); /* oldest first */
   int off = appendf(g_out, sizeof(g_out), 0,
-                    "{\"v\":1,\"notify\":true,\"op\":\"event\",\"data\":{"
-                    "\"events\":[");
-  for (uint32_t i = 0; i < neu && off >= 0; i++) {
-    if (i) {
-      off = appendf(g_out, sizeof(g_out), off, ",");
-    }
-    if (off >= 0) {
-      off = encode_event(g_out, sizeof(g_out), off, ev[i]);
-    }
+                    "{\"v\":1,\"notify\":true,\"op\":\"event\",\"data\":");
+  uint32_t sent = 0;
+  if (off >= 0) {
+    off = hid_json::encode_events(g_out, sizeof(g_out), off, ev, neu, &sent);
   }
   if (off >= 0) {
-    off = appendf(g_out, sizeof(g_out), off, "]}}");
+    off = appendf(g_out, sizeof(g_out), off, "}");
   }
-  if (off >= 0) {
+  if (off >= 0 && sent > 0) {
+    g_last_event_peak = ev[sent - 1].peak_sample;
     tx_begin(g_out, true);
   }
 }
@@ -1055,6 +1513,95 @@ void push_notify_errors(void) {
   }
 }
 
+/** Pulse captured by push_notify_quartz_pulse for encode_notify_pulse. */
+dsp_quartz_pulse_t g_notify_pulse;
+
+/** push_notify adapter for {@link g_notify_pulse}. */
+int encode_notify_pulse(char *dst, size_t dstlen, int off) {
+  return hid_json::encode_quartz_pulse(dst, dstlen, off, g_notify_pulse);
+}
+
+/**
+ * Pushes the oldest closed motor pulse not yet sent as one
+ * {@code quartzPulse} notify (one per call, since one TX is in flight at a
+ * time; at most one pulse per second arrives at the shortest step, and the
+ * subscribe loop runs every main-loop pass).
+ *
+ * A pulse is pushed once its 50 ms group has closed, so {@code extras} and
+ * {@code clipped} are final. The cursor is (measurement_id, sequence): the
+ * log only holds pulses of the current measurement, so a different
+ * measurement_id means a restart, and every pulse of the new measurement
+ * is new (sequences restart at 0).
+ */
+void push_notify_quartz_pulse(void) {
+  if (g_tx_active || !g_sub_quartz_pulses) {
+    return;
+  }
+  const auto n =
+      control_api_copy_quartz_pulses(g_quartz_pulses, DSP_QUARTZ_PULSE_LOG_CAP);
+  if (n == 0) {
+    return;
+  }
+  if (g_quartz_pulses[0].measurement_id != g_pulse_measurement) {
+    g_pulse_measurement = g_quartz_pulses[0].measurement_id;
+    g_pulse_next_seq = 0;
+  }
+  /* Newest first: walk from the oldest to the first unsent pulse. */
+  for (auto i = n; i-- > 0;) {
+    const auto &p = g_quartz_pulses[i];
+    if (p.sequence < g_pulse_next_seq) {
+      continue;
+    }
+    if (!p.closed) {
+      return; /* later pulses cannot be closed before this one */
+    }
+    g_notify_pulse = p;
+    g_pulse_next_seq = p.sequence + 1u;
+    push_notify("quartzPulse", encode_notify_pulse);
+    return;
+  }
+}
+
+/**
+ * Pushes the oldest unsent beats (at most 8) as one {@code beats} notify,
+ * oldest first. The cursor is the beat {@code seq}: seeded by subscribe, and
+ * re-seeded to 0 when it runs backwards (a stream reset
+ * restarts the numbering, so the host must treat it as a new stream). If the
+ * ring wrapped past the cursor the lost beats are skipped. A notify that is
+ * too large for one message carries fewer beats; the rest follow in the next
+ * notify.
+ */
+void push_notify_beats(void) {
+  if (g_tx_active || !g_sub_beats) {
+    return;
+  }
+  const auto seq = control_api_beat_seq();
+  if (seq < g_beat_next_seq) {
+    /* Stream reset: numbering restarted, every beat since is new. */
+    g_beat_next_seq = 0;
+  }
+  if (seq == g_beat_next_seq) {
+    return;
+  }
+  const auto n = control_api_copy_beats_since(g_beat_next_seq, g_beats,
+                                              hid_json::kBeatsPerNotifyMax);
+  if (n == 0) {
+    g_beat_next_seq = seq; /* all evicted from the ring */
+    return;
+  }
+  int off = appendf(g_out, sizeof(g_out), 0,
+                    "{\"v\":1,\"notify\":true,\"op\":\"beats\",\"data\":");
+  uint32_t emitted = 0;
+  off = hid_json::encode_beats(g_out, sizeof(g_out), off, g_beats, n, &emitted);
+  if (off >= 0) {
+    off = appendf(g_out, sizeof(g_out), off, "}");
+  }
+  if (off >= 0 && emitted > 0) {
+    g_beat_next_seq = g_beats[emitted - 1u].seq + 1u;
+    tx_begin(g_out, true);
+  }
+}
+
 void subscribe_poll(void) {
   auto now = millis();
   if (g_sub_metrics_hz > 0) {
@@ -1078,6 +1625,15 @@ void subscribe_poll(void) {
       push_notify("timing", encode_timing);
     }
   }
+  if (g_sub_quartz_hz > 0 && !g_tx_active) {
+    uint32_t period = 1000u / g_sub_quartz_hz;
+    if ((now - g_last_quartz_ms) >= period) {
+      g_last_quartz_ms = now;
+      push_notify("quartz", encode_quartz);
+    }
+  }
+  push_notify_quartz_pulse();
+  push_notify_beats();
   push_notify_events();
   push_notify_errors();
 }

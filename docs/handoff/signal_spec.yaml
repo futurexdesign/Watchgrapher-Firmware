@@ -1,0 +1,91 @@
+# Machine-readable signal specification: quartz / LCD pickup head -> PCM1808 -> firmware.
+# Companion to FIRMWARE_HANDOFF.md. Units are in key names. All values come from the circuit
+# simulation (SPICE-subset solver, TLV9062 macromodel) and the synthetic test vectors.
+# confidence: sim = simulated, lit = published watch/IC data, est = engineering estimate, needs hardware check.
+
+schema_version: 1
+date: 2026-11-16
+
+adc:
+  part: PCM1808
+  format: 24-bit two's complement, left-justified/I2S per existing host
+  full_scale_vpp: 3.0
+  full_scale_code: 8388607
+  counts_per_volt: 5592405.3          # 2^23 / 1.5
+  passband_fraction_of_fs: 0.454
+  sample_rate_hz: {default: 48000, crystal_mode: 96000}
+  digital_filter_group_delay: "about 17.4/fs per datasheet (est; verify) - constant, cancels in rates"
+  clock: GPS-disciplined; sample_index / fs is the time base. Never resample.
+
+channels:
+  left:
+    net: OUT_IND
+    sensor: inductive pickup (L1 sense + L2 hum-cancel, SDR0503 10 mH)
+    gain_db: {jp1_bridged: 60.8, jp1_open: 40.0}
+    default_jumper: jp1_bridged
+    bandwidth_hz: [118, 25000]
+    noise_rms_codes: {jp1_bridged: 10215, jp1_open: 1030}        # sim; jp1_open scaled (est)
+    noise_input_referred_uv_rms: 1.7                             # sim
+    clip_emf_mv_peak: {jp1_bridged: 1.4, jp1_open: 14}            # est from vectors
+    codes_per_uv_emf_peak: 6080                                   # leading-spike peak, jp1 bridged (sim)
+    analog_edge_delay_us: 7.3                                     # sim, constant
+  right:
+    net: OUT_CAP
+    sensor: capacitive electrode with driven guard
+    gain: {jp2_open: 1, jp2_bridged: 11}
+    default_jumper: jp2_open
+    noise_rms_codes: {jp2_open: 284, jp2_bridged: 2516}           # sim
+    clip_coupling_pf: {jp2_bridged: 0.33}                         # sim, static LCD 3 V swing
+
+signals:
+  stepper_motor:
+    channel: left
+    confidence: lit+sim
+    step_interval_s_allowed: [1, 2, 2.5, 5, 10, 20, 30, 60]
+    drive_pulse_width_ms: [0, 20]          # typical 3.9-7.8
+    chopping_hz: 1024
+    chopping_duty_steps: 0.0625            # 37.5 % .. 100 %
+    polarity: alternates every step; absolute polarity unknown (coil orientation)
+    leading_spike_rise_us: "< 20 (shorter than one 48 kHz sample)"
+    pickup_emf_peak_uv: {weak: 20, typical: [50, 300], strong: 1000}
+    timing_jitter_rms_us_measured: {20uV: 2.6, 50uV: 1.2, 100uV: 0.25, 1mV: 0.01}
+    possible_extras: "detection / correction pulses (larger, longer) after a missed step on some calibres"
+  inhibition:
+    applies_to: stepper_motor timing only (LCD and crystal show the raw oscillator)
+    period_s_typical: [10, 60]
+    period_s_max: 960
+    removal_stage_hz_typical: 8192
+    delay_per_removed_pulse_us: 122.07
+    detection_threshold_us: 20
+  lcd:
+    channel: right
+    confidence: sim+est
+    pattern_repetition_hz_candidates: [128, 64, 32, 16]
+    static_drive_hz: 64
+    multiplex: "frame 64 Hz with inversion, pattern 32 Hz typical"
+    coupling_pf: {weak: 0.05, typical: 0.2, strong: 0.5}
+    peak_codes_jp2_open: {static_0.05pF: 150000, multiplex_0.2pF: 190000, static_0.5pF: 1315000}   # per-transition spike, includes hum
+    note: "inhibition is not visible; LCD gives the oscillator rate"
+  crystal_32768:
+    channel: right
+    confidence: est
+    requires: [fs_96k, jp2_bridged, plastic_case]
+    amplitude_at_adc_mv: 2.8
+  tuning_fork:
+    channel: left
+    frequencies_hz: [300, 341.33, 360, 480, 720]
+    amplitude_at_adc_mv: 80
+    gate_s_min: 8
+
+rate:
+  formula: "rate_s_per_day = 86400 * (T_nominal / T_measured - 1)"
+  sign: positive = watch gains (runs fast)
+  frequency_form: "rate_s_per_day = 86400 * (f_measured / f_nominal - 1)"
+  report: [rate_without_inhibition_s_per_day, rate_with_inhibition_s_per_day, inhibition_period_s]
+
+acceptance:
+  vectors_dir: vectors/
+  tolerance:
+    rate_s_per_day_abs: {pulses_short_records: 0.2, rate_records: 0.01, inhibition_corrected: 0.02, lcd: 0.005, tones: 0.005}
+    pulse_count: exact
+    inhibition_period_s: exact

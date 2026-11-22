@@ -1,10 +1,12 @@
-a---
+---
 title: RP2350 USB Mono Microphone — Internal ADC Prototype
 subtitle: Firmware implementation specification for code generation
 version: P1.0
 status: Engineering specification — code not yet implemented
 created: 2026-11-03
 ---
+
+> **Historical document (superseded).** This is the original P1 specification for the internal-ADC USB microphone prototype, kept for the original intent. The firmware has since gained the PCM1808 backend, the DSP graph, HID control, mechanical and quartz timing, device modes and GPS timebase support. For what the firmware does now see [docs/AS_BUILT_ARCHITECTURE.md](docs/AS_BUILT_ARCHITECTURE.md), which wins wherever the two disagree.
 
 # RP2350 USB Mono Microphone — Internal ADC Prototype
 
@@ -425,6 +427,7 @@ The agent must deliver:
 - Abracon crystal ABM8-272-T3, LCSC C20625731: https://www.lcsc.com/datasheet/C20625731.pdf
 
 ---
+
 
 ### Engineering change log
 

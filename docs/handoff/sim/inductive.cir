@@ -1,0 +1,68 @@
+* inductive.cir - inductive (stepper-motor) channel of the pickup head, rev A
+* Runs in ngspice / LTspice / KiCad.  Sweep or edit the values marked "<--".
+*
+* The watch is modelled as a stepper-motor coil (RM, LM) driven by a chopped 1.55 V pulse.
+* The pickup's induced EMF is proportional to dI/dt in the motor coil, i.e. to the voltage
+* across LM: EPICK puts K * V(LM) in series with the sense coil L1.
+*   K sets the pickup EMF: peak EMF = K * 1.55 V.   K = 64.5e-6 gives 100 uV peak  <--
+* Motor-coil values are typical of analogue quartz movements (about 2 kOhm, about 1 H): an assumption.
+* Mains hum is induced equally in L1 and L2; L2 is wound/connected in opposition, mismatch 5 %.
+
+.include models.lib
+
+VCC vcc 0 5
+
+* ---- reference: R17, R18, C13, C14
+R17 vcc vref 100k
+R18 vref 0 100k
+C13 vref 0 10u
+C14 vref 0 100n
+
+* ---- watch: stepper-motor coil, one 6.8 ms drive pulse chopped at 1024 Hz, 75 % duty
+VDRV drv 0 PWL(0 0 1m 0 1.0001m 1.55 1.7324m 1.55 1.7325m 0 1.9765m 0 1.9766m 1.55 2.7090m 1.55
++ 2.7091m 0 2.9531m 0 2.9532m 1.55 3.6856m 1.55 3.6857m 0 3.9297m 0 3.9298m 1.55 4.6621m 1.55
++ 4.6622m 0 4.9063m 0 4.9064m 1.55 5.6387m 1.55 5.6388m 0 5.8828m 0 5.8829m 1.55 6.6153m 1.55
++ 6.6154m 0 6.8594m 0 6.8595m 1.55 7.5918m 1.55 7.5919m 0 20m 0)
+RM  drv m1 2k
+LM  m1 0 1
+
+* ---- sense coil L1 (under the watch) and hum-cancelling coil L2, in series opposition
+*   SDR0503-103JL: 10 mH, 110 Ohm.  For the 47 mH radial (RLB0913-473K): 47m, 99   <--
+RS1 hot x1 110
+LS1 x1 x2 10m
+EPICK x2 x3 m1 0 64.5e-6
+VHUM1 x3 mid DC 0 AC 0 SIN(0 0 60)
+CP1 hot mid 5p
+RS2 mid y1 110
+LS2 y1 y2 10m
+VHUM2 y2 vref DC 0 AC 0 SIN(0 0 60)
+CP2 mid vref 5p
+
+* ---- U1A, stage 1, x101
+R1  hot vref 22k
+R2  hot in1 100
+C1  in1 0 100p
+XU1A in1 fb1 s1out vcc 0 TLV9062
+R3  s1out fb1 20k
+C2  s1out fb1 180p
+R4  fb1 g1a 200
+C3  g1a 0 10u
+
+* ---- U1B, stage 2, x11 (JP1 fitted) or x1 (JP1 open)
+XU1B s1out fb2 out1 vcc 0 TLV9062
+R5  out1 fb2 10k
+C4  out1 fb2 330p
+R6  fb2 g3a 1k
+C5  g3a g3b 2.2u
+RJP1 g3b 0 0.01
+* RJP1 g3b 0 1T   <-- JP1 open
+
+* ---- output network and the PCM1808 input (assumed: about 60 kOhm to an internal 2.5 V bias)
+R7  out1 o1a 100
+C6  o1a outind 2.2u
+R8  outind 0 100k
+RADC outind adcb 60k
+VADC adcb 0 2.5
+
+.tran 0.5u 20m
+.end

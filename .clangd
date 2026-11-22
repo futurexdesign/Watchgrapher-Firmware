@@ -1,0 +1,12 @@
+# clangd / CLion fallback flags for files without a compile_commands.json entry.
+# Paths are absolute: clangd resolves relative -I against each file's own
+# directory, which breaks headers included from src/mechanical/ and
+# include/mechanical/. Regenerate a full database with `pio run -t compiledb`
+# if Arduino / Pico SDK headers are needed too.
+CompileFlags:
+  Add:
+    - -std=gnu++17
+    - -I/Users/kevin/CLionProjects/timegrapher-stand/include
+    - -I/Users/kevin/CLionProjects/timegrapher-stand/third_party/CMSIS-DSP/Include
+    - -I/Users/kevin/CLionProjects/timegrapher-stand/tests
+    - -DARM_MATH_CM33

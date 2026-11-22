@@ -21,7 +21,7 @@
  *
  * Pure C++ (no Arduino / Pico SDK) so it is host-testable.
  *
- * @see dsp_graph.cpp, tests/test_beat_fit.cpp
+ * @see mechanical/beat_analysis.cpp, tests/test_beat_fit.cpp
  */
 
 #pragma once
@@ -30,19 +30,21 @@
 #include <stdint.h>
 
 /** Max ticks held; at 57,600 A/h (16 Hz) this is 16 s of history. */
-#define BEAT_FIT_CAP 256u
+#define BEAT_FIT_CAP          256u
 /** Fewest ticks for a rate solution. */
-#define BEAT_FIT_MIN_POINTS 8u
+#define BEAT_FIT_MIN_POINTS   8u
 /** A gap longer than this many half-beats restarts the fit. */
-#define BEAT_FIT_MAX_GAP 8
+#define BEAT_FIT_MAX_GAP      8
 /** Ticks further than this fraction of a half-beat off-grid are rejected. */
 #define BEAT_FIT_MAX_GRID_ERR 0.3f
 /** This many consecutive off-grid rejects restarts the fit at the new tick. */
-#define BEAT_FIT_MAX_REJECTS 4u
+#define BEAT_FIT_MAX_REJECTS  4u
 
 typedef struct {
-  double origin;        /**< Absolute sample time of k = 0 on the grid. */
-  double nominal;       /**< Nominal half-period (samples) the grid uses. */
+  double origin; /**< Absolute sample time of k = 0 on the (rebased) window. */
+  double grid_origin; /**< Origin of the grid when it STARTED; never rebased. */
+  int32_t k_base;     /**< Added to window k to get the grid-absolute k. */
+  double nominal;     /**< Nominal half-period (samples) the grid uses. */
   int32_t k[BEAT_FIT_CAP];
   float u[BEAT_FIT_CAP]; /**< t_k - (origin + k * nominal), samples. */
   uint32_t head;         /**< Index of the oldest point. */
@@ -58,13 +60,25 @@ typedef enum {
   BEAT_FIT_REJECTED, /**< Off-grid or non-increasing; fit unchanged. */
 } beat_fit_push_result_t;
 
+/**
+ * Where the most recent push landed on the grid, whatever its outcome.
+ * k and rel are grid-absolute: they do not change when the window slides.
+ */
+typedef struct {
+  bool valid;     /**< False only if the push was refused (nominal <= 0). */
+  int32_t k;      /**< Grid index since {@code grid_origin} (nearest slot). */
+  double rel;     /**< t - grid_origin, samples. */
+  double u;       /**< rel - k * nominal, samples (raw, uncorrected). */
+  double nominal; /**< Nominal half-period of the grid (samples). */
+} beat_fit_point_t;
+
 typedef struct {
   double half_period;      /**< Fitted half-period P (samples). */
   float half_period_delta; /**< P minus the nominal half-period (samples). */
-  float alt_offset;   /**< TIC/TAC offset c (samples); BE = 2|c|. */
-  float resid_rms;    /**< RMS residual of inliers (samples). */
-  uint32_t points;    /**< Inliers used in the final solve. */
-  bool alt_valid;     /**< False when the window holds only one parity. */
+  float alt_offset;        /**< TIC/TAC offset c (samples); BE = 2|c|. */
+  float resid_rms;         /**< RMS residual of inliers (samples). */
+  uint32_t points;         /**< Inliers used in the final solve. */
+  bool alt_valid;          /**< False when the window holds only one parity. */
 } beat_fit_result_t;
 
 /** Clears all points; the next push starts a new grid. */
@@ -77,10 +91,14 @@ void beat_fit_reset(beat_fit_t *f);
  * @param nominal_half_period Nominal half-period in samples. A change from
  *        the value the current grid was started with restarts the fit.
  * @param max_span Points older than {@code t - max_span} samples are dropped.
+ * @param pt Optional; receives the grid index and residual of this point
+ *        for every outcome. For STARTED, k = 0 and u = 0. For REJECTED, k is
+ *        the nearest slot to the last accepted point and u the miss.
  */
 beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
                                      double nominal_half_period,
-                                     double max_span);
+                                     double max_span,
+                                     beat_fit_point_t *pt = nullptr);
 
 /**
  * Solves the current window. Two passes: a full fit, then a refit without

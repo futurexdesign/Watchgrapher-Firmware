@@ -22,6 +22,11 @@ uint32_t g_dsp_samples = 0;
 uint32_t g_dsp_budget = 0;
 uint32_t g_dsp_blocks = 0;
 
+uint32_t g_qz_last = 0;
+uint32_t g_qz_mean = 0;
+uint32_t g_qz_max = 0;
+uint32_t g_qz_blocks = 0;
+
 uint32_t g_loop_last = 0;
 uint32_t g_loop_mean = 0;
 uint32_t g_loop_max = 0;
@@ -85,6 +90,15 @@ void perf_timing_note_dsp_block(uint32_t us, uint32_t n, uint32_t source_hz) {
   g_dsp_blocks++;
 }
 
+void perf_timing_note_quartz_block(uint32_t us) {
+  g_qz_last = us;
+  g_qz_mean = ema_update(g_qz_mean, us);
+  if (us > g_qz_max) {
+    g_qz_max = us;
+  }
+  g_qz_blocks++;
+}
+
 void perf_timing_note_loop(uint32_t us) {
   g_loop_last = us;
   g_loop_mean = ema_update(g_loop_mean, us);
@@ -122,6 +136,10 @@ void perf_timing_get(dsp_timing_t *out) {
   out->ring_min =
       d->ring_min_occupancy == UINT32_MAX ? 0u : d->ring_min_occupancy;
   out->ring_max = d->ring_max_occupancy;
+  out->quartz_block_us_last = g_qz_last;
+  out->quartz_block_us_mean = g_qz_mean;
+  out->quartz_block_us_max = g_qz_max;
+  out->quartz_blocks = g_qz_blocks;
 }
 
 void perf_timing_reset(void) {
@@ -131,6 +149,10 @@ void perf_timing_reset(void) {
   g_dsp_samples = 0;
   g_dsp_budget = 0;
   g_dsp_blocks = 0;
+  g_qz_last = 0;
+  g_qz_mean = 0;
+  g_qz_max = 0;
+  g_qz_blocks = 0;
   g_loop_last = 0;
   g_loop_mean = 0;
   g_loop_max = 0;
@@ -144,5 +166,6 @@ void perf_timing_reset(void) {
 
 void perf_timing_clear_window_max(void) {
   g_dsp_max = g_dsp_last;
+  g_qz_max = g_qz_last;
   g_loop_max = g_loop_last;
 }

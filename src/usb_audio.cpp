@@ -14,6 +14,7 @@
 #include "app_config.h"
 #include "audio_ring.h"
 #include "audio_source.h"
+#include "device_mode.h"
 #include "diagnostics.h"
 #include "fw_identity.h"
 #include "hid_control.h"
@@ -50,7 +51,9 @@ static void usb_audio_feed_frame(void) {
   }
 
   stream_state_t st = audio_source_state();
-  if (st != STREAM_STATE_STREAM_ACTIVE) {
+  /* STANDALONE never feeds the ring: send silence, not an underrun. */
+  if (st != STREAM_STATE_STREAM_ACTIVE ||
+      device_mode_get() == DEVICE_MODE_STANDALONE) {
     memset(g_samp_buf, 0, sizeof(g_samp_buf));
   } else {
     uint32_t got = audio_ring_pop(g_samp_buf, APP_PKT_SAMPLES_NOM, false);

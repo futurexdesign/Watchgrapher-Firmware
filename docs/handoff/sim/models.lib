@@ -1,0 +1,48 @@
+* models.lib - behavioural models for the quartz / LCD pickup head simulation
+* Plain SPICE (G, E, R, C, D, V): runs in ngspice, LTspice and KiCad's simulator.
+*
+* Op amp macromodel: transconductance into a single dominant pole, output clamped near the
+* rails by diodes, resistive output.  Pins: in+ in- out vcc vee.
+*   GBW = gm / (2*pi*Cp), A0 = gm*Rp.  Noise sources (VN, IN) are 0 V / 0 A here; the noise
+*   analysis drives them from Python.  Real parts have more poles: this model says nothing
+*   about phase margin.
+
+* ---- TI TLV9062: GBW 10 MHz, Aol ~110 dB, Ib 0.5 pA, Cin cm 4 pF / diff 2 pF
+.subckt TLV9062 inp inn out vcc vee
+VN  inp inpi 0
+CCMP inpi 0 4p
+CCMN inn 0 4p
+CDIF inpi inn 2p
+EMID mid 0 vcc vee 0.5
+G1  0 n1 inpi inn 1m
+RP  n1 mid 316.2Meg
+CP  n1 mid 15.915p
+VHI vcc hi 0.65
+VLO lo vee 0.65
+DH  n1 hi DCLAMP
+DL  lo n1 DCLAMP
+EOUT oi 0 n1 0 1
+RO  oi out 50
+.ends TLV9062
+
+* ---- TI OPA2376: GBW 5.5 MHz, Aol ~120 dB, Ib 0.2 pA
+.subckt OPA2376 inp inn out vcc vee
+VN  inp inpi 0
+CCMP inpi 0 6p
+CCMN inn 0 6p
+CDIF inpi inn 13p
+EMID mid 0 vcc vee 0.5
+G1  0 n1 inpi inn 1m
+RP  n1 mid 1G
+CP  n1 mid 28.94p
+VHI vcc hi 0.65
+VLO lo vee 0.65
+DH  n1 hi DCLAMP
+DL  lo n1 DCLAMP
+EOUT oi 0 n1 0 1
+RO  oi out 50
+.ends OPA2376
+
+.model DCLAMP D(IS=1e-14 N=1)
+* BAV199 low-leakage clamp diode (leakage of a few pA)
+.model DBAV199 D(IS=2e-12 N=1.9)

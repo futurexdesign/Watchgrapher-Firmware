@@ -31,7 +31,7 @@ void ui_snapshot_publish(const ui_snapshot_t *s) {
 }
 
 bool ui_snapshot_read(ui_snapshot_t *out) {
-  /* A publish copies ~40 bytes, so a few retries always suffice. */
+  /* A publish copies ~100 bytes, so a few retries always suffice. */
   for (int attempt = 0; attempt < 64; attempt++) {
     const uint32_t before = g_seq;
     if (before == 0u) {

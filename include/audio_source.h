@@ -4,7 +4,9 @@
  *
  * Bridges USB mount / UAC alternate-setting events to the compile-time audio
  * backend ({@code ADC}, {@code PCM1808}, or {@code SYNTHETIC}) and keeps the
- * PCM ring prefilled while the host is recording.
+ * PCM ring prefilled while the host is recording. A separate run latch
+ * ({@link audio_source_set_run_requested}) lets capture and analysis run
+ * without an open USB stream (STANDALONE mode, host/CLI start).
  */
 
 #pragma once
@@ -87,6 +89,55 @@ stream_state_t audio_source_state(void);
  *        When false, capture is stopped and the ring is cleared immediately.
  */
 void audio_source_set_configured(bool configured);
+
+/**
+ * Sets or clears the host/CLI run latch. Capture and analysis run while the
+ * USB stream is open or this latch is set (see {@link device_mode.h}). A set
+ * latch starts a warm-up + capture from the next {@link audio_source_process}
+ * with no host stream; clearing it stops capture unless a stream still needs
+ * it. Setting the latch on an unhealthy backend drops it again at the next
+ * tick (check {@link audio_source_backend_ok} first).
+ *
+ * @param requested New latch value.
+ */
+void audio_source_set_run_requested(bool requested);
+
+/** @return The run latch (not whether capture is actually running). */
+bool audio_source_run_requested(void);
+
+/**
+ * @return {@code true} while capture is running and its output is being
+ *         processed (preamp warm-up finished), for any reason.
+ */
+bool audio_source_capture_running(void);
+
+/** @return {@code false} if the backend failed to initialize or its clock is
+ * bad. */
+bool audio_source_backend_ok(void);
+
+/**
+ * Whether the capture backends must feed the PCM ring: only while a USB
+ * stream is armed and the device is not in STANDALONE mode. Backends query it
+ * once per block and skip {@code audio_ring_push} and the 24 to 48 kHz sample
+ * repeat when it is false.
+ */
+bool audio_source_feeds_ring(void);
+
+/**
+ * Stops the capture hardware (if running) so a flash write can stall XIP.
+ * Run latch and stream state are untouched; call
+ * {@link audio_source_capture_resume} afterwards. Main-loop context only.
+ *
+ * @return {@code true} if capture was running.
+ */
+bool audio_source_capture_pause(void);
+
+/**
+ * Restarts capture stopped by {@link audio_source_capture_pause} (a fresh
+ * stream: the DSP / quartz stream reset happens in the backend start). No-op
+ * if the pause found nothing running.
+ */
+void audio_source_capture_resume(void);
 
 #ifdef __cplusplus
 }

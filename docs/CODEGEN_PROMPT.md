@@ -1,5 +1,7 @@
 # Implementation prompt for the code generator
 
+> **Historical document (superseded).** This prompt drove the PCM1808 work in 2026-11 and refers to files and values that no longer exist or have changed: `AS_BUILT_ARCHITECTURE_SOURCE.md` (now [AS_BUILT_ARCHITECTURE.md](AS_BUILT_ARCHITECTURE.md)), `include/tusb_config.h` (removed; the `-DCFG_TUD_*` flags in `platformio.ini` are the only TinyUSB configuration), PCM16 output and a 480-sample prefill (now PCM24 and 960), four existing envs (now six). Do not use it as a current prompt.
+
 Modify the **existing `timegrapher-stand` repository**, not a newly generated project. Before making changes, read these inputs in this order:
 
 1. `AS_BUILT_ARCHITECTURE_SOURCE.md` — authoritative description of existing firmware behavior.

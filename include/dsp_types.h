@@ -104,6 +104,56 @@ typedef struct {
   float confidence;      /**< Heuristic 0..1 from peak / threshold. */
 } dsp_event_t;
 
+/** Capacity of the per-beat ring ({@link dsp_graph_copy_beats}). */
+#define DSP_BEAT_LOG_CAP 64u
+
+/** Outcome of feeding one tick to the beat-timing fit (see beat_fit.h). */
+typedef enum {
+  DSP_BEAT_ACCEPTED = 0, /**< Point joined the current grid / fit. */
+  DSP_BEAT_STARTED,      /**< First point, or the grid restarted here. */
+  DSP_BEAT_REJECTED      /**< Off-grid or non-increasing; not in the fit. */
+} dsp_beat_status_t;
+
+/**
+ * One tick as seen by the beat-timing fit; the raw material of a tick-tock
+ * (paper-strip) chart. One record per tick handed to the fit once the A/h
+ * lock is established; none while unlocked.
+ *
+ * Grid: each {@code grid_id} has a fixed origin (the STARTED tick, k = 0,
+ * u = 0) and the nominal half-period {@code nominal_us}. The fit window
+ * sliding does not move the origin or renumber k.
+ *
+ * Residual sign and correction: {@code u_us} is the arrival time of the tick
+ * minus the nominal-grid time, {@code u = T - k * nominal}, where
+ * {@code T} is the unlock time since the grid origin scaled by
+ * {@code 1 / (1 + timebase_ppm * 1e-6)} (the same sample-clock correction the
+ * rate uses). It is NOT relative to the fitted line. A watch that gains
+ * (positive s/d) has ticks arriving early, so u DECREASES over time with
+ * slope {@code -rate_s_day / 86400 * nominal_us} per beat; the separation of
+ * the even-k and odd-k clouds is the beat error (2|c|). If the timebase ppm
+ * changes mid-grid, u steps; hosts should treat that as a new grid.
+ *
+ * REJECTED ticks are recorded too: k is the nearest grid index to the last
+ * accepted point (last_k + round(dt / nominal), possibly the same or lower
+ * than an earlier k) and u is the true distance to that grid slot, so it
+ * shows the off-grid miss (|u| up to about half a beat). They are not in
+ * the fit. If no grid exists (cannot happen once locked) k = u = 0.
+ */
+typedef struct {
+  uint32_t seq;          /**< Per-stream counter, 0 at stream reset. */
+  uint32_t grid_id;      /**< Bumps on every STARTED (first grid is 1). */
+  uint64_t sample_index; /**< Integer part of the unlock sample time. */
+  double t_s;            /**< Unlock time, seconds of signal (t / source_hz). */
+  int32_t k;             /**< Half-beat grid index since the grid origin. */
+  uint8_t parity;        /**< {@code k & 1}; arbitrary but stable per grid. */
+  float u_us;            /**< Residual vs nominal grid, microseconds. */
+  float nominal_us;      /**< Nominal half-period, microseconds. */
+  float amplitude_deg;   /**< Per-tick amplitude; 0 when invalid. */
+  bool amplitude_valid;  /**< Lift time gave 50..400 degrees. */
+  float lift_ms;         /**< Unlock-to-drop lift time; 0 if unavailable. */
+  dsp_beat_status_t status;
+} dsp_beat_t;
+
 /**
  * One timing view: instant snapshot or a rolling time-average window.
  * Invalid metrics are zeroed with the matching {@code *_valid} flag false.
@@ -124,8 +174,8 @@ typedef struct {
  *
  * Lock and {@code vph_raw} come from the median unlock interval. Once locked,
  * rate and beat error come from a least-squares fit of sub-sample unlock
- * times over the last {@code window_s} seconds (see beat_fit.h), so they
- * resolve well below one sample period.
+ * times over the last {@code window_s} seconds (see mechanical/beat_fit.h),
+ * so they resolve well below one sample period.
  *
  * Top-level rate/beat-error/amplitude fields are the <em>instant</em> view
  * (last computed tick set). {@code avg_1s} / {@code avg_long} are arithmetic
@@ -211,6 +261,14 @@ typedef struct {
   uint32_t short_writes; /**< {@code usb_short_write_count} snapshot. */
   uint32_t ring_min;     /**< Current diag window ring min occupancy. */
   uint32_t ring_max;     /**< Current diag window ring max occupancy. */
+
+  /* Quartz engine (appended; PCM1808 builds only, else all zero). One
+   * quartz::engine::process() call per capture block, timed separately
+   * from dsp_block_* because it runs after the USB samples are queued. */
+  uint32_t quartz_block_us_last; /**< Last call wall time (µs). */
+  uint32_t quartz_block_us_mean; /**< EMA of call wall time (µs). */
+  uint32_t quartz_block_us_max;  /**< Max since last reset / window clear. */
+  uint32_t quartz_blocks;        /**< Calls since reset. */
 } dsp_timing_t;
 
 /** Last 512-point real-FFT peak list ({@link DSP_BLOCK_SPECTRUM}). */

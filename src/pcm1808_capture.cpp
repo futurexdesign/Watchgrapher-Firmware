@@ -22,6 +22,7 @@
 
 #include "app_config.h"
 #include "audio_ring.h"
+#include "audio_source.h"
 #include "board_config.h"
 #include "diagnostics.h"
 #include "dsp_graph.h"
@@ -29,6 +30,7 @@
 #include "pcm1808_format.h"
 #include "pcm1808_i2s.pio.h"
 #include "pcm1808_rate.h"
+#include "quartz/quartz_engine.h"
 
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
@@ -51,6 +53,14 @@ static_assert(PCM1808_LRCK_GPIO == pcm1808_i2s_rx_LRCK_GPIO, "LRCK pin mismatch"
 static uint32_t g_dma_buf[APP_PCM1808_DMA_BUF_COUNT][PCM1808_WORDS_PER_BLOCK]
     __attribute__((aligned(4)));
 static volatile bool g_buf_ready[APP_PCM1808_DMA_BUF_COUNT];
+/**
+ * Completion sequence number of each buffer's current contents: the value of
+ * {@code g_irq_blocks} after the IRQ that completed it (1 for the first block
+ * after start). Written by the IRQ together with {@code g_buf_ready}; read
+ * by the main loop with interrupts disabled. See
+ * {@link pcm1808_capture_process} for why blocks are taken oldest first.
+ */
+static volatile uint32_t g_buf_seq[APP_PCM1808_DMA_BUF_COUNT];
 static volatile bool g_running;
 static volatile bool g_start_pending;
 static volatile uint32_t g_active;
@@ -89,6 +99,16 @@ static uint32_t g_block_words[PCM1808_WORDS_PER_BLOCK];
 static float g_block_fs[APP_PCM1808_DMA_FRAMES];
 static audio_sample_t g_block_mono[APP_PCM1808_DMA_FRAMES];
 static audio_sample_t g_block_pcm[APP_PCM1808_DMA_FRAMES * PCM1808_MAX_UPSAMPLE];
+/** Raw sign-extended codes per channel for the quartz engine (LEFT =
+ *  inductive pickup, RIGHT = capacitive pickup); 1.9 KB more scratch, kept
+ *  file-scope for the same stack reason. */
+static int32_t g_block_left24[APP_PCM1808_DMA_FRAMES];
+static int32_t g_block_right24[APP_PCM1808_DMA_FRAMES];
+/** DMA block overruns already reported to the quartz engine. */
+static uint32_t g_quartz_overruns_seen;
+/** Sequence number of the last block processed (0 at start, so the first
+ *  block, sequence 1, is contiguous). */
+static uint32_t g_last_seq;
 
 static_assert(PCM1808_OUTPUT_UPSAMPLE <= PCM1808_MAX_UPSAMPLE,
               "PCM1808_OUTPUT_UPSAMPLE exceeds the block buffer");
@@ -107,8 +127,31 @@ static void pcm1808_note_peak(int32_t s) {
 }
 
 /**
+ * Finds the ready buffer holding the oldest block. Call with interrupts
+ * disabled so the ready flags and sequence numbers are consistent.
+ *
+ * Sequence numbers are compared by signed difference, so the comparison
+ * stays correct across the 2^32 wrap (about 248 days at 48 kHz).
+ *
+ * @return Buffer index, or -1 if none is ready.
+ */
+static int32_t oldest_ready_buffer(void) {
+  int32_t best = -1;
+  for (uint32_t i = 0; i < APP_PCM1808_DMA_BUF_COUNT; i++) {
+    if (!g_buf_ready[i]) {
+      continue;
+    }
+    if (best < 0 || static_cast<int32_t>(g_buf_seq[i] - g_buf_seq[best]) < 0) {
+      best = static_cast<int32_t>(i);
+    }
+  }
+  return best;
+}
+
+/**
  * DMA IRQ0: swap to the other ping-pong buffer and restart immediately so the
- * PIO RX FIFO never backs up.
+ * PIO RX FIFO never backs up, then stamp the completed buffer with its
+ * completion sequence number so the main loop can take blocks oldest first.
  */
 static void __isr pcm1808_dma_handler(void) {
   if (!(dma_hw->ints0 & (1u << static_cast<uint32_t>(g_dma_chan)))) {
@@ -129,9 +172,11 @@ static void __isr pcm1808_dma_handler(void) {
     diagnostics_get()->pcm1808_dma_block_overruns++;
     diagnostics_get()->dma_overrun_count++;
   }
-  g_buf_ready[done] = true;
   g_irq_last_us = time_us_64();
-  g_irq_blocks = g_irq_blocks + 1u;
+  const uint32_t seq = g_irq_blocks + 1u;
+  g_irq_blocks = seq;
+  g_buf_seq[done] = seq; /* one store: the only IRQ cost of age ordering */
+  g_buf_ready[done] = true;
   diagnostics_get()->pcm1808_dma_blocks++;
   diagnostics_get()->dma_complete_count++;
 }
@@ -231,8 +276,10 @@ static void capture_hw_start(void) {
   g_active = 0;
   g_source_index = 0;
   g_irq_blocks = 0;
+  g_last_seq = 0;
   g_have_anchor = false;
   g_candidate_windows = 0;
+  g_quartz_overruns_seen = diagnostics_get()->pcm1808_dma_block_overruns;
   dsp_graph_reset_stream();
 
   g_pio->fdebug = (1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm));
@@ -368,16 +415,62 @@ void pcm1808_capture_process(void) {
     g_pio->fdebug = stall_mask;
   }
 
-  for (uint32_t i = 0; i < APP_PCM1808_DMA_BUF_COUNT; i++) {
-    if (!g_buf_ready[i]) {
-      continue;
-    }
-
+  /*
+   * Take ready blocks oldest first. The IRQ completes the buffers
+   * alternately, but when the loop falls behind both can be ready, and the
+   * older one is buffer 1 half of the time; after an overrun the overwritten
+   * buffer holds the NEWEST block although its index is the lower one.
+   * Taking them in index order (as this loop once did) then swapped two
+   * blocks: each was given the other's source index, so anything detected
+   * in them was timed 5 ms off and the waveform itself jumped back and
+   * forth. That is a fake timing step for both the beat_rate fit and the
+   * quartz engine (a motor pulse there reads as a 5 ms inhibition jump).
+   * In the normal case only one buffer is ready per pass and the order is
+   * the same either way.
+   *
+   * At most one pass per buffer per call, as before, so a stall cannot
+   * starve the rest of the main loop.
+   */
+  for (uint32_t pass = 0; pass < APP_PCM1808_DMA_BUF_COUNT; pass++) {
     uint32_t *local = g_block_words;
     uint32_t irq = save_and_disable_interrupts();
+    const int32_t i = oldest_ready_buffer();
+    if (i < 0) {
+      restore_interrupts(irq);
+      break;
+    }
+    const uint32_t seq = g_buf_seq[i];
     memcpy(local, g_dma_buf[i], sizeof(g_block_words));
     g_buf_ready[i] = false;
     restore_interrupts(irq);
+    /*
+     * Blocks between the last one processed and this one were overwritten
+     * before they could be read (the IRQ also counted them as overruns).
+     * Their samples are gone, but their time is not: advancing the source
+     * index by the lost frames keeps every later sample at its true absolute
+     * index. Without this, everything after the loss would be timed
+     * 240 frames (5 ms at 48 kHz) early. The beat_rate fit would see that as
+     * a step in its unlock times and bias its slope. With it, the fit sees an
+     * honest gap, which it already handles (missed-tick grid numbers, or a
+     * restart past BEAT_FIT_MAX_GAP). Unsigned arithmetic keeps this exact
+     * across the sequence wrap.
+     *
+     * The quartz engine restarts twice over here: once from
+     * notify_sample_loss() below (counted once in sample_loss_restarts), and
+     * once from the index gap at its next process() call, which only re-arms
+     * a pipeline that is already disarmed. Both restarts land on the same
+     * block, so nothing is lost twice or counted twice.
+     *
+     * An overrun-counter change without a sequence gap keeps the old
+     * handling: only the quartz restart below.
+     */
+    const uint32_t lost = seq - g_last_seq - 1u;
+    const bool skipped = lost != 0u;
+    g_last_seq = seq;
+    if (skipped) {
+      g_source_index += static_cast<uint64_t>(lost) * APP_PCM1808_DMA_FRAMES;
+      diagnostics_get()->pcm1808_blocks_lost += lost;
+    }
 
     audio_sample_t *pcm = g_block_pcm;
     uint32_t out_n = 0;
@@ -402,21 +495,48 @@ void pcm1808_capture_process(void) {
         d->pcm1808_saturated_count++;
       }
       in_fs[f] = dsp_sample_from_pcm1808_left24(left24);
+      g_block_left24[f] = left24;
+      g_block_right24[f] = right24;
     }
     uint64_t base = g_source_index;
     dsp_graph_process(in_fs, APP_PCM1808_DMA_FRAMES, base, mono);
     g_source_index += APP_PCM1808_DMA_FRAMES;
+    /* No ring consumer (STANDALONE, or no USB stream): skip the sample
+     * repeat and the push, but keep the diagnostics counting what would
+     * have been emitted. */
+    const bool feed_ring = audio_source_feeds_ring();
     for (uint32_t f = 0; f < APP_PCM1808_DMA_FRAMES; f++) {
       pcm1808_note_peak(mono[f]);
-      for (uint32_t u = 0; u < g_upsample; u++) {
-        pcm[out_n++] = mono[f];
+      if (feed_ring) {
+        for (uint32_t u = 0; u < g_upsample; u++) {
+          pcm[out_n++] = mono[f];
+        }
       }
+    }
+    if (!feed_ring) {
+      out_n = APP_PCM1808_DMA_FRAMES * g_upsample;
     }
 
     diagnostics_get()->pcm1808_stereo_frames_received += APP_PCM1808_DMA_FRAMES;
-    audio_ring_push(pcm, out_n);
+    if (feed_ring) {
+      audio_ring_push(pcm, out_n);
+    }
     diagnostics_get()->pcm1808_mono_samples_emitted += out_n;
     diagnostics_get()->adc_total_sample_count += out_n;
+
+    /*
+     * Quartz timing runs after the block is queued for USB, so a slow block
+     * (the LCD harmonic selection) delays analysis, never the audio. An
+     * overwritten DMA buffer means a block is missing although the source
+     * index advanced as if it were not, so a running measurement restarts.
+     */
+    const uint32_t overruns = d->pcm1808_dma_block_overruns;
+    if (skipped || overruns != g_quartz_overruns_seen) {
+      g_quartz_overruns_seen = overruns;
+      quartz::engine::notify_sample_loss();
+    }
+    quartz::engine::process(g_block_left24, g_block_right24,
+                            APP_PCM1808_DMA_FRAMES, base);
   }
 }
 

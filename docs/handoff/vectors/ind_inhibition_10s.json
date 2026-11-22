@@ -1,0 +1,234 @@
+{
+ "description": "1 Hz stepping, crystal +14 ppm, inhibition every 10 s removing 1 pulse at 8192 Hz, EMF 50 uV, hum",
+ "channel": "left (OUT_IND, inductive)",
+ "signal": "stepper motor drive pulses",
+ "assumed_board": {
+  "jp1": "bridged (x11, 60.8 dB)",
+  "jp2": "open (x1)",
+  "r8_r15": "not fitted"
+ },
+ "pickup_emf_peak_v": 5e-05,
+ "noise_rms_codes_left": 10215,
+ "hum_at_adc_v": {
+  "60Hz": 0.003,
+  "180Hz": 0.001
+ },
+ "nominal_step_interval_s": 1.0,
+ "events": [
+  {
+   "index": 0,
+   "t_onset_s": 0.29,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 1,
+   "t_onset_s": 1.289986,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 2,
+   "t_onset_s": 2.289972,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 3,
+   "t_onset_s": 3.289958001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 4,
+   "t_onset_s": 4.290066071,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 5,
+   "t_onset_s": 5.290052071,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 6,
+   "t_onset_s": 6.290038071,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 7,
+   "t_onset_s": 7.290024072,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 8,
+   "t_onset_s": 8.290010072,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 9,
+   "t_onset_s": 9.289996072,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 10,
+   "t_onset_s": 10.289982072,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 11,
+   "t_onset_s": 11.289968072,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 12,
+   "t_onset_s": 12.289954073,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 13,
+   "t_onset_s": 13.289940073,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 14,
+   "t_onset_s": 14.290048143,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 15,
+   "t_onset_s": 15.290034144,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 16,
+   "t_onset_s": 16.290020144,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 17,
+   "t_onset_s": 17.290006144,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 18,
+   "t_onset_s": 18.289992144,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 19,
+   "t_onset_s": 19.289978144,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 20,
+   "t_onset_s": 20.289964145,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 21,
+   "t_onset_s": 21.289950145,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 22,
+   "t_onset_s": 22.289936145,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 23,
+   "t_onset_s": 23.289922145,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 24,
+   "t_onset_s": 24.290030216,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  }
+ ],
+ "expected": {
+  "rate_without_inhibition_s_per_day": 1.2096,
+  "rate_with_inhibition_s_per_day": 0.154896,
+  "inhibition_period_s": 10.0,
+  "note": "rate = 86400 * (nominal interval / measured mean interval - 1); positive = watch gains. Measured timestamps carry a constant delay (analogue chain about 7 us plus the ADC's digital filter); it cancels out of every rate."
+ },
+ "inhibition": {
+  "period_s": 10.0,
+  "oscillator_pulses_removed": 1,
+  "removal_stage_hz": 8192.0,
+  "delay_per_event_us": 122.07,
+  "events": [
+   {
+    "watch_time_s": 3.5,
+    "true_time_s": 3.7899510006859907,
+    "delay_added_s": 0.0001220703125
+   },
+   {
+    "watch_time_s": 13.5,
+    "true_time_s": 13.789933072958462,
+    "delay_added_s": 0.0001220703125
+   },
+   {
+    "watch_time_s": 23.5,
+    "true_time_s": 23.789915145230935,
+    "delay_added_s": 0.0001220703125
+   }
+  ]
+ },
+ "file": "ind_inhibition_10s.wav",
+ "fs_hz": 48000,
+ "duration_s": 25.5,
+ "peak_codes": {
+  "left": 343788,
+  "right": 1614
+ },
+ "clipped": {
+  "left": false,
+  "right": false
+ }
+}

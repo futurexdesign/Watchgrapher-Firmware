@@ -6,7 +6,7 @@
     * biquad DF1 f32 (`arm_biquad_cascade_df1_f32`, init)
     * stats: `arm_rms_f32`, `arm_power_f32`, `arm_max_f32`, `arm_max_no_idx_f32`
     * FIR: `arm_fir_f32`, `arm_fir_init_f32`
-    * `arm_dot_prod_f32`
+    * `arm_dot_prod_f32`, `arm_mult_f32` (quartz timing: Hann windowing)
     * RFFT-512: `arm_rfft_fast_f32`, slim `arm_rfft_fast_init_512_f32` /
       `arm_rfft_fast_init_f32` (512 only), `arm_cfft_f32`, `arm_cfft_radix8_f32`,
       `arm_cfft_init_256_f32`, `arm_bitreversal2`, trimmed tables in

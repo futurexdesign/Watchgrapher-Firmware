@@ -3,10 +3,10 @@
  * @brief Host test for the least-squares beat timing fit.
  *
  * Build and run:
- *   c++ -std=c++17 -Iinclude tests/test_beat_fit.cpp src/beat_fit.cpp -o /tmp/t && /tmp/t
+ *   c++ -std=c++17 -Iinclude tests/test_beat_fit.cpp src/mechanical/beat_fit.cpp -o /tmp/t && /tmp/t
  */
 
-#include "beat_fit.h"
+#include "mechanical/beat_fit.h"
 
 #include <cassert>
 #include <cmath>
@@ -152,6 +152,44 @@ int main() {
     assert(o.ok);
     expect_near("one-parity rate", o.rate_s_day, 6.0, 0.5);
     assert(o.be_ms < 0.0);
+  }
+
+  /*
+   * Per-point report: grid-absolute k and raw residual vs the nominal grid,
+   * stable while the window slides; a fast watch gives decreasing u; a
+   * rejected point still reports its off-grid miss.
+   */
+  {
+    static beat_fit_t f;
+    beat_fit_reset(&f);
+    const double nominal = kFs * 3600.0 / 28800.0;
+    const double rate = 20.0; /* s/d, gaining */
+    const double true_half = nominal * (1.0 - rate / 86400.0);
+    const double t0 = 5000.0;
+    beat_fit_point_t pt{};
+    for (int32_t k = 0; k < 400; k++) {
+      const double t = t0 + true_half * k;
+      auto r = beat_fit_push(&f, t, nominal, 2.0 * kFs, &pt);
+      assert(r == (k == 0 ? BEAT_FIT_STARTED : BEAT_FIT_ACCEPTED));
+      assert(pt.valid && pt.k == k);
+      assert(std::fabs(pt.u - (t - t0 - k * nominal)) < 1e-6);
+      assert(std::fabs(pt.nominal - nominal) < 1e-12);
+    }
+    /* Window slid (400 > 2 s of beats): many rebases, k still absolute. */
+    assert(f.n < 400u);
+    assert(pt.u < 0.0); /* gaining watch: ticks early, u falls */
+    expect_near("chart slope us/beat", pt.u / 399.0 / kFs * 1e6,
+                -rate / 86400.0 * nominal / kFs * 1e6, 1e-6);
+
+    /* Off-grid point (0.45 beat late): rejected, k = nearest slot. */
+    const double tl = t0 + true_half * 399 + 1.45 * true_half;
+    auto r = beat_fit_push(&f, tl, nominal, 2.0 * kFs, &pt);
+    assert(r == BEAT_FIT_REJECTED);
+    assert(pt.valid && pt.k == 400);
+    assert(pt.u > 0.0);
+    /* Gap longer than max restarts the grid: k and u restart at 0. */
+    r = beat_fit_push(&f, tl + 100.0 * nominal, nominal, 2.0 * kFs, &pt);
+    assert(r == BEAT_FIT_STARTED && pt.k == 0 && pt.u == 0.0);
   }
 
   std::printf("test_beat_fit: OK\n");

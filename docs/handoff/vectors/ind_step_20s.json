@@ -1,0 +1,64 @@
+{
+ "description": "Watch without seconds hand: one step every 20 s, rate +0.5 s/d, EMF 100 uV",
+ "channel": "left (OUT_IND, inductive)",
+ "signal": "stepper motor drive pulses",
+ "assumed_board": {
+  "jp1": "bridged (x11, 60.8 dB)",
+  "jp2": "open (x1)",
+  "r8_r15": "not fitted"
+ },
+ "pickup_emf_peak_v": 0.0001,
+ "noise_rms_codes_left": 10215,
+ "hum_at_adc_v": {
+  "60Hz": 0.0,
+  "180Hz": 0.0
+ },
+ "nominal_step_interval_s": 20.0,
+ "events": [
+  {
+   "index": 0,
+   "t_onset_s": 1.7,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 1,
+   "t_onset_s": 21.69988426,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 2,
+   "t_onset_s": 41.69976852,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 3,
+   "t_onset_s": 61.69965278,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  }
+ ],
+ "expected": {
+  "rate_without_inhibition_s_per_day": 0.5,
+  "rate_with_inhibition_s_per_day": 0.5,
+  "inhibition_period_s": null,
+  "note": "rate = 86400 * (nominal interval / measured mean interval - 1); positive = watch gains. Measured timestamps carry a constant delay (analogue chain about 7 us plus the ADC's digital filter); it cancels out of every rate."
+ },
+ "file": "ind_step_20s.wav",
+ "fs_hz": 48000,
+ "duration_s": 63.0,
+ "peak_codes": {
+  "left": 635241,
+  "right": 1410
+ },
+ "clipped": {
+  "left": false,
+  "right": false
+ }
+}

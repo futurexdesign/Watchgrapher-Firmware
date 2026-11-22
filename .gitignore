@@ -16,3 +16,6 @@ __pycache__/
 *.pyc
 *.wav
 !/tick-tock.wav
+
+# Host test build output (tests/run_all.sh)
+build/

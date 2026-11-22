@@ -1,0 +1,9 @@
+# Weekly update PRs for the GitHub Actions versions used in .github/workflows.
+# No pip entry: the repo has no Python requirements file (PlatformIO is
+# installed unpinned in ci.yml and is not managed here).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -120,6 +120,31 @@ void dsp_graph_get_matched(dsp_matched_t *out);
 uint32_t dsp_graph_copy_events(dsp_event_t *out, uint32_t max_n);
 
 /**
+ * Copies up to {@code max_n} recent per-beat records ({@link dsp_beat_t},
+ * 64-entry ring, one per tick fed to the beat fit while locked), newest
+ * first. Safe to call from the other core (lock-free, like the writer).
+ * @return Number of beats written to {@code out}.
+ */
+uint32_t dsp_graph_copy_beats(dsp_beat_t *out, uint32_t max_n);
+
+/**
+ * @return Seq the next beat will receive (= beats recorded since the last
+ *         stream reset). Use as a subscriber baseline for
+ *         {@link dsp_graph_copy_beats_since}; resets to 0 with
+ *         {@link dsp_graph_reset_stream}, which the host must treat as a new
+ *         stream.
+ */
+uint32_t dsp_graph_beat_seq(void);
+
+/**
+ * Copies beats with {@code seq >= seq}, oldest first (at most
+ * {@code max_n}, and only those still in the ring).
+ * @return Number of beats written to {@code out}.
+ */
+uint32_t dsp_graph_copy_beats_since(uint32_t seq, dsp_beat_t *out,
+                                    uint32_t max_n);
+
+/**
  * @return {@code true} when the process path is identity (analysis may still
  *         run).
  */

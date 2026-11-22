@@ -1,0 +1,56 @@
+* capacitive.cir - capacitive (LCD) channel of the pickup head, rev A
+* Runs in ngspice / LTspice / KiCad.  Values marked "<--" are assumptions to sweep.
+*
+* The watch is modelled as an LCD electrode driven with a 3 V square wave at 64 Hz, coupled
+* to the plate E1 through CC (a fraction of a pF; unknown, swept 0.1 to 1 pF).
+* Mains: a 120 V rms (170 V peak) 60 Hz source coupled to the plate through CM.
+
+.include models.lib
+
+VCC vcc 0 5
+R17 vcc vref 100k
+R18 vref 0 100k
+C13 vref 0 10u
+C14 vref 0 100n
+
+* ---- watch display and mains
+VLCD lcd 0 DC 0 AC 0 PULSE(0 3 0 2u 2u 7.8105m 15.625m)
+CC  lcd plate 0.5p
+VMAINS mains 0 DC 0 AC 0 SIN(0 170 60)
+CM  mains plate 1f
+*   CM 1f: unshielded bench, watch case grounded; raise to 10f-100f for poor shielding  <--
+
+* ---- plate E1: 34 pF to the guard plane (In1), about 2 pF to ground through the gaps
+CPG plate guard 34p
+CPGND plate 0 2p
+
+* ---- input network (inside the guard loop)
+R9  plate node 10k
+R10 node vref 100Meg
+D1A node vcc DBAV199
+D1B 0 node DBAV199
+CNG node guard 1p
+CNGND node 0 0.3p
+
+* ---- U2A buffer, drives the guard through R11
+XU2A node buf buf vcc 0 TLV9062
+R11 buf guard 100
+CGG guard 0 15p
+
+* ---- U2B, x11 (JP2 fitted) or x1 (JP2 open)
+XU2B buf fb3 out2 vcc 0 TLV9062
+R12 out2 fb3 10k
+C7  out2 fb3 330p
+R13 fb3 g2a 1k
+C8  g2a g2b 1u
+RJP2 g2b 0 0.01
+* RJP2 g2b 0 1T   <-- JP2 open
+
+R14 out2 o2a 100
+C9  o2a outcap 2.2u
+R15 outcap 0 100k
+RADC outcap adcb 60k
+VADC adcb 0 2.5
+
+.tran 1u 80m
+.end

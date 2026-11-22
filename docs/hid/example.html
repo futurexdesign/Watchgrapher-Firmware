@@ -193,6 +193,43 @@
     .hint.warn { color: var(--accent2); }
     .hint.bad { color: var(--danger); }
     .hint.good { color: var(--ok); }
+    .hint a { color: var(--accent); }
+    /* Mechanical vs quartz: the panel of the inactive mode is dimmed (still usable). */
+    .dim { opacity: 0.5; transition: opacity 0.2s; }
+    .dim:hover, .dim:focus-within { opacity: 0.85; }
+    .q-controls {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.5rem; margin-bottom: 0.6rem;
+    }
+    .q-controls label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.72rem; color: var(--muted); }
+    .q-controls select, .q-controls input {
+      font: inherit; font-family: var(--mono); font-size: 0.78rem; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.4rem; min-width: 0;
+    }
+    .q-hero { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 0.75rem; margin: 0.35rem 0 0.2rem; }
+    .q-rate { font-family: var(--mono); font-size: 2rem; font-weight: 600; letter-spacing: 0.01em; }
+    .q-rate .unit { color: var(--muted); font-size: 0.95rem; font-weight: 500; }
+    .q-rate.uncal { color: var(--accent2); }
+    .q-sub { color: var(--muted); font-size: 0.75rem; }
+    .badge {
+      font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+      padding: 0.15rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
+    }
+    .badge.good { color: var(--ok); border-color: rgba(92, 173, 110, 0.6); }
+    .badge.warn { color: var(--accent2); border-color: rgba(196, 163, 90, 0.6); }
+    .badge.bad { color: var(--danger); border-color: rgba(196, 92, 92, 0.6); }
+    .q-status { font-size: 0.85rem; margin: 0.35rem 0; }
+    .q-status.warn { color: var(--accent2); }
+    .q-status.good { color: var(--ok); }
+    .q-cols { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 1rem; margin-top: 0.6rem; }
+    @media (max-width: 980px) { .q-cols { grid-template-columns: 1fr; } }
+    .q-cols h3 { margin: 0 0 0.4rem; font-size: 0.72rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+    .scroll-x { overflow-x: auto; }
+    #qKv span:last-child { overflow-wrap: anywhere; text-align: right; }
+    @media (max-width: 560px) {
+      #qKv { grid-template-columns: 1fr; }
+      .q-rate { font-size: 1.6rem; }
+    }
   </style>
 </head>
 <body>
@@ -225,7 +262,35 @@
         </div>
       </section>
 
-      <section class="panel beat-hero">
+      <section class="panel" id="modePanel">
+        <h2>Device mode</h2>
+        <div class="kv" id="modeKv">
+          <div><span>mode</span><span id="mMode">—</span></div>
+          <div><span>running</span><span id="mRunning">—</span></div>
+          <div><span>run requested</span><span id="mRunReq">—</span></div>
+          <div><span>USB streaming</span><span id="mUsb">—</span></div>
+          <div><span>stream state</span><span id="mStream">—</span></div>
+          <div><span>mode saved</span><span id="mSaved">—</span></div>
+        </div>
+        <div class="toolbar">
+          <button id="btnGetDevice" disabled>getDevice</button>
+          <select id="modeSel" disabled>
+            <option value="usbMic">usbMic</option>
+            <option value="standalone">standalone</option>
+          </select>
+          <button id="btnSetDevice" disabled class="warn">setDevice</button>
+          <button id="btnStart" disabled class="primary">start</button>
+          <button id="btnStop" disabled>stop</button>
+        </div>
+        <div class="toolbar">
+          <button id="btnGetBeats" disabled>getBeats</button>
+          <button id="btnGetGps" disabled>getGps</button>
+          <button id="btnGetTbLog" disabled>getTimebaseLog</button>
+        </div>
+        <p class="hint">Results are dumped to the log. setDevice writes flash and is refused (<code>busy</code>) while the USB audio stream is open; <code>stop</code> leaves <code>running</code> true while a stream is open.</p>
+      </section>
+
+      <section class="panel beat-hero" id="beatPanel">
         <h2>Beat / timing</h2>
         <div class="toolbar" style="margin-bottom:0.45rem">
           <button id="btnBeat" disabled>getBeat</button>
@@ -241,6 +306,86 @@
         <div class="kv" id="beatKv"></div>
       </section>
     </div>
+
+    <section class="panel" id="quartzPanel">
+      <h2>Quartz timing</h2>
+      <p class="hint warn hidden" id="qUnsupported">This firmware build has no quartz engine (it needs the PCM1808
+        audio source); only mechanical timing is available.</p>
+      <div class="q-controls">
+        <label>mode
+          <select id="qMode" disabled>
+            <option value="mechanical">mechanical</option>
+            <option value="motor">motor (stepper)</option>
+            <option value="lcd">LCD</option>
+            <option value="fork">tuning fork</option>
+          </select></label>
+        <label class="q-motor" title="Motor gate: the measurement freezes when it is reached">gate
+          <select id="qGate" disabled>
+            <option value="10">10 s</option>
+            <option value="60">60 s</option>
+            <option value="0">until 2 events</option>
+            <option value="custom">custom…</option>
+          </select></label>
+        <label class="q-motor hidden" id="qGateCustomWrap">custom gate (s, 3..960)
+          <input type="number" id="qGateCustom" min="3" max="960" step="1" value="120" disabled /></label>
+        <label class="q-fork">fork frequency
+          <select id="qForkHz" disabled>
+            <option value="300">300 Hz</option>
+            <option value="341.333">341.33 Hz</option>
+            <option value="360">360 Hz</option>
+            <option value="480">480 Hz</option>
+            <option value="720">720 Hz</option>
+          </select></label>
+        <label class="q-motor" title="Leading-edge timestamp method (handoff §4)">timestamp
+          <select id="qTs" disabled>
+            <option value="threshold">threshold (50 %)</option>
+            <option value="xcorr">cross-correlation</option>
+          </select></label>
+        <label class="q-motor" title="Detection threshold in noise sigmas">kSigma (4..20)
+          <input type="number" id="qKSigma" min="4" max="20" step="0.5" value="8" disabled /></label>
+      </div>
+      <div class="toolbar">
+        <button id="btnQRestart" disabled class="warn">Restart measurement</button>
+        <button id="btnQRefresh" disabled>getQuartz</button>
+        <label class="toggle" title="Polls getQuartz (and getQuartzPulses in motor mode) once a second; not needed with a quartzHz subscription">
+          <input type="checkbox" id="qPoll" disabled /> poll 1 s</label>
+      </div>
+
+      <div id="qBody">
+        <div class="q-hero">
+          <div class="q-rate" id="qRate">— <span class="unit">s/d</span></div>
+          <span class="badge" id="qBadge">idle</span>
+        </div>
+        <div class="q-sub" id="qRateLabel">+ = gaining · − = losing</div>
+        <p class="hint bad hidden" id="qUncal"><strong>UNCALIBRATED</strong>: the board clock has no timebase
+          correction, so rates can be off by up to ±1.7 s/d (±20 ppm). Calibrate in the
+          <a href="#timebasePanel">Timebase calibration</a> panel.</p>
+        <p class="q-status" id="qStatus"></p>
+        <div class="toolbar hidden" id="qLongerGate" style="margin-bottom:0.4rem">
+          <span class="hint" style="margin:0">Longer gate:</span>
+          <button type="button" data-gate="60" disabled>60 s</button>
+          <button type="button" data-gate="0" disabled>until 2 events</button>
+        </div>
+        <p class="hint" id="qReason"></p>
+        <div id="qHints"></div>
+        <div class="q-cols">
+          <div>
+            <h3 id="qDetailTitle">details</h3>
+            <div class="kv" id="qKv"></div>
+          </div>
+          <div class="q-motor">
+            <h3>recent pulses</h3>
+            <div class="scroll scroll-x">
+              <table>
+                <thead><tr><th>#</th><th>t (s)</th><th>Δt (s)</th><th>pol</th><th>snr</th><th>flags</th></tr></thead>
+                <tbody id="qPulsesBody"></tbody>
+              </table>
+            </div>
+            <p class="hint">Fed by <code>quartzPulse</code> pushes (subscribe) or by polling.</p>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <div class="body-row">
     <div class="stack">
@@ -342,8 +487,11 @@
           <label>metricsHz <input type="number" id="subMetrics" min="0" max="20" value="5" /></label>
           <label>beatHz <input type="number" id="subBeat" min="0" max="5" value="1" /></label>
           <label>timingHz <input type="number" id="subTiming" min="0" max="5" value="1" /></label>
+          <label>quartzHz <input type="number" id="subQuartz" min="0" max="5" value="1" /></label>
           <label>events <select id="subEvents"><option value="1" selected>on</option><option value="0">off</option></select></label>
           <label>errors <select id="subErrors"><option value="1" selected>on</option><option value="0">off</option></select></label>
+          <label>quartzPulses <select id="subQuartzPulses"><option value="1" selected>on</option><option value="0">off</option></select></label>
+          <label>beats <input type="checkbox" id="subBeats" /></label>
         </div>
         <div class="toolbar">
           <button id="btnSub" disabled class="primary">Apply subscribe</button>
@@ -392,7 +540,8 @@
 
   <script>
 const USAGE_PAGE = 0xffa0, USAGE = 0x0001, REPORT_ID = 0x01;
-const FLAG_MORE = 0x01, MAX_CHUNK = 58, MAX_JSON = 2048;
+/* The device accepts requests of at most 35 fragments = 2030 bytes (replies reach 2047); longer ones are dropped silently. */
+const FLAG_MORE = 0x01, MAX_CHUNK = 58, MAX_JSON = 2030, REPORT_BYTES = 63;
 
 const PROCESS_BLOCKS = new Set(['gain', 'limiter', 'filterBank', 'softGate', 'notch', 'agc', 'firBank']);
 const BLOCK_META = {
@@ -476,7 +625,7 @@ class HidFramer {
     const reports = [];
     for (let i = 0; i < fragCount; i++) {
       const chunk = text.subarray(i * MAX_CHUNK, Math.min(text.length, (i + 1) * MAX_CHUNK));
-      const buf = new Uint8Array(5 + chunk.length);
+      const buf = new Uint8Array(REPORT_BYTES); /* full 63-byte report, zero padded */
       buf[0] = i + 1 < fragCount ? FLAG_MORE : 0;
       buf[1] = seq; buf[2] = i; buf[3] = fragCount; buf[4] = chunk.length;
       buf.set(chunk, 5);
@@ -557,6 +706,8 @@ const needConn = [
   'btnMetrics', 'btnTiming', 'btnResetTiming', 'btnBeat', 'btnSpectrum', 'btnMatched',
   'btnSub', 'btnSubOff', 'btnEvents', 'btnErrors', 'btnClearErrors',
   'btnTbRefresh', 'btnTbSave', 'btnTbClear', 'btnTbSet', 'btnCalStart', 'avgS',
+  'btnGetDevice', 'modeSel', 'btnSetDevice', 'btnStart', 'btnStop',
+  'btnGetBeats', 'btnGetGps', 'btnGetTbLog',
 ];
 
 function setConnected(on) {
@@ -570,6 +721,8 @@ function setConnected(on) {
   /* Calibration buttons also depend on whether a measurement is running. */
   if (cal?.running) document.getElementById('btnCalStart').disabled = true;
   if (!on) document.getElementById('btnCalApply').disabled = true;
+  if (!on) setQuartzPoll(false);
+  setQuartzControls();
 }
 
 function fmt(n, d = 4) {
@@ -783,7 +936,8 @@ async function patchState(patch) {
     state = r;
     renderBlocks();
     syncAvgSelect(state.blocks?.beatRate?.params?.avgS);
-    log('patchState ok', { bypass: r.bypass });
+    renderQuartzSettings(state.quartz);
+    log('patchState ok', { bypass: r.bypass, quartz: r.quartz });
   } catch (e) {
     log('patchState err', e.message || e);
     await refreshState();
@@ -795,6 +949,7 @@ async function refreshState() {
   state = await client.request('getState');
   syncAvgSelect(state.blocks?.beatRate?.params?.avgS);
   renderBlocks();
+  renderQuartzSettings(state.quartz);
   log('getState', { bypass: state.bypass, enabled: Object.entries(state.blocks || {})
     .filter(([, b]) => b.enabled).map(([k]) => k) });
 }
@@ -805,11 +960,13 @@ async function refreshAll() {
   try { renderMetrics(await client.request('getMetrics')); } catch (e) { log('metrics', e.message); }
   try { renderTiming(await client.request('getTiming')); } catch (e) { log('timing', e.message); }
   try { renderBeat(await client.request('getBeat')); } catch (e) { log('beat', e.message); }
+  await refreshQuartz();
   try { renderTimebase(await client.request('getTimebase')); } catch (e) { log('timebase', e.message); }
+  if (caps?.deviceMode) await deviceOp('getDevice');
   try { renderMatched(await client.request('getMatched')); } catch (e) { log('matched', e.message); }
   try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log('spectrum', e.message); }
   try {
-    const ev = await client.request('getEvents', { limit: 16 });
+    const ev = await client.request('getEvents', { limit: 5 });
     renderEvents(ev.events || []);
   } catch (e) { log('events', e.message); }
   try {
@@ -826,11 +983,17 @@ function applyHello(h) {
   document.getElementById('dVidPid').textContent =
     h.vid != null ? `0x${h.vid.toString(16)}:0x${(h.pid || 0).toString(16)}` : '—';
   document.getElementById('dCaps').textContent = caps
-    ? `metrics≤${caps.metricsHzMax} beat≤${caps.beatHzMax} timing≤${caps.timingHzMax ?? '—'}`
+    ? `metrics≤${caps.metricsHzMax} beat≤${caps.beatHzMax} timing≤${caps.timingHzMax ?? '—'}` +
+      ` quartz ${caps.quartz ? `≤${caps.quartzHzMax}` : 'no'}` +
+      ` mode ${caps.deviceMode ? 'yes' : 'no'} beats ${caps.beats ? `≤${caps.beatsMax}` : 'no'}` +
+      ` gps ${caps.gps ? 'yes' : 'no'} pps ${caps.pps ? 'yes' : 'no'}` +
+      ` tbLog ${caps.timebaseLog ? `≤${caps.timebaseLogMax}` : 'no'}`
     : '—';
   if (caps?.metricsHzMax != null) document.getElementById('subMetrics').max = caps.metricsHzMax;
   if (caps?.beatHzMax != null) document.getElementById('subBeat').max = caps.beatHzMax;
   if (caps?.timingHzMax != null) document.getElementById('subTiming').max = caps.timingHzMax;
+  if (caps?.quartzHzMax != null) document.getElementById('subQuartz').max = caps.quartzHzMax;
+  setQuartzControls();
 }
 
 document.querySelectorAll('.tabs button').forEach((btn) => {
@@ -859,10 +1022,13 @@ document.getElementById('btnConnect').onclick = async () => {
     if (client) client.dispose();
     client = new Client(device);
     client.onNotify = (m) => {
-      log('NOTIFY', m.op);
+      if (m.op === 'beats') log('NOTIFY beats', (m.data?.beats || []).map((b) => `${b.seq}:${b.status}:${fmt(b.uUs, 1)}us`).join(' '));
+      else if (m.op !== 'quartz') log('NOTIFY', m.op); /* quartz at up to 5 Hz would flood the log */
       if (m.op === 'metrics') renderMetrics(m.data);
       else if (m.op === 'timing') renderTiming(m.data);
       else if (m.op === 'beat') renderBeat(m.data);
+      else if (m.op === 'quartz') renderQuartz(m.data);
+      else if (m.op === 'quartzPulse') { if (m.data) mergeQuartzPulses([m.data]); }
       else if (m.op === 'event') {
         renderEvents(m.data?.events || []);
       } else if (m.op === 'error') {
@@ -886,7 +1052,7 @@ document.getElementById('btnConnect').onclick = async () => {
     const h = await client.request('hello');
     applyHello(h);
     log('hello', h);
-    const p = await client.request('ping', { t: Date.now() });
+    const p = await client.request('ping', { t: Math.floor(performance.now()) });
     document.getElementById('dUptime').textContent = `${p.uptimeMs} ms`;
     await refreshAll();
   } catch (e) {
@@ -899,7 +1065,12 @@ document.getElementById('btnDisconnect').onclick = async () => {
   calStop('disconnected');
   try {
     if (client) {
-      try { await client.request('subscribe', { metricsHz: 0, beatHz: 0, timingHz: 0, events: false, errors: false }); } catch (_) {}
+      try {
+        await client.request('subscribe', {
+          metricsHz: 0, beatHz: 0, timingHz: 0, quartzHz: 0, events: false, errors: false, quartzPulses: false,
+          beats: false,
+        });
+      } catch (_) {}
       const d = client.device;
       client.dispose();
       client = null;
@@ -920,7 +1091,7 @@ document.getElementById('btnHello').onclick = async () => {
 
 document.getElementById('btnPing').onclick = async () => {
   try {
-    const p = await client.request('ping', { t: Date.now() });
+    const p = await client.request('ping', { t: Math.floor(performance.now()) });
     document.getElementById('dUptime').textContent = `${p.uptimeMs} ms`;
     log('ping', p);
   } catch (e) { log('ping err', e.message || e); }
@@ -1010,7 +1181,7 @@ document.getElementById('btnMatched').onclick = async () => {
 };
 document.getElementById('btnEvents').onclick = async () => {
   try {
-    const r = await client.request('getEvents', { limit: 16 });
+    const r = await client.request('getEvents', { limit: 5 });
     renderEvents(r.events || []);
   } catch (e) { log(e.message); }
 };
@@ -1034,12 +1205,16 @@ document.getElementById('btnSub').onclick = async () => {
       metricsHz: Number(document.getElementById('subMetrics').value) || 0,
       beatHz: Number(document.getElementById('subBeat').value) || 0,
       timingHz: Number(document.getElementById('subTiming').value) || 0,
+      quartzHz: Number(document.getElementById('subQuartz').value) || 0,
       events: document.getElementById('subEvents').value === '1',
       errors: document.getElementById('subErrors').value === '1',
+      quartzPulses: document.getElementById('subQuartzPulses').value === '1',
+      beats: document.getElementById('subBeats').checked,
     };
     const r = await client.request('subscribe', body);
     document.getElementById('subStatus').textContent =
-      `subscription: metrics ${r.metricsHz} Hz · beat ${r.beatHz} Hz · timing ${r.timingHz ?? 0} Hz · events ${r.events} · errors ${r.errors}`;
+      `subscription: metrics ${r.metricsHz} Hz · beat ${r.beatHz} Hz · timing ${r.timingHz ?? 0} Hz · ` +
+      `quartz ${r.quartzHz ?? 0} Hz · events ${r.events} · errors ${r.errors} · pulses ${r.quartzPulses ?? false} · beats ${r.beats ?? false}`;
     log('subscribe', r);
   } catch (e) { log('subscribe err', e.message || e); }
 };
@@ -1048,10 +1223,441 @@ document.getElementById('btnSubOff').onclick = async () => {
   document.getElementById('subMetrics').value = 0;
   document.getElementById('subBeat').value = 0;
   document.getElementById('subTiming').value = 0;
+  document.getElementById('subQuartz').value = 0;
   document.getElementById('subEvents').value = '0';
   document.getElementById('subErrors').value = '0';
+  document.getElementById('subQuartzPulses').value = '0';
+  document.getElementById('subBeats').checked = false;
   document.getElementById('btnSub').click();
 };
+
+/* ---------------- Device mode, beats, GPS, timebase log ----------------
+ * Minimal smoke test of the H6 ops (HID_CONTROL_PLANE.md §5.4 to §5.9):
+ * getDevice / setDevice / start / stop, getBeats, getGps, getTimebaseLog.
+ * Everything except the DeviceStatus panel is just dumped to the log.
+ */
+
+/** Renders a DeviceStatus into the Device mode panel. */
+function renderDevice(d) {
+  if (!d) return;
+  const yn = (v) => (v ? 'yes' : 'no');
+  document.getElementById('mMode').textContent = d.mode;
+  document.getElementById('mRunning').textContent = yn(d.running);
+  document.getElementById('mRunReq').textContent = yn(d.runRequested);
+  document.getElementById('mUsb').textContent = yn(d.usbStreaming);
+  document.getElementById('mStream').textContent = d.streamState;
+  document.getElementById('mSaved').textContent = yn(d.saved);
+  document.getElementById('modeSel').value = d.mode;
+}
+
+/** Sends a DeviceStatus op (getDevice / setDevice / start / stop) and renders the result. */
+async function deviceOp(op, extra = {}) {
+  try {
+    const d = await client.request(op, extra);
+    renderDevice(d);
+    log(op, d);
+    return d;
+  } catch (e) {
+    log(`${op} err`, e.code ? `${e.code}: ${e.message}` : (e.message || String(e)));
+    return null;
+  }
+}
+
+/** Sends an op and dumps its result (or error) to the log. */
+async function dumpOp(op, extra = {}) {
+  try {
+    const r = await client.request(op, extra);
+    log(op, r);
+    return r;
+  } catch (e) {
+    log(`${op} err`, e.code ? `${e.code}: ${e.message}` : (e.message || String(e)));
+    return null;
+  }
+}
+
+document.getElementById('btnGetDevice').onclick = () => deviceOp('getDevice');
+document.getElementById('btnSetDevice').onclick = () =>
+  deviceOp('setDevice', { mode: document.getElementById('modeSel').value });
+document.getElementById('btnStart').onclick = () => deviceOp('start');
+document.getElementById('btnStop').onclick = () => deviceOp('stop');
+document.getElementById('btnGetBeats').onclick = () => dumpOp('getBeats', { max: 8 });
+document.getElementById('btnGetGps').onclick = () => dumpOp('getGps');
+document.getElementById('btnGetTbLog').onclick = async () => {
+  /* The log is paged: repeat with offset += entries.length until all are read. */
+  const all = [];
+  let offset = 0;
+  for (let guard = 0; guard < 8; guard++) {
+    const r = await dumpOp('getTimebaseLog', { offset });
+    if (!r) return;
+    all.push(...r.entries);
+    offset += r.entries.length;
+    if (r.entries.length === 0 || offset >= r.total) break;
+  }
+  log('timebase log, all pages', all);
+};
+
+/* ---------------- Quartz timing ----------------
+ * Settings live in getState.quartz and are written with patchState
+ * ({ quartz: { mode, gateS, forkHz, tsMethod, kSigma } }); the measurement
+ * comes from getQuartz / the `quartz` notify, the pulse list from
+ * getQuartzPulses / the `quartzPulse` notify. See HID_CONTROL_PLANE.md §5.3,
+ * §8.5, §8.6 and docs/handoff/FIRMWARE_HANDOFF.md §5 / §8.
+ */
+const Q_PULSE_ROWS = 16;
+const Q_GATE_PRESETS = ['10', '60', '0'];
+const Q_FORK_HZ = [300, 341.333, 360, 480, 720];
+
+/**
+ * Headline label and user message per motor inhibition status: the handoff §5
+ * "What to show" table, worded as the CLI and OLED word it (docs/QUARTZ_TIMING.md §1).
+ */
+const Q_INHIBITION = {
+  none: { label: 'rate', msg: 'No rate yet: waiting for 3 pulses', cls: '' },
+  no_jump_long_gate: { label: 'rate', msg: 'Rate (no inhibition detected)', cls: 'good' },
+  may_include_inhibition: {
+    label: 'raw rate', cls: 'warn', longerGate: true,
+    msg: 'Raw rate, may include inhibition: use a longer gate',
+  },
+  need_one_more_cycle: { label: 'raw rate', msg: 'Raw rate, inhibition seen once: need one more cycle', cls: 'warn' },
+  correction_pending: {
+    label: 'raw rate', msg: 'Raw rate, 2 inhibition events: corrected at the next pulse', cls: 'warn',
+  },
+  corrected: { label: 'rate with inhibition', msg: 'Corrected for inhibition', cls: 'good' },
+};
+
+/** Badge class per measurement state. */
+const Q_STATE_CLS = {
+  idle: '', waitTimebase: 'warn', unsupportedRate: 'bad', acquiring: 'warn', measuring: 'good', done: 'good',
+};
+
+let quartz = null;     // last DspQuartz
+let qPulses = [];      // recent DspQuartzPulse of measurement qMeasId, newest first
+let qMeasId = null;    // measurementId the pulse list belongs to
+let qPollTimer = null;
+
+/**
+ * Formats a signed rate in s/d with an explicit sign ("+0.2059").
+ * @param {number} v Rate in s/d.
+ * @param {number} [d=4] Decimals.
+ * @returns {string}
+ */
+function fmtRate(v, d = 4) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(d)}`;
+}
+
+/**
+ * @returns {boolean} Whether the device runs the quartz engine (hello caps).
+ */
+function quartzSupported() {
+  return !!caps?.quartz;
+}
+
+/**
+ * Enables the quartz controls when connected to a device with quartz support,
+ * and shows the "no quartz engine" note otherwise.
+ */
+function setQuartzControls() {
+  const on = !!client && quartzSupported();
+  for (const id of ['qMode', 'qGate', 'qGateCustom', 'qForkHz', 'qTs', 'qKSigma', 'btnQRestart']) {
+    document.getElementById(id).disabled = !on;
+  }
+  document.querySelectorAll('#qLongerGate [data-gate]').forEach((b) => { b.disabled = !on; });
+  for (const id of ['btnQRefresh', 'qPoll']) document.getElementById(id).disabled = !client;
+  document.getElementById('qUnsupported').classList.toggle('hidden', !client || !caps || quartzSupported());
+}
+
+/**
+ * Shows the controls of the selected mode only (gate / timestamp / kSigma and
+ * the pulse table for motor, frequency for fork) and dims the panel of the
+ * inactive timing path: the beat panel outside mechanical mode, the quartz
+ * readout in mechanical mode.
+ * @param {string} mode Active quartz mode.
+ */
+function applyQuartzMode(mode) {
+  document.querySelectorAll('#quartzPanel .q-motor').forEach((el) => el.classList.toggle('hidden', mode !== 'motor'));
+  document.querySelectorAll('#quartzPanel .q-fork').forEach((el) => el.classList.toggle('hidden', mode !== 'fork'));
+  const custom = mode === 'motor' && document.getElementById('qGate').value === 'custom';
+  document.getElementById('qGateCustomWrap').classList.toggle('hidden', !custom);
+  document.getElementById('beatPanel').classList.toggle('dim', mode !== 'mechanical');
+  document.getElementById('qBody').classList.toggle('dim', mode === 'mechanical');
+}
+
+/**
+ * Sets a control's value unless the user is editing it.
+ * @param {string} id Element id.
+ * @param {string} value New value.
+ */
+function setIfIdle(id, value) {
+  const el = document.getElementById(id);
+  if (document.activeElement !== el) el.value = value;
+}
+
+/**
+ * Shows the quartz settings from getState / patchState (state.quartz).
+ * @param {object|undefined} qs QuartzState, absent on builds without quartz.
+ */
+function renderQuartzSettings(qs) {
+  if (!qs) {
+    applyQuartzMode('mechanical');
+    return;
+  }
+  setIfIdle('qMode', qs.mode);
+  const gate = String(qs.gateS);
+  /* Leave the gate alone while the custom value is being typed. */
+  if (document.activeElement !== document.getElementById('qGateCustom')) {
+    if (Q_GATE_PRESETS.includes(gate)) {
+      setIfIdle('qGate', gate);
+    } else {
+      setIfIdle('qGate', 'custom');
+      setIfIdle('qGateCustom', gate);
+    }
+  }
+  const fork = Q_FORK_HZ.find((f) => Math.abs(f - qs.forkHz) < 0.01);
+  if (fork != null) setIfIdle('qForkHz', String(fork));
+  setIfIdle('qTs', qs.tsMethod);
+  setIfIdle('qKSigma', String(qs.kSigma));
+  applyQuartzMode(qs.mode);
+}
+
+/**
+ * Sends one quartz settings patch; the reply refreshes the whole state.
+ * A change that restarts the measurement gives it a new measurementId, which
+ * clears the pulse table (useQuartzMeasurement).
+ * @param {object} q Partial QuartzState.
+ */
+async function patchQuartz(q) {
+  await patchState({ quartz: q });
+  await refreshQuartz();
+}
+
+/**
+ * Shows a DspQuartz snapshot: headline, state badge, calibration warning,
+ * §5 status, §8 hints and the mode details.
+ * @param {object} q DspQuartz.
+ */
+function renderQuartz(q) {
+  if (!q) return;
+  quartz = q;
+  if (useQuartzMeasurement(q.measurementId) && !qPulses.length) renderQuartzPulses();
+  applyQuartzMode(q.mode);
+  setIfIdle('qMode', q.mode);
+
+  const m = q.motor, l = q.lcd, f = q.fork;
+  const inh = m ? (Q_INHIBITION[m.inhibition] || Q_INHIBITION.none) : null;
+  const rateEl = document.getElementById('qRate');
+  rateEl.innerHTML = `${q.rateValid ? fmtRate(q.rateSDay) : '—'} <span class="unit">s/d</span>`;
+  rateEl.classList.toggle('uncal', q.rateValid && !q.calibrated);
+
+  const badge = document.getElementById('qBadge');
+  badge.textContent = q.state;
+  badge.className = `badge ${Q_STATE_CLS[q.state] || ''}`.trim();
+
+  const what = q.mode === 'motor' ? (inh?.label || 'rate')
+    : q.mode === 'lcd' ? 'LCD rate (oscillator)' : q.mode === 'fork' ? 'fork rate' : 'quartz idle';
+  document.getElementById('qRateLabel').textContent =
+    `${what} · + = gaining, − = losing${q.calibrated ? ` · calibrated (${q.calSource}, ${fmt(q.calPpm, 3)} ppm)` : ''}`;
+  document.getElementById('qUncal').classList.toggle('hidden', q.mode === 'mechanical' || q.calibrated);
+
+  const status = document.getElementById('qStatus');
+  status.textContent = m ? inh.msg : '';
+  status.className = `q-status ${m ? inh.cls : ''}`.trim();
+  document.getElementById('qLongerGate').classList.toggle('hidden', !(m && m.valid && inh.longerGate));
+  document.getElementById('qReason').textContent = (q.reason ? `${q.state}: ${q.reason}` : '') +
+    (m?.rebuilding ? `${q.reason ? ' · ' : ''}refitting… (rates are the last good result)` : '');
+
+  const hints = [];
+  if (m?.hintClipped) {
+    hints.push(['bad', 'Signal clipping: open JP1 (×1 gain). Timing still works, but pulse-shape estimates do not.']);
+  }
+  if (m?.hintWeakSignal) {
+    hints.push(['warn', 'Weak signal: reposition the watch (closer to the coil). Per-pulse jitter exceeds 2 µs below ≈30 µV; the rate still converges over 60 s.']);
+  }
+  if (m?.extraPulses) {
+    hints.push(['warn', `${m.extraPulses} detection / correction pulse(s) logged (fault indication; they are not timed).`]);
+  }
+  if (l?.clipped) hints.push(['bad', 'Signal clipping on the capacitive channel: open JP2 (×1 gain).']);
+  if (f?.clipped) hints.push(['bad', 'Signal clipping: open JP1 (×1 gain).']);
+  if (q.sampleLossRestarts) {
+    hints.push(['warn', `${q.sampleLossRestarts} restart(s) after capture sample loss: reduce host / DSP load.`]);
+  }
+  document.getElementById('qHints').innerHTML =
+    hints.map(([cls, t]) => `<p class="hint ${cls}">${t}</p>`).join('');
+
+  renderQuartzDetails(q);
+}
+
+/**
+ * Fills the detail key/value grid for the active mode.
+ * @param {object} q DspQuartz.
+ */
+function renderQuartzDetails(q) {
+  const m = q.motor, l = q.lcd, f = q.fork;
+  const common = [
+    ['elapsed', `${fmt(q.elapsedS, 1)} s`],
+    ['sourceHz / timebase', `${q.sourceHz} / ${q.timebaseOk ? 'ok' : 'unverified'}`, q.timebaseOk ? 'good' : 'warn'],
+    ['calibration', q.calibrated ? `${fmt(q.calPpm, 3)} ppm (${q.calSource})` : 'none (UNCALIBRATED)', q.calibrated ? 'good' : 'bad'],
+  ];
+  let title = 'details', rows = [];
+  if (m) {
+    title = 'motor (stepper)';
+    /* Board-clock value next to a calibrated one (identical when uncalibrated). */
+    const uncal = (raw) => (q.calibrated ? ` (uncal ${fmtRate(raw)})` : '');
+    rows = [
+      ['rate with inhibition', m.valid ? `${fmtRate(m.rateWithSDay)} s/d${uncal(m.rateWithUncalSDay)}` : '—'],
+      ['rate without (raw)', m.valid ? `${fmtRate(m.rateWithoutSDay)} s/d${uncal(m.rateWithoutUncalSDay)}` : '—'],
+      ['inhibition status', m.inhibition, (Q_INHIBITION[m.inhibition] || {}).cls],
+      ['inhibition period', m.inhibitionPeriodValid ? `${fmt(m.inhibitionPeriodS, 1)} s`
+        : m.events === 0 && m.noJumpSpanS ? `not yet seen (span ${fmt(m.spanS, 0)} / ${fmt(m.noJumpSpanS, 0)} s)` : 'not yet seen'],
+      ['inhibition events', `${m.events} (cycles used ${m.cyclesUsed}; jump > ${fmt(m.jumpThresholdUs, 0)} µs)`],
+      ['jump last', m.jumpLastUs ? `${fmt(m.jumpLastUs, 1)} µs · n = ${m.jumpLastN} @ 8192 Hz` : '—'],
+      ['jump mean', m.jumpMeanUs ? `${fmt(m.jumpMeanUs, 1)} µs · n = ${m.jumpMeanN}` : '—'],
+      ['pulses (fit)', `${m.pulses} (${m.fitPulses})`],
+      ['step', m.stepS ? `${fmt(m.stepS, 1)} s` : '—'],
+      ['span', `${fmt(m.spanS, 1)} s`],
+      ['residual (jitter)', `${fmt(m.residualRmsUs, 2)} µs rms`, m.residualRmsUs > 2 ? 'warn' : ''],
+      ['polarity offset', `${fmt(m.polarityOffsetUs, 2)} µs`],
+      ['peak SNR', fmt(m.peakSnr, 1), m.hintWeakSignal ? 'warn' : m.peakSnr ? 'good' : ''],
+      ['noise σ / threshold', `${fmt(m.noiseSigma, 0)} / ${fmt(m.threshold, 0)} codes`],
+      ['extra pulses', fmt(m.extraPulses, 0), m.extraPulses ? 'warn' : ''],
+      ['clipped (pulses)', m.clipped ? `yes (${m.clippedPulses})` : 'no', m.clipped ? 'bad' : 'good'],
+      ['gate / ts / kSigma', `${q.gateS ? `${q.gateS} s` : 'until 2 events'} / ${q.tsMethod} / ${q.kSigma}`],
+    ];
+  } else if (l) {
+    title = 'LCD';
+    rows = [
+      ['status', l.status, l.status === 'tracking' ? 'good' : l.status === 'unsupported_rate' ? 'bad' : 'warn'],
+      ['rate', l.valid ? `${fmtRate(l.rateSDay)} s/d` : '—'],
+      ['rate uncal', l.valid ? `${fmtRate(l.rateUncalSDay)} s/d` : '—'],
+      ['pattern f0', l.f0Hz ? `${l.f0Hz} Hz` : '—'],
+      ['harmonics k', l.harmonics?.length ? l.harmonics.join(', ') : '—'],
+      ['phase blocks', fmt(l.blocks, 0)],
+      ['retries', fmt(l.retries, 0), l.retries ? 'warn' : ''],
+      ['clipped', l.clipped ? 'yes' : 'no', l.clipped ? 'bad' : 'good'],
+      ['note', 'LCD cannot see inhibition'],
+    ];
+  } else if (f) {
+    title = 'tuning fork';
+    rows = [
+      ['rate', f.valid ? `${fmtRate(f.rateSDay)} s/d` : '—'],
+      ['rate uncal', f.valid ? `${fmtRate(f.rateUncalSDay)} s/d` : '—'],
+      ['nominal', `${fmt(f.fNomHz, 3)} Hz`],
+      ['phase blocks', fmt(f.blocks, 0)],
+      ['clipped', f.clipped ? 'yes' : 'no', f.clipped ? 'bad' : 'good'],
+    ];
+  }
+  if (q.mode === 'mechanical') rows = [['mode', 'mechanical: see Beat / timing']];
+  else rows = rows.concat(common);
+  document.getElementById('qDetailTitle').textContent = title;
+  fillKv(document.getElementById('qKv'), rows);
+}
+
+/**
+ * Switches the pulse list to measurement {@code id} when it is newer than
+ * the current one (ids grow by one per restart and wrap at 2^32), dropping
+ * the old rows.
+ * @param {number} id measurementId seen in a snapshot or pulse.
+ * @returns {boolean} False when {@code id} is older (a stale reply): ignore it.
+ */
+function useQuartzMeasurement(id) {
+  if (id == null || id === qMeasId) return true;
+  if (qMeasId != null && ((id - qMeasId) >>> 0) >= 0x80000000) return false;
+  qMeasId = id;
+  qPulses = [];
+  return true;
+}
+
+/**
+ * Merges pulses into the recent-pulse list, keyed by (measurementId,
+ * sequence), newest first. A pulse of a newer measurement drops the old rows;
+ * one of an older measurement is ignored.
+ * @param {object[]} list DspQuartzPulse entries, any order.
+ */
+function mergeQuartzPulses(list) {
+  for (const p of list) {
+    if (!useQuartzMeasurement(p.measurementId)) continue;
+    const i = qPulses.findIndex((x) => x.sequence === p.sequence);
+    if (i >= 0) qPulses[i] = p; /* newer data, e.g. the group has closed since */
+    else qPulses.push(p);
+  }
+  qPulses.sort((a, b) => b.sequence - a.sequence);
+  qPulses = qPulses.slice(0, Q_PULSE_ROWS);
+  renderQuartzPulses();
+}
+
+/** Renders the recent-pulse table (Δt = time since the previous listed pulse). */
+function renderQuartzPulses() {
+  const body = document.getElementById('qPulsesBody');
+  body.innerHTML = qPulses.length
+    ? qPulses.map((p, i) => {
+      const prev = qPulses[i + 1];
+      const dt = prev && prev.sequence === p.sequence - 1 ? (p.tS - prev.tS).toFixed(6) : '—';
+      const flags = [p.clipped ? 'clip' : '', p.extras ? `+${p.extras}` : '', p.closed ? '' : 'open']
+        .filter(Boolean).join(' ');
+      return `<tr><td>${p.sequence}</td><td>${p.tS.toFixed(6)}</td><td>${dt}</td>` +
+        `<td>${p.polarity > 0 ? '+' : '−'}</td><td>${fmt(p.snr, 1)}</td>` +
+        `<td class="${p.clipped || p.extras ? 'bad' : ''}">${flags}</td></tr>`;
+    }).join('')
+    : '<tr><td colspan="6">none</td></tr>';
+}
+
+/**
+ * Fetches getQuartz, and getQuartzPulses in motor mode.
+ */
+async function refreshQuartz() {
+  if (!client) return;
+  try {
+    renderQuartz(await client.request('getQuartz'));
+    if (quartz?.mode === 'motor') {
+      const r = await client.request('getQuartzPulses', { max: caps?.quartzPulsesMax || 8 });
+      mergeQuartzPulses(r.pulses || []);
+    }
+  } catch (e) { log('quartz', e.message || e); }
+}
+
+/**
+ * Starts or stops the 1 s getQuartz poll.
+ * @param {boolean} on Poll when true.
+ */
+function setQuartzPoll(on) {
+  if (qPollTimer) { clearInterval(qPollTimer); qPollTimer = null; }
+  document.getElementById('qPoll').checked = on;
+  if (on) qPollTimer = setInterval(() => { refreshQuartz(); }, 1000);
+}
+
+document.getElementById('qMode').onchange = (ev) => patchQuartz({ mode: ev.target.value });
+document.getElementById('qGate').onchange = (ev) => {
+  const v = ev.target.value;
+  if (v === 'custom') {
+    applyQuartzMode('motor');
+    document.getElementById('qGateCustom').focus();
+    return;
+  }
+  patchQuartz({ gateS: Number(v) });
+};
+document.getElementById('qGateCustom').onchange = (ev) => {
+  const v = Number(ev.target.value);
+  if (!Number.isFinite(v) || v < 3 || v > 960) { log('gate must be 3..960 s'); return; }
+  patchQuartz({ gateS: v });
+};
+document.getElementById('qForkHz').onchange = (ev) => patchQuartz({ forkHz: Number(ev.target.value) });
+document.getElementById('qTs').onchange = (ev) => patchQuartz({ tsMethod: ev.target.value });
+document.getElementById('qKSigma').onchange = (ev) => {
+  const v = Number(ev.target.value);
+  if (!Number.isFinite(v) || v < 4 || v > 20) { log('kSigma must be 4..20'); return; }
+  patchQuartz({ kSigma: v });
+};
+document.querySelectorAll('#qLongerGate [data-gate]').forEach((btn) => {
+  btn.onclick = () => patchQuartz({ gateS: Number(btn.getAttribute('data-gate')) });
+});
+document.getElementById('btnQRestart').onclick = async () => {
+  try {
+    renderQuartz(await client.request('quartzRestart'));
+    log('quartz restarted');
+  } catch (e) { log('quartzRestart err', e.message || e); }
+};
+document.getElementById('btnQRefresh').onclick = () => refreshQuartz();
+document.getElementById('qPoll').onchange = (ev) => setQuartzPoll(ev.target.checked);
 
 /* ---------------- Timebase calibration ----------------
  * Same method as scripts/calibrate_timebase.py: poll getTime, stamp each
@@ -1079,6 +1685,10 @@ function renderTimebase(tb) {
     ['duration', tb.durationS ? `${tb.durationS} s` : '—'],
     ['rate effect', `${fmt(tb.ppm * S_PER_DAY_PER_PPM, 3)} s/d`],
   ];
+  if (tb.logDeltaPpm != null) {
+    rows.push(['log threshold', `${fmt(tb.logDeltaPpm, 3)} ppm`]);
+    rows.push(['log write pending', tb.logPending ? 'yes' : 'no', tb.logPending ? 'warn' : '']);
+  }
   if (tb.pps?.enabled) {
     rows.push(['GPS PPS', tb.pps.locked ? 'locked' : 'searching', tb.pps.locked ? 'good' : 'warn']);
     rows.push(['PPS ppm', fmt(tb.pps.ppm, 4)]);
@@ -1277,6 +1887,8 @@ document.getElementById('btnCalApply').onclick = async () => {
 document.getElementById('btnClearLog').onclick = () => { logEl.textContent = ''; };
 
 renderBlocks();
+renderQuartzPulses();
+applyQuartzMode('mechanical');
 setConnected(false);
 log('Ready. Connect a Timegrapher (WebHID) device.');
   </script>

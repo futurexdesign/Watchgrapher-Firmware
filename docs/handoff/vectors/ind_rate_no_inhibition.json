@@ -1,0 +1,253 @@
+{
+ "description": "1 Hz stepping, no inhibition, watch losing 0.432 s/d, EMF 50 uV, 3 mV 60 Hz hum",
+ "channel": "left (OUT_IND, inductive)",
+ "signal": "stepper motor drive pulses",
+ "assumed_board": {
+  "jp1": "bridged (x11, 60.8 dB)",
+  "jp2": "open (x1)",
+  "r8_r15": "not fitted"
+ },
+ "pickup_emf_peak_v": 5e-05,
+ "noise_rms_codes_left": 10215,
+ "hum_at_adc_v": {
+  "60Hz": 0.003,
+  "180Hz": 0.001
+ },
+ "nominal_step_interval_s": 1.0,
+ "events": [
+  {
+   "index": 0,
+   "t_onset_s": 0.61,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 1,
+   "t_onset_s": 1.610005,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 2,
+   "t_onset_s": 2.61001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 3,
+   "t_onset_s": 3.610015,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 4,
+   "t_onset_s": 4.61002,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 5,
+   "t_onset_s": 5.610025,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 6,
+   "t_onset_s": 6.61003,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 7,
+   "t_onset_s": 7.610035,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 8,
+   "t_onset_s": 8.61004,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 9,
+   "t_onset_s": 9.610045,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 10,
+   "t_onset_s": 10.61005,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 11,
+   "t_onset_s": 11.610055,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 12,
+   "t_onset_s": 12.61006,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 13,
+   "t_onset_s": 13.610065,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 14,
+   "t_onset_s": 14.61007,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 15,
+   "t_onset_s": 15.610075,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 16,
+   "t_onset_s": 16.61008,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 17,
+   "t_onset_s": 17.610085,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 18,
+   "t_onset_s": 18.61009,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 19,
+   "t_onset_s": 19.610095,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 20,
+   "t_onset_s": 20.610100001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 21,
+   "t_onset_s": 21.610105001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 22,
+   "t_onset_s": 22.610110001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 23,
+   "t_onset_s": 23.610115001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 24,
+   "t_onset_s": 24.610120001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 25,
+   "t_onset_s": 25.610125001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 26,
+   "t_onset_s": 26.610130001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 27,
+   "t_onset_s": 27.610135001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 28,
+   "t_onset_s": 28.610140001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 29,
+   "t_onset_s": 29.610145001,
+   "polarity": -1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  },
+  {
+   "index": 30,
+   "t_onset_s": 30.610150001,
+   "polarity": 1,
+   "pulse_width_s": 0.0068,
+   "duty": 0.75
+  }
+ ],
+ "expected": {
+  "rate_without_inhibition_s_per_day": -0.432,
+  "rate_with_inhibition_s_per_day": -0.432,
+  "inhibition_period_s": null,
+  "note": "rate = 86400 * (nominal interval / measured mean interval - 1); positive = watch gains. Measured timestamps carry a constant delay (analogue chain about 7 us plus the ADC's digital filter); it cancels out of every rate."
+ },
+ "file": "ind_rate_no_inhibition.wav",
+ "fs_hz": 48000,
+ "duration_s": 31.0,
+ "peak_codes": {
+  "left": 356596,
+  "right": 1363
+ },
+ "clipped": {
+  "left": false,
+  "right": false
+ }
+}

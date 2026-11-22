@@ -1,0 +1,22 @@
+{
+ "description": "Quartz crystal through a plastic case: 32768 Hz +10.453 ppm (raw crystal, before inhibition), 1 V swing coupled through 2 fF, JP2 bridged, ADC at 96 kHz",
+ "channel": "right",
+ "signal": "tone 32768.0 Hz",
+ "nominal_frequency_hz": 32768.0,
+ "true_frequency_hz": 32768.342523904,
+ "amplitude_at_adc_v": 0.0028371964678376815,
+ "expected": {
+  "rate_s_per_day": 0.903139
+ },
+ "file": "xtal_32768Hz_96k.wav",
+ "fs_hz": 96000,
+ "duration_s": 4.0,
+ "peak_codes": {
+  "left": 54228,
+  "right": 28890
+ },
+ "clipped": {
+  "left": false,
+  "right": false
+ }
+}

@@ -1,5 +1,7 @@
 # Timegrapher Stand Firmware — As-Built Baseline + PCM1808 Integration
 
+> **Historical document (superseded).** This is the P3.0 implementation spec for adding the PCM1808 backend (2026-11-04). It is kept for the original intent and acceptance gates. It describes PCM16 output, a mono left-slot-only capture, no DSP and no HID, and says PCM1808 is "not implemented"; all of that has changed. For what the firmware does now see [AS_BUILT_ARCHITECTURE.md](AS_BUILT_ARCHITECTURE.md), which wins wherever the two disagree. (The repository-root `IMPLEMENTATION_SPEC.md` is the older P1 spec.)
+
 **Implementation specification P3.0**  
 **Date:** 2026-11-04  
 **Project:** `timegrapher-stand`  

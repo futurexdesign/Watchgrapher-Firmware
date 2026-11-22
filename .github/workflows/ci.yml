@@ -1,0 +1,194 @@
+# Continuous integration for the timegrapher-stand firmware.
+#
+# Jobs:
+#   host-tests      tests/run_all.sh with gcc and clang (one leg with sanitizers)
+#   firmware-build  pio run for every shipped RP2350 environment
+#   static-analysis clang-format on changed lines only, and cppcheck
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Only the latest run per branch/PR is kept; superseded runs are cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: host tests (${{ matrix.cc }}${{ matrix.sanitize == 1 && ', sanitized' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+            sanitize: 0
+          - cc: clang
+            cxx: clang++
+            sanitize: 0
+          - cc: gcc
+            cxx: g++
+            sanitize: 1
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      SANITIZE: ${{ matrix.sanitize }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run host tests
+        run: tests/run_all.sh "$RUNNER_TEMP/host-tests"
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-test-logs-${{ matrix.cc }}-san${{ matrix.sanitize }}
+          path: ${{ runner.temp }}/host-tests/logs/
+          if-no-files-found: ignore
+
+  firmware-build:
+    name: firmware (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - pico2_pcm1808
+          - kiwi_pcm1808
+          - pico2
+          - pico2_synthetic
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # PlatformIO packages (platform, toolchains, Arduino-Pico, libraries) and
+      # the per-env build tree. Keyed on platformio.ini, which pins the platform
+      # and lib_deps; a changed source file is still rebuilt incrementally.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio/build
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ matrix.env }}-
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build ${{ matrix.env }}
+        run: pio run -e "${{ matrix.env }}" 2>&1 | tee build.log
+
+      - name: Record memory usage
+        if: always()
+        run: |
+          {
+            echo "### Firmware memory: \`${{ matrix.env }}\`"
+            echo '```'
+            sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' build.log | grep -E '^(RAM|Flash):' || echo "(no RAM/Flash lines in build log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Informational only: lists outdated PlatformIO packages for one env.
+      - name: Outdated packages (informational)
+        if: matrix.env == 'pico2_pcm1808'
+        continue-on-error: true
+        run: pio pkg outdated
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: |
+            .pio/build/${{ matrix.env }}/firmware.uf2
+            .pio/build/${{ matrix.env }}/firmware.elf
+          if-no-files-found: error
+
+  static-analysis:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so git-clang-format can diff against the base commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned to the version the project is formatted with locally.
+      - name: Install clang-format
+        run: python -m pip install "clang-format==23.1.5"
+
+      # Only lines changed by this push or PR are checked. Much of the existing
+      # tree is not clang-format clean, and that is not this job's concern.
+      - name: clang-format (changed lines only)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              base="origin/$BASE_REF"
+              ;;
+            push)
+              if [[ "$EVENT_BEFORE" =~ ^0+$ || -z "$EVENT_BEFORE" ]]; then
+                echo "New branch or no previous commit: nothing to compare, skipping."
+                exit 0
+              fi
+              base="$EVENT_BEFORE"
+              ;;
+            *)
+              echo "clang-format diff check not applicable to $EVENT_NAME, skipping."
+              exit 0
+              ;;
+          esac
+
+          # git-clang-format prints a unified diff of what it would change, or
+          # a notice when nothing needs formatting. Any diff header means fail.
+          report=$(git clang-format --diff "$base" -- src include tests \
+            ':!third_party' ':!include/tick_tock_pcm.h' \
+            ':!include/pcm1808_i2s_*.pio.h' 2>&1)
+          if printf '%s\n' "$report" | grep -qE '^(\+\+\+|---) '; then
+            printf '%s\n' "$report"
+            echo "::error::clang-format would change lines changed in this push/PR."
+            exit 1
+          fi
+          echo "clang-format: no changes needed on modified lines."
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      # Errors and performance/portability findings fail the job. Inline
+      # suppressions (// cppcheck-suppress ...) are honoured. Generated PIO
+      # headers and the vendored CMSIS tree are not analysed.
+      - name: cppcheck
+        run: |
+          cppcheck \
+            --enable=warning,performance,portability \
+            --inline-suppr \
+            --error-exitcode=1 \
+            --std=c++17 \
+            --quiet \
+            -I include \
+            -i include/tick_tock_pcm.h \
+            -i include/pcm1808_i2s_legacy.pio.h \
+            -i include/pcm1808_i2s_pico2.pio.h \
+            -i include/pcm1808_i2s.pio.h \
+            -i include/pps_counter.pio.h \
+            src include

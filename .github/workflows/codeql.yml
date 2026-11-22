@@ -1,0 +1,43 @@
+# CodeQL analysis of the C/C++ host code. The firmware is not built here
+# (no PlatformIO): the host tests compile the same first-party sources, which
+# is what CodeQL traces, via tests/run_all.sh under build-mode: manual.
+name: CodeQL
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1" # weekly, Mondays 03:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: analyze (c-cpp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+
+      - name: Build host tests
+        env:
+          CC: gcc
+          CXX: g++
+        run: tests/run_all.sh "$RUNNER_TEMP/host-tests"
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"

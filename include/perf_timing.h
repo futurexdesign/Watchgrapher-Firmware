@@ -29,6 +29,16 @@ void perf_timing_init(void);
 void perf_timing_note_dsp_block(uint32_t us, uint32_t n, uint32_t source_hz);
 
 /**
+ * Records one quartz-engine block wall time
+ * ({@code quartz::engine::process}, installed as its
+ * {@code Hooks::block_timed}). Its budget is the same block period as
+ * {@link perf_timing_note_dsp_block}'s, shared with the DSP graph.
+ *
+ * @param us Elapsed microseconds for the call.
+ */
+void perf_timing_note_quartz_block(uint32_t us);
+
+/**
  * Records one main {@code loop()} iteration wall time and updates the
  * rolling 1 s busy / idle window.
  *

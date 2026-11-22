@@ -140,6 +140,8 @@ static void diagnostics_print_line(Stream &out) {
   out.print(g_diag.pcm1808_mclk_ratio);
   out.print(F(" up="));
   out.print(g_diag.pcm1808_upsample);
+  out.print(F(" lost="));
+  out.print(g_diag.pcm1808_blocks_lost);
 #endif
   {
     dsp_timing_t t{};

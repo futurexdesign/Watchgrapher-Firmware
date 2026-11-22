@@ -2,10 +2,10 @@
  * @file beat_fit.cpp
  * @brief Least-squares beat timing fit.
  *
- * @see beat_fit.h
+ * @see mechanical/beat_fit.h
  */
 
-#include "beat_fit.h"
+#include "mechanical/beat_fit.h"
 
 #include <math.h>
 
@@ -17,6 +17,8 @@ uint32_t ring_index(const beat_fit_t *f, uint32_t i) {
 
 void start_at(beat_fit_t *f, double t, double nominal) {
   f->origin = t;
+  f->grid_origin = t;
+  f->k_base = 0;
   f->nominal = nominal;
   f->head = 0;
   f->n = 1;
@@ -40,6 +42,22 @@ void drop_oldest(beat_fit_t *f) {
     f->u[j] -= u0;
   }
   f->last_k -= k0;
+  f->k_base += k0;
+}
+
+/**
+ * Fills {@code pt} (if any) for a point at grid-absolute index {@code k_abs}.
+ */
+void set_point(const beat_fit_t *f, beat_fit_point_t *pt, int32_t k_abs,
+               double t) {
+  if (!pt) {
+    return;
+  }
+  pt->valid = true;
+  pt->k = k_abs;
+  pt->rel = t - f->grid_origin;
+  pt->nominal = f->nominal;
+  pt->u = pt->rel - static_cast<double>(k_abs) * f->nominal;
 }
 
 /** {@code (-1)^k} as +1 / -1. */
@@ -116,12 +134,16 @@ void beat_fit_reset(beat_fit_t *f) {
 
 beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
                                      double nominal_half_period,
-                                     double max_span) {
+                                     double max_span, beat_fit_point_t *pt) {
+  if (pt) {
+    *pt = {};
+  }
   if (nominal_half_period <= 0.0) {
     return BEAT_FIT_REJECTED;
   }
   if (f->n == 0u || nominal_half_period != f->nominal) {
     start_at(f, t, nominal_half_period);
+    set_point(f, pt, 0, t);
     return BEAT_FIT_STARTED;
   }
 
@@ -130,13 +152,16 @@ beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
   const auto grid_err = static_cast<float>(fabs(steps - whole));
   if (whole > static_cast<double>(BEAT_FIT_MAX_GAP)) {
     start_at(f, t, nominal_half_period);
+    set_point(f, pt, 0, t);
     return BEAT_FIT_STARTED;
   }
   if (whole < 1.0 || grid_err > BEAT_FIT_MAX_GRID_ERR) {
     if (++f->rejects >= BEAT_FIT_MAX_REJECTS) {
       start_at(f, t, nominal_half_period);
+      set_point(f, pt, 0, t);
       return BEAT_FIT_STARTED;
     }
+    set_point(f, pt, f->last_k + static_cast<int32_t>(whole) + f->k_base, t);
     return BEAT_FIT_REJECTED;
   }
   f->rejects = 0;
@@ -147,11 +172,13 @@ beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
   const int32_t k = f->last_k + static_cast<int32_t>(whole);
   const uint32_t j = ring_index(f, f->n);
   f->k[j] = k;
-  f->u[j] = static_cast<float>(t - (f->origin + static_cast<double>(k) *
-                                                    f->nominal));
+  f->u[j] =
+      static_cast<float>(t - (f->origin + static_cast<double>(k) * f->nominal));
   f->n++;
   f->last_k = k;
   f->last_t = t;
+  const int32_t k_abs = k + f->k_base; /* before any rebase below */
+  set_point(f, pt, k_abs, t);
 
   /* The oldest point is always rebased to k = 0, u = 0, i.e. at origin. */
   while (f->n > 1u && t - f->origin > max_span) {
@@ -190,8 +217,8 @@ bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
     float ss = 0.f;
     for (uint32_t i = 0; i < f->n; i++) {
       const uint32_t j = ring_index(f, i);
-      r[i] = f->u[j] - (a + dd * static_cast<float>(f->k[j]) +
-                        cc * parity(f->k[j]));
+      r[i] = f->u[j] -
+             (a + dd * static_cast<float>(f->k[j]) + cc * parity(f->k[j]));
       if (!use || use[i]) {
         ss += r[i] * r[i];
       }

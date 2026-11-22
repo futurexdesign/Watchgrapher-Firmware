@@ -15,8 +15,10 @@
 #include "audio_source.h"
 #include "board_config.h"
 #include "control_api.h"
+#include "device_mode.h"
 #include "diagnostics.h"
 #include "display_ui.h"
+#include "flash_store.h"
 #include "hid_control.h"
 #include "perf_timing.h"
 #include "power_control.h"
@@ -49,7 +51,8 @@ static void publish_ui_snapshot(void) {
   dsp_beat_rate_t b{};
   control_api_get_beat_rate(&b);
   ui_snapshot_t s{};
-  s.streaming = usb_audio_streaming();
+  s.streaming = usb_audio_streaming() || audio_source_capture_running();
+  s.standalone = device_mode_get() == DEVICE_MODE_STANDALONE;
   s.timebase_ok = b.timebase_ok;
   s.locked = b.locked;
   s.vph = b.vph_nearest;
@@ -61,6 +64,36 @@ static void publish_ui_snapshot(void) {
   timebase_get(&tb);
   s.pps_enabled = tb.pps_enabled;
   s.pps_locked = tb.pps_locked;
+  dsp_quartz_t q{};
+  control_api_get_quartz(&q);
+  s.quartz.mode = q.mode;
+  s.quartz.state = q.state;
+  s.quartz.rate_s_day = q.rate_s_day;
+  s.quartz.rate_valid = q.rate_valid;
+  s.quartz.raw_rate_s_day = q.motor.rate_without_s_day;
+  s.quartz.raw_rate_valid = q.motor.valid;
+  s.quartz.inhibition_period_s = q.motor.inhibition_period_s;
+  s.quartz.inhibition_period_valid = q.motor.inhibition_period_valid;
+  s.quartz.jump_us = q.motor.jump_last_us;
+  s.quartz.jump_n = q.motor.jump_last_n;
+  s.quartz.inhibition = q.motor.inhibition;
+  s.quartz.hint_weak_signal = q.motor.hint_weak_signal;
+  s.quartz.hint_clipped = q.motor.hint_clipped;
+  s.quartz.calibrated = q.calibrated;
+  s.quartz.elapsed_s = q.elapsed_s;
+  s.quartz.gate_s = q.gate_s;
+  /* Only the active mode's detail struct is filled, so these pick by mode. */
+  if (q.mode == DSP_QUARTZ_MODE_LCD) {
+    s.quartz.ref_hz = static_cast<float>(q.lcd.f0_hz);
+    s.quartz.blocks = q.lcd.blocks;
+    s.quartz.blocks_valid = q.lcd.f0_hz > 0u;
+    s.quartz.hint_clipped = q.lcd.clipped;
+  } else if (q.mode == DSP_QUARTZ_MODE_FORK) {
+    s.quartz.ref_hz = q.fork.f_nom_hz;
+    s.quartz.blocks = q.fork.blocks;
+    s.quartz.blocks_valid = q.fork.f_nom_hz > 0.f;
+    s.quartz.hint_clipped = q.fork.clipped;
+  }
   s.published_ms = now;
   ui_snapshot_publish(&s);
 }
@@ -90,8 +123,11 @@ void setup() {
   diagnostics_init();
   /* DSP graph before capture: capture init sets the graph's source rate. */
   control_api_init();
-  timebase_init(); /* stored clock calibration (+ PPS if built in) */
+  flash_store_init(); /* flash image first: timebase and device mode read it */
+  timebase_init();    /* stored clock calibration (+ PPS if built in) */
+  device_mode_init(); /* persisted mode (USB mic / standalone) */
   audio_source_init();
+  device_boot_run(); /* STANDALONE: start measuring without a host stream */
 
   if (!usb_audio_init()) {
     while (true) {

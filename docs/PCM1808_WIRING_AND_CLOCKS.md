@@ -76,6 +76,10 @@ SCKI and the timer both come from the same crystal, so the measurement identifie
 | 5 V analog | VSYS/5V as appropriate | Verify module regulator scheme |
 | GND | GND | Common ground |
 
+**Channels.** Both I²S slots are decoded. LEFT carries the inductive pickup and is the only channel the USB microphone and the mechanical DSP graph use; RIGHT carries the capacitive (LCD) pickup and is read only by the quartz engine (`pcm1808_raw_left/right_peak_abs` in the diagnostics). See [QUARTZ_TIMING.md](QUARTZ_TIMING.md).
+
+**GPS PPS (optional).** `pico2_pcm1808` also builds with `-DPPS_GPIO=3`: a GPS 1 PPS output goes to GP3, which is free on the Pico 2 harness above. On `kiwi_pcm1808` GP3 is LRCK, so that env has no PPS input unless you choose another pin. The NMEA input (`-DGPS_UART_RX`) is off in every env. See [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md).
+
 If GP21 is unavailable, RP2350 also routes GPOUT0 to **GP13** — change `PCM1808_MCLK_GPIO` and rewire together.
 
 BCK/LRCK wait immediates are **baked into board-specific PIO headers** (`pcm1808_i2s_pico2.pio.h` / `pcm1808_i2s_legacy.pio.h`). Changing those pins requires regenerating with `python3 scripts/gen_pcm1808_pio.py` (edit `BOARDS` in that script).

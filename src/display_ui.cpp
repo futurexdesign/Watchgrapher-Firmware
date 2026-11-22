@@ -23,6 +23,11 @@
  * placeholders until timing is locked on a verified timebase; the trend has a
  * gap wherever there was no lock.
  *
+ * In a quartz mode (snapshot {@code quartz.mode} not mechanical) a quartz
+ * layout replaces the one above; see "Quartz layouts" below and
+ * docs/DISPLAY.md. The trend keeps sampling (it records gaps) so it is
+ * intact when the user switches back to mechanical.
+ *
  * @see display_ui.h
  */
 
@@ -41,7 +46,9 @@
 #include <Wire.h>
 #include <hardware/sync.h>
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 /* RP2350 I²C pin map: GPIO n is I2C((n / 2) % 2), SDA if n is even. */
@@ -209,10 +216,10 @@ const char *status_text(const ui_snapshot_t &s, bool have) {
     return "starting...";
   }
   if (!s.streaming) {
-    return "waiting for host";
+    return s.standalone ? "stopped" : "no host stream";
   }
   if (!s.timebase_ok) {
-    return "checking clock...";
+    return "clock check...";
   }
   if (s.events_seen == 0u) {
     return "listening...";
@@ -230,6 +237,20 @@ int16_t text_w(const char *s, uint8_t size) {
   return static_cast<int16_t>(strlen(s) * 6u * size);
 }
 
+/**
+ * Mode tag "SA" (standalone) or "USB", right-aligned at the right end of the
+ * header, left of the GPS pill when present. The mechanical header text is at
+ * most 14 characters (84 px) and the quartz header ends at x 78, so the tag
+ * (at x >= 85) never collides.
+ */
+void draw_mode_tag(const ui_snapshot_t &s) {
+  const char *tag = s.standalone ? "SA" : "USB";
+  const int16_t xr = static_cast<int16_t>(kSize - (s.pps_enabled ? 25 : 1));
+  g_oled->setTextSize(1);
+  g_oled->setCursor(static_cast<int16_t>(xr - text_w(tag, 1)), 4);
+  g_oled->print(tag);
+}
+
 void draw_header(const ui_snapshot_t &s, bool have, bool locked) {
   g_oled->setTextSize(1);
   g_oled->setCursor(0, 4);
@@ -240,6 +261,9 @@ void draw_header(const ui_snapshot_t &s, bool have, bool locked) {
     g_oled->print(" bph");
   } else {
     g_oled->print(status_text(s, have));
+  }
+  if (have) {
+    draw_mode_tag(s);
   }
   if (have && s.pps_enabled) {
     draw_gps(kSize - 23, 2, s.pps_locked);
@@ -345,6 +369,288 @@ void draw_trend() {
   }
 }
 
+/* ---- Quartz layouts -----------------------------------------------------
+ *
+ * Shared frame (pixels; size-1 rows are 8 px tall):
+ *
+ *     y   0-15   MOTOR [UNCAL]                   (GPS)   mode tag, badges
+ *     y  17      ─────────────────────────────────────
+ *     y  21      corrected                               status line
+ *     y  31-54        +0.273 s/d                         size 3, centred
+ *     y  59      ─────────────────────────────────────
+ *     y  62..99  four label / value rows, 10 px pitch    mode details
+ *     y 101      ─────────────────────────────────────
+ *     y 104-126  two 11 px hint bars, or the LCD note
+ *
+ * Priority (what wins space, highest first), so the screen stays honest even
+ * when the details are unreadable at a glance:
+ *   1. headline rate, with the §5 status directly above it — a rate without
+ *      its status can mislead (handoff §8 "Gate length");
+ *   2. UNCAL — the board clock alone can be ±1.7 s/d off;
+ *   3. hints, CLIP before WEAK — they tell the user to change the setup;
+ *   4. raw rate, inhibition period, jump (µs, n), gate progress, in that
+ *      order; the jump's "@8192" suffix is the first thing dropped;
+ *   5. the LCD "before inhibition" note, only when no hint needs the space.
+ * The rows never move between states: a value that is not known yet shows
+ * "--" / "---", so the eye finds the same field in the same place.
+ */
+
+constexpr uint8_t kMicro = 230;   /* 'µ' (CP437) */
+constexpr int16_t kQStatusY = 21; /* status line, where mechanical has "RATE" */
+constexpr int16_t kQRateY = 31;   /* size-3 headline top */
+constexpr int16_t kQUnitY = 45;   /* "s/d" beside it, on the size-3 baseline */
+constexpr int16_t kQUnitGap = 2;  /* 6-char value + gap + "s/d" = 128 px */
+constexpr int16_t kQRowTop = 62;  /* first detail row */
+constexpr int16_t kQRowPitch = 10;    /* 8 px glyphs + 2 px leading */
+constexpr int16_t kQHintRule = 101;   /* rule above the hint area */
+constexpr int16_t kQHintTop = 104;    /* first hint bar */
+constexpr int16_t kQHintH = 11;       /* bar height: 8 px glyphs + 2 + 1 */
+constexpr int16_t kQHintPitch = 12;   /* bars at 104-114 and 116-126 */
+constexpr std::size_t kQMaxHints = 2; /* bars that fit below the rule */
+
+/** Weak-signal hint text (handoff §8); the clip text is per mode, see
+ * {@link ui_quartz_clip_hint}. */
+constexpr const char *kHintWeak = "WEAK: reposition";
+
+/** The 8192 Hz reference the jump count "n" is in, appended when it fits. */
+constexpr const char *kJumpRef = "@8192";
+
+/**
+ * Inverse badge: {@code text} in black on a white rounded rectangle, 11 px
+ * tall, padded 3 px each side (same metrics as the GPS pill).
+ */
+void draw_badge(int16_t x0, int16_t y0, const char *text) {
+  const int16_t w = static_cast<int16_t>(text_w(text, 1) + 6);
+  g_oled->fillRoundRect(x0, y0, w, 11, 5, SH110X_WHITE);
+  g_oled->setTextColor(SH110X_BLACK);
+  g_oled->setTextSize(1);
+  g_oled->setCursor(x0 + 3, y0 + 2);
+  g_oled->print(text);
+  g_oled->setTextColor(SH110X_WHITE);
+}
+
+/**
+ * Header: mode tag at the left (in the same spot as the mechanical bph),
+ * an inverse UNCAL badge after it when no timebase correction is applied,
+ * and the GPS badge at the right as in the mechanical layout.
+ */
+void draw_quartz_header(const ui_snapshot_t &s) {
+  const char *tag = ui_quartz_mode_tag(s.quartz.mode);
+  g_oled->setTextSize(1);
+  g_oled->setCursor(0, 4);
+  g_oled->print(tag);
+  if (!s.quartz.calibrated) {
+    /* Widest case "QUARTZ" (36 px) + 6 + badge (36 px) ends at x 78, clear
+     * of the GPS pill at x 105. */
+    draw_badge(static_cast<int16_t>(text_w(tag, 1) + 6), 2, "UNCAL");
+  }
+  draw_mode_tag(s);
+  if (s.pps_enabled) {
+    draw_gps(kSize - 23, 2, s.pps_locked);
+  }
+  g_oled->drawFastHLine(0, 17, kSize, SH110X_WHITE);
+}
+
+/**
+ * Status line and headline rate. The status takes the place of the
+ * mechanical "RATE" caption: the "s/d" unit already says what the number
+ * is, and the full 21-character row is needed for "need 1 more cycle".
+ *
+ * @param status Status text (≤ {@link kUiStatusMaxChars} characters).
+ * @param valid  The rate is meaningful.
+ * @param s_day  Rate (s/d).
+ */
+void draw_quartz_headline(const char *status, bool valid, float s_day) {
+  g_oled->setTextSize(1);
+  g_oled->setCursor(0, kQStatusY);
+  g_oled->print(status);
+
+  char rate[kUiQuartzRateMaxChars + 1];
+  ui_format_quartz_rate(valid, s_day, rate, sizeof(rate));
+  /* Centre value + unit as one group, like the mechanical rate; the widest
+   * value fills the panel exactly (see kQUnitGap). */
+  const int16_t w =
+      static_cast<int16_t>(text_w(rate, 3) + kQUnitGap + text_w("s/d", 1));
+  const int16_t x = static_cast<int16_t>((kSize - w) / 2);
+  g_oled->setTextSize(3);
+  g_oled->setCursor(x, kQRateY);
+  g_oled->print(rate);
+  g_oled->setTextSize(1);
+  g_oled->setCursor(static_cast<int16_t>(x + text_w(rate, 3) + kQUnitGap),
+                    kQUnitY);
+  g_oled->print("s/d");
+  g_oled->drawFastHLine(0, 59, kSize, SH110X_WHITE);
+}
+
+/**
+ * One detail row: {@code label} left, {@code value} right-aligned, so values
+ * of different widths line up on the right edge.
+ *
+ * @param row Row index 0..3 below the headline.
+ */
+void draw_row(int row, const char *label, const char *value) {
+  const auto y = static_cast<int16_t>(kQRowTop + row * kQRowPitch);
+  g_oled->setTextSize(1);
+  g_oled->setCursor(0, y);
+  g_oled->print(label);
+  g_oled->setCursor(static_cast<int16_t>(kSize - text_w(value, 1)), y);
+  g_oled->print(value);
+}
+
+/**
+ * Appends {@code suffix} to {@code buf} (capacity {@code n}) if the result,
+ * printed at size 1 to the right of {@code label} with at least one space
+ * between them, still fits the panel width.
+ */
+void append_if_fits(char *buf, std::size_t n, const char *label,
+                    const char *suffix) {
+  const std::size_t len = strlen(buf) + strlen(suffix);
+  if (len + 1u <= n &&
+      text_w(label, 1) + 6 + static_cast<int16_t>(len * 6u) <= kSize) {
+    strncat(buf, suffix, n - strlen(buf) - 1u);
+  }
+}
+
+/**
+ * Hint area. Hints are inverse full-width bars so they stand out from the
+ * values; {@code hints} holds up to {@link kQMaxHints} non-null texts in
+ * priority order. When there are none, the optional {@code note} lines are
+ * printed plainly in the same space.
+ */
+void draw_hint_area(const std::array<const char *, kQMaxHints> &hints,
+                    const std::array<const char *, 2> &note) {
+  g_oled->drawFastHLine(0, kQHintRule, kSize, SH110X_WHITE);
+  const bool any_hint = hints[0] != nullptr;
+  for (std::size_t i = 0; i < kQMaxHints; i++) {
+    const auto y =
+        static_cast<int16_t>(kQHintTop + static_cast<int16_t>(i) * kQHintPitch);
+    const char *text = any_hint ? hints[i] : note[i];
+    if (text == nullptr) {
+      continue;
+    }
+    const auto x = static_cast<int16_t>((kSize - text_w(text, 1)) / 2);
+    g_oled->setTextSize(1);
+    if (any_hint) {
+      g_oled->fillRect(0, y, kSize, kQHintH, SH110X_WHITE);
+      g_oled->setTextColor(SH110X_BLACK);
+    }
+    g_oled->setCursor(x, y + 2);
+    g_oled->print(text);
+    g_oled->setTextColor(SH110X_WHITE);
+  }
+}
+
+/**
+ * Setup hints in priority order: clipping first (the setup is wrong and the
+ * pulse-shape estimates are void), then weak signal. Both can be set (the
+ * clip flag latches since the start), so both bars may show. The clip text
+ * names the jumper of the channel in use (JP1 LEFT, JP2 RIGHT); the weak
+ * flag is only ever set in motor mode.
+ */
+[[nodiscard]] std::array<const char *, kQMaxHints>
+quartz_hints(const ui_quartz_t &q) {
+  std::array<const char *, kQMaxHints> out{};
+  std::size_t n = 0;
+  if (q.hint_clipped) {
+    out[n++] = ui_quartz_clip_hint(q.mode);
+  }
+  if (q.hint_weak_signal) {
+    out[n++] = kHintWeak;
+  }
+  return out;
+}
+
+/**
+ * Motor layout: rate with inhibition as the headline once it is corrected,
+ * otherwise the raw rate (handoff §5), then raw rate, inhibition period,
+ * last jump and gate progress.
+ */
+void draw_motor(const ui_snapshot_t &s) {
+  const ui_quartz_t &q = s.quartz;
+  const bool corrected = q.inhibition == DSP_QUARTZ_INHIB_CORRECTED;
+  draw_quartz_headline(
+      ui_quartz_status_text(s.streaming, s.standalone, q.mode, q.state, q.inhibition),
+      corrected ? q.rate_valid : q.raw_rate_valid,
+      corrected ? q.rate_s_day : q.raw_rate_s_day);
+
+  char v[24];
+  ui_format_quartz_rate(q.raw_rate_valid, q.raw_rate_s_day, v, sizeof(v));
+  strncat(v, " s/d", sizeof(v) - strlen(v) - 1u);
+  draw_row(0, "raw", v);
+
+  ui_format_seconds(q.inhibition_period_valid, q.inhibition_period_s, v,
+                    sizeof(v));
+  if (q.inhibition_period_valid) {
+    strncat(v, " s", sizeof(v) - strlen(v) - 1u);
+  }
+  draw_row(1, "inhib period", v);
+
+  const bool have_jump = q.jump_us > 0.f; /* 0 until the first event */
+  ui_format_jump(have_jump, q.jump_us, q.jump_n, static_cast<char>(kMicro), v,
+                 sizeof(v));
+  if (have_jump) {
+    append_if_fits(v, sizeof(v), "jump", kJumpRef);
+  }
+  draw_row(2, "jump", v);
+
+  ui_format_gate(q.elapsed_s, q.gate_s, q.state == DSP_QUARTZ_STATE_DONE, v,
+                 sizeof(v));
+  draw_row(3, "gate", v);
+
+  draw_hint_area(quartz_hints(q), {nullptr, nullptr});
+}
+
+/**
+ * LCD and tuning-fork layout: headline phase-slope rate, the reference
+ * frequency (LCD pattern rate f0 or fork f_nom), phase blocks in the fit and
+ * elapsed time. The LCD gets a note that its rate is the oscillator before
+ * inhibition (handoff §3.3 / §8), so a difference from the motor rate on the
+ * same watch is not mistaken for an error.
+ */
+void draw_tone(const ui_snapshot_t &s) {
+  const ui_quartz_t &q = s.quartz;
+  const bool lcd = q.mode == DSP_QUARTZ_MODE_LCD;
+  draw_quartz_headline(
+      ui_quartz_status_text(s.streaming, s.standalone, q.mode, q.state, q.inhibition),
+      q.rate_valid, q.rate_s_day);
+
+  char v[16];
+  /* ref_hz is 0 until the LCD pattern search succeeds: shows "--". */
+  ui_format_hz(q.ref_hz, v, sizeof(v));
+  if (std::isfinite(q.ref_hz) && q.ref_hz > 0.f) {
+    strncat(v, " Hz", sizeof(v) - strlen(v) - 1u);
+  }
+  draw_row(0, lcd ? "pattern f0" : "f nom", v);
+
+  if (q.blocks_valid) {
+    snprintf(v, sizeof(v), "%lu", static_cast<unsigned long>(q.blocks));
+  } else {
+    snprintf(v, sizeof(v), "--");
+  }
+  draw_row(1, "blocks", v);
+
+  /* No gate in these modes: the rate keeps refining, so count up. */
+  ui_format_gate(q.elapsed_s, 0.f, false, v, sizeof(v));
+  draw_row(2, "time", v);
+
+  /* A clip hint (RIGHT for LCD, LEFT for fork) takes the note's place. */
+  const std::array<const char *, 2> note =
+      lcd ? std::array<const char *, 2>{"LCD: oscillator rate",
+                                        "before inhibition"}
+          : std::array<const char *, 2>{nullptr, nullptr};
+  draw_hint_area(quartz_hints(q), note);
+}
+
+/** Quartz frame: header, then the layout of the active mode. */
+void draw_quartz(const ui_snapshot_t &s) {
+  draw_quartz_header(s);
+  if (s.quartz.mode == DSP_QUARTZ_MODE_MOTOR) {
+    draw_motor(s);
+  } else {
+    draw_tone(s);
+  }
+}
+
 void render(const ui_snapshot_t &s, bool have) {
   const bool locked = is_locked(s, have);
 
@@ -360,10 +666,14 @@ void render(const ui_snapshot_t &s, bool have) {
 
   g_oled->clearDisplay();
   g_oled->setTextColor(SH110X_WHITE);
-  draw_header(s, have, locked);
-  draw_rate(s, locked);
-  draw_amp_be(s, locked);
-  draw_trend();
+  if (have && s.quartz.mode != DSP_QUARTZ_MODE_MECHANICAL) {
+    draw_quartz(s);
+  } else {
+    draw_header(s, have, locked);
+    draw_rate(s, locked);
+    draw_amp_be(s, locked);
+    draw_trend();
+  }
 
   /* Most frames are identical (the rolling means and trend move at ~1 Hz):
    * only send a frame that changed, so the panel is written as little as
@@ -501,28 +811,13 @@ void display_ui_loop(void) {
 
 #else /* !DISPLAY_SH1107 */
 
+/* No display: core 1 is held in reset, so these only keep the CLI / HID
+ * callers linking. Settings read back as 0 ("not running"). */
 void display_ui_get_status(display_ui_status_t *out) {
   if (out) {
     *out = {};
   }
 }
-void display_ui_set_contrast(uint8_t level) {
-  g_contrast_req = level == 0u ? 1u : level;
-}
-
-void display_ui_set_period_ms(uint32_t ms) {
-  g_period_req = ms < 100u ? 100u : (ms > 5000u ? 5000u : ms);
-}
-
-void display_ui_get_settings(uint8_t *contrast, uint32_t *period_ms) {
-  if (contrast) {
-    *contrast = static_cast<uint8_t>(g_contrast_req);
-  }
-  if (period_ms) {
-    *period_ms = g_period_req;
-  }
-}
-
 void display_ui_setup(void) {}
 void display_ui_loop(void) {}
 void display_ui_set_contrast(uint8_t) {}

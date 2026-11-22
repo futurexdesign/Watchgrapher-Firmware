@@ -5,7 +5,7 @@ A 128×128 **SH1107** I²C OLED module shows the timing readout. It is driven en
 ## Readout
 
 ```
-28,800 bph                           (GPS)   ← nominal beat rate, GPS timebase badge
+28,800 bph                     SA    (GPS)   ← nominal beat rate, mode tag, GPS timebase badge
 ──────────────────────────────────────────
 RATE                               10s avg   ← integration time (avgS)
          +12.3 s/d                           ← mean daily rate over avgS (large)
@@ -19,6 +19,7 @@ TREND 2 min                       ±20 s/d
 
 - **Rate, amplitude and beat error** are rolling means over the configured integration time, **10 s** by default (`avgLong` in HID `getBeat`, `avg<N>s` in `dsp beat`). Change it with `dsp set beat avg_s <1-60>`, the HID `beatRate.avgS` param, or the *average* selector in the WebHID page; the caption follows it. They show `---` / `-.-` until timing is locked.
 - **Beat lock** is shown by the header switching from a status message to the nominal rate.
+- **Mode tag** (`SA` or `USB`, right-aligned at the right end of the header, left of the GPS badge when there is one; also on the quartz screens): `SA` means the device is in **standalone** mode (it measures on its own, started at boot), `USB` means **USB microphone** mode (capture follows the host's audio stream, or a `run start`). The two modalities are described in [HID_CONTROL_PLANE.md §5.4](HID_CONTROL_PLANE.md). The tag is not shown until core 0 has published (`starting...`). The mechanical header text is at most 14 characters, so the tag never collides with it.
 - **GPS badge** (top right, only in builds with `-DPPS_GPIO=N`): solid, inverse `GPS` while the timebase is disciplined by GPS 1 PPS; outlined while PPS is not locked (no fix, no signal, or still averaging), in which case the stored calibration is in use. Without a PPS build there is no badge.
 - **Lift angle** is shown in the amplitude label (`AMP LA 52°`), so you can see which λ the amplitude was computed with. Set it with `dsp set beat lift_angle <deg>` or the HID `liftAngle` parameter.
 - **Header** shows the nominal rate (`18,000`, `28,800`, …) when locked, and otherwise what the device is waiting for:
@@ -26,8 +27,9 @@ TREND 2 min                       ±20 s/d
 | Text | Meaning |
 |---|---|
 | `starting...` | Core 0 has not published yet (first moments after boot) |
-| `waiting for host` | No audio stream open. Capture and DSP only run while the host records |
-| `checking clock...` | PCM1808 frame rate not verified yet (about 1 s after the stream opens) |
+| `no host stream` | **USB microphone mode**, and nothing is running: no audio stream open and no `run start`. Capture and DSP run only while the host records (or after `run start`). Was `waiting for host` |
+| `stopped` | **Standalone mode** with the run stopped (`run stop` / `stop`). It stays stopped until `run start` or the next boot |
+| `clock check...` | PCM1808 frame rate not verified yet (about 1 s after capture starts). Was `checking clock...` |
 | `listening...` | No ticks detected yet |
 | `locking...` | Ticks seen, beat rate not locked yet |
 
@@ -36,7 +38,84 @@ TREND 2 min                       ±20 s/d
   - The vertical scale picks the smallest of ±2, 5, 10, 20, 50 … 1000 s/d that fits the history, and is shown top right.
   - Periods without a lock show as gaps. That makes it easy to watch the rate settle after a regulator adjustment.
 
-The display redraws at 2 Hz, but a frame is only sent over I²C when it differs from the last one; the averaged values and the trend change about once a second, so most frames are skipped. It drops to low contrast (`0x04`) while no stream is open, to slow OLED wear.
+The display redraws at 2 Hz, but a frame is only sent over I²C when it differs from the last one; the averaged values and the trend change about once a second, so most frames are skipped. It drops to low contrast (`0x04`) while nothing is running (no stream, no run latch), to slow OLED wear. A standalone device that is measuring is "running" and keeps the normal contrast.
+
+## Quartz screens
+
+When a quartz mode is selected (`quartz mode motor|lcd|fork`), a quartz layout replaces the mechanical one; `quartz mode mechanical` brings the mechanical readout back unchanged. The rows never move between states: a value that is not known yet shows `--` / `---`.
+
+**Stepper motor** (inductive pickup, LEFT):
+
+```
+MOTOR [UNCAL]                  SA    (GPS)   ← quartz mode, UNCAL badge, device-mode tag, GPS badge
+──────────────────────────────────────────
+corrected                                    ← status line (see below)
+       +0.273 s/d                            ← headline rate (large)
+──────────────────────────────────────────
+raw                           +3.123 s/d     ← rate WITHOUT inhibition (oscillator)
+inhib period                      60.0 s     ← median spacing of inhibition events
+jump                    244.1µs n=2@8192     ← last jump; n = pulses deleted at 8192 Hz
+gate                              23/60s     ← elapsed / gate, "done" when frozen
+──────────────────────────────────────────
+█████████████ CLIP: open JP1 █████████████   ← hints, inverse bars
+███████████ WEAK: reposition █████████████
+```
+
+- **Headline:** the rate *with* inhibition once the status is `corrected`, otherwise the raw rate. Quartz rates are small, so it has 3 decimals below 10 s/d (`+0.273`), 2 below 100, 1 below 1000.
+- **Status line** (handoff §5; it replaces the mechanical `RATE` caption, since a rate without its status can mislead):
+
+| Text | Meaning |
+|---|---|
+| `no host stream` / `stopped` | Nothing is running (no audio stream, no run latch): `no host stream` in USB microphone mode, `stopped` in standalone mode. A finished, frozen result stays on screen. Same wording as the mechanical header |
+| `clock check...` | Capture rate not verified yet (same wording as the mechanical header) |
+| `unsupported rate` | Verified capture rate is not 48 kHz |
+| `acquiring...` | Running, fewer than three pulses / no rate yet |
+| `no inhibition` | No jump in a gate ≥ 2 × the longest expected period: the rate is final |
+| `may incl. inhib.` | No jump in a short gate: raw rate, use a longer gate |
+| `need 1 more cycle` | One jump seen: raw rate |
+| `correcting...` | Two jumps, waiting for the next pulse (brief) |
+| `corrected` | Two or more jumps: headline is the rate with inhibition |
+
+- **Jump:** `@8192` is dropped when the value is too long to fit beside the label (jumps of 1000 µs and more).
+- **UNCAL:** shown when no timebase calibration is applied. The board clock alone can be off by about ±1.7 s/d, which matters at quartz accuracy. See `docs/TIMEBASE_CALIBRATION.md`.
+- **Hints** (handoff §8): `CLIP: open JP1` when the LEFT pickup hit the ADC rail (timing is fine, pulse-shape estimates are not), `WEAK: reposition` when the pulses are below about 30 µV. Both can show at once.
+
+**LCD** (capacitive pickup, RIGHT) and **tuning fork** (LEFT):
+
+```
+LCD [UNCAL]                          (GPS)        FORK [UNCAL]               (GPS)
+──────────────────────────────────────────        ─────────────────────────────────
+measuring                                         measuring
+       +0.273 s/d                                        -1.042 s/d
+──────────────────────────────────────────        ─────────────────────────────────
+pattern f0                         64 Hz          f nom                     360 Hz
+blocks                               123          blocks                       480
+time                                 61s          time                         120s
+──────────────────────────────────────────        ─────────────────────────────────
+         LCD: oscillator rate                     ██████ CLIP: open JP1 ██████
+          before inhibition                       (only when LEFT clipped)
+```
+
+When the RIGHT pickup clips in LCD mode, the note gives way to the hint bar:
+
+```
+──────────────────────────────────────────
+█████████████ CLIP: open JP2 █████████████
+```
+
+- `pattern f0` is the detected LCD pattern rate (16/32/64/128 Hz) and shows `--` until the 2 s pattern search succeeds; `f nom` is the selected fork frequency (300, 341.33, 360, 480 or 720 Hz; the 32 768 Hz crystal mode is not available). `blocks` counts the phase blocks in the fit (0.5 s LCD, 0.25 s fork; a rate needs two). `time` counts up from the measurement start: these modes have no gate.
+- The LCD note is there because the LCD runs from the divider before the digital trimming: it shows the oscillator rate, so it can legitimately differ from the motor rate of the same watch (handoff §3.3, §8). A clip hint takes its place.
+- The status line shows the same waiting states as the motor screen, then `measuring`.
+
+**Priority.** On a 128 px panel something always has to give. In order:
+
+1. Headline rate, with its status directly above it.
+2. `UNCAL`.
+3. Hints, `CLIP` before `WEAK`. The clip hint names the jumper of the channel in use: `CLIP: open JP1` for motor and fork (LEFT), `CLIP: open JP2` for LCD (RIGHT). `WEAK` is motor-only.
+4. Motor details in row order: raw rate, inhibition period, jump, gate. The jump's `@8192` suffix is the first thing dropped.
+5. The LCD note, only when no hint needs the space.
+
+The mechanical trend graph keeps sampling (as gaps) while a quartz mode is active, so it is intact when you switch back.
 
 ## Brightness
 
@@ -62,7 +141,11 @@ The display redraws at 2 Hz, but a frame is only sent over I²C when it differs 
 
 **Other pins.** Set `DISPLAY_SDA_GPIO` / `DISPLAY_SCL_GPIO` in the board section of `platformio.ini`. They must be an SDA/SCL pair of one I²C block: for GPIO *n* the block is (*n* / 2) % 2, and SDA is the even pin. A compile-time check rejects invalid pairs.
 
-**Without a display.** Build with `-DDISPLAY_SH1107=0`. Core 1 is then held in reset.
+**Without a display.** Build with `-DDISPLAY_SH1107=0`. Core 1 is then held in reset. To try it on an existing env without editing `platformio.ini`, remove the ini's flag as well as adding yours, otherwise GCC warns that `DISPLAY_SH1107` is redefined in every file:
+
+```
+PLATFORMIO_BUILD_UNFLAGS=-DDISPLAY_SH1107=1 PLATFORMIO_BUILD_FLAGS=-DDISPLAY_SH1107=0 pio run -e pico2_pcm1808
+```
 
 ## Troubleshooting: blank screen
 
@@ -86,9 +169,9 @@ While the display is not found, core 1 probes every 2 s and rescans the bus, so 
 
 ## How it fits together
 
-- **Core 0** (`loop()`) copies the beat lock state, nominal bph, averaged values and their integration time, stream state and timebase status into a small `ui_snapshot_t` every 100 ms (`publish_ui_snapshot`).
+- **Core 0** (`loop()`) copies the beat lock state, nominal bph, averaged values and their integration time, stream state, timebase status and the quartz mode with its headline values (`ui_quartz_t`) into a small `ui_snapshot_t` every 100 ms (`publish_ui_snapshot`).
 - **Core 1** (`setup1()` / `loop1()` → `display_ui.cpp`) copies the latest snapshot, adds a trend sample each second, and renders with Adafruit SH110X + GFX, pinned in `platformio.ini`. The library splash screen is compiled out (`SH110X_NO_SPLASH`).
 - **The snapshot** is a sequence lock (`ui_snapshot.cpp`). Core 0 never waits, and core 1 retries on the rare race. Core 1 never calls TinyUSB, `Serial` or `dsp_graph`.
-- **Number formatting and trend scaling** are in `include/ui_format.h` and host-tested (`tests/test_ui_format.cpp`).
+- **Number formatting, trend scaling and the quartz status texts** are in `include/ui_format.h` and host-tested (`tests/test_ui_format.cpp`).
 - **Core 1 stack:** core 1 runs on an 8 KB heap stack (`core1_separate_stack`).
 - **Flash saves:** saving the timebase calibration (`timebase save`) briefly pauses core 1 while flash is written. The display just freezes for that moment.

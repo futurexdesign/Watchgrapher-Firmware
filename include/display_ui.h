@@ -4,7 +4,10 @@
  *
  * Shows the rolling mean (avg_s, default 10 s) daily rate (s/d), amplitude (°) and beat error (ms),
  * the nominal beat rate (e.g. 28,800 bph), the lift angle, a GPS badge when
- * the timebase is PPS-disciplined, and a 2-minute rate trend. Values come from {@link ui_snapshot_read};
+ * the timebase is PPS-disciplined, and a 2-minute rate trend. In a quartz mode
+ * (motor / LCD / fork) a quartz layout replaces it: headline rate in s/d with
+ * the handoff §5 inhibition status, details, UNCAL marker and setup hints.
+ * Values come from {@link ui_snapshot_read};
  * core 1 never touches the DSP graph, USB or Serial, so a slow I²C transfer
  * (~55 ms per 2 KB frame at 400 kHz) cannot delay the audio stream on core 0.
  *

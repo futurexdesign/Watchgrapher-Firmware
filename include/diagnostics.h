@@ -83,6 +83,12 @@ typedef struct {
   uint32_t pcm1808_mclk_ratio;
   /** Sample repeat currently applied into the 48 kHz ring. */
   uint32_t pcm1808_upsample;
+  /**
+   * Captured blocks never processed because their DMA buffer was
+   * overwritten first (gaps in the IRQ completion sequence). The source index
+   * skips them, so later samples keep their true time; USB audio has a gap.
+   */
+  uint32_t pcm1808_blocks_lost;
 } diag_counters_t;
 
 /**
