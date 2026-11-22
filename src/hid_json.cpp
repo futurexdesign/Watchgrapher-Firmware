@@ -453,8 +453,8 @@ int encode_beat(char *dst, std::size_t dstlen, int off, const dsp_beat_t &b) {
       beat_status_text(b.status));
 }
 
-int encode_beats(char *dst, std::size_t dstlen, int off, const dsp_beat_t *beats,
-                 uint32_t n, uint32_t *emitted) {
+int encode_beats(char *dst, std::size_t dstlen, int off,
+                 const dsp_beat_t *beats, uint32_t n, uint32_t *emitted) {
   uint32_t done = 0;
   off = appendf(dst, dstlen, off, "{\"beats\":[");
   /* "]}" closes the object; the envelope's "}" needs kEnvelopeTail more. */
@@ -536,8 +536,8 @@ bool parse_i64(const char *s, int64_t *out) {
 
 void i64_dec(int64_t v, char (&out)[24]) noexcept {
   /* Magnitude as unsigned so INT64_MIN does not overflow. */
-  const uint64_t mag = v < 0 ? 0u - static_cast<uint64_t>(v)
-                             : static_cast<uint64_t>(v);
+  const uint64_t mag =
+      v < 0 ? 0u - static_cast<uint64_t>(v) : static_cast<uint64_t>(v);
   char digits[24];
   u64_dec(mag, digits);
   if (v < 0) {
@@ -567,8 +567,8 @@ int encode_gps(char *dst, std::size_t dstlen, int off,
       "\"sats\":[",
       jbool(g.fix), static_cast<unsigned>(g.quality),
       static_cast<unsigned long>(g.utc_unix), static_cast<long>(g.age_ms),
-      static_cast<unsigned>(g.sats_used), num(g.hdop), num(g.pdop),
-      num(g.vdop), clamp_num(g.lat, 90.0), clamp_num(g.lon, 180.0),
+      static_cast<unsigned>(g.sats_used), num(g.hdop), num(g.pdop), num(g.vdop),
+      clamp_num(g.lat, 90.0), clamp_num(g.lon, 180.0),
       clamp_num(static_cast<double>(g.alt_m), 1e6), jbool(g.pos_valid));
   const uint32_t n = g.n_sats < kGpsSatsMax ? g.n_sats : kGpsSatsMax;
   for (uint32_t i = 0; i < n; i++) {
@@ -584,8 +584,8 @@ int encode_gps(char *dst, std::size_t dstlen, int off,
 
 int encode_timebase_log(char *dst, std::size_t dstlen, int off,
                         const timebase_log_t &log, uint32_t offset,
-                        bool pending, float delta_ppm,
-                        uint32_t last_write_unix, uint32_t *emitted) {
+                        bool pending, float delta_ppm, uint32_t last_write_unix,
+                        uint32_t *emitted) {
   const uint32_t total =
       log.count < kTimebaseLogMax ? log.count : kTimebaseLogMax;
   char trailer[128];
@@ -604,9 +604,10 @@ int encode_timebase_log(char *dst, std::size_t dstlen, int off,
   /* Room for entries: what is left minus the trailer, the envelope's tail
    * and the NUL. */
   const std::size_t reserve = tlen + kEnvelopeTail + 1u;
-  const std::size_t room = static_cast<std::size_t>(off) + reserve < dstlen
-                               ? dstlen - static_cast<std::size_t>(off) - reserve
-                               : 0u;
+  const std::size_t room =
+      static_cast<std::size_t>(off) + reserve < dstlen
+          ? dstlen - static_cast<std::size_t>(off) - reserve
+          : 0u;
   std::size_t used = 0;
   uint32_t done = 0;
   char text[kLogEntryJsonMax];

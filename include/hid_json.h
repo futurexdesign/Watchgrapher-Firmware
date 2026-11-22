@@ -378,8 +378,7 @@ void i64_dec(int64_t v, char (&out)[24]) noexcept;
 [[nodiscard]] int encode_timebase_log(char *dst, std::size_t dstlen, int off,
                                       const timebase_log_t &log,
                                       uint32_t offset, bool pending,
-                                      float delta_ppm,
-                                      uint32_t last_write_unix,
+                                      float delta_ppm, uint32_t last_write_unix,
                                       uint32_t *emitted);
 
 } // namespace hid_json

@@ -68,7 +68,8 @@ void helpVersion(void) {
 void helpStatus(void) {
   Serial.println(F("  USB mount, streaming, stream FSM state, audio source,"));
   Serial.println(F("  DSP master bypass flag, and uptime in milliseconds."));
-  Serial.println(F("  Then the device mode / run state (details: device, run status)."));
+  Serial.println(
+      F("  Then the device mode / run state (details: device, run status)."));
   Serial.println(F("  Last line: quartz headline (details: quartz status)."));
 }
 
@@ -121,8 +122,10 @@ void helpDsp(void) {
   Serial.println(F("    on|off|enable|disable <block>"));
   Serial.println(F("    get|set <block> <param> [value]"));
   Serial.println(F("    events | beat|rate | metrics | timing|cpu | match | spectrum"));
-  Serial.println(F("    beats [n]            Per-beat records (n 1..16, default 8)"));
-  Serial.println(F("    graph                Pipeline: process chain, analysis taps, quartz"));
+  Serial.println(
+      F("    beats [n]            Per-beat records (n 1..16, default 8)"));
+  Serial.println(F("    graph                Pipeline: process chain, analysis "
+                   "taps, quartz"));
   Serial.println(F("    errors [clear] | help [sub|block]"));
   Serial.println(F("  Shortcuts:"));
   Serial.println(F("    dsp set gain 12 | dsp on fir | dsp set fir preset 1"));
@@ -290,29 +293,46 @@ void helpDspSub(const char *sub) {
     return;
   }
   if (equalsIgnoreCase(sub, "beats")) {
-    Serial.println(F("CLI: dsp beats [n] — the last n per-beat records, newest first"));
-    Serial.println(F("  n = 1..16 (default 8) of the 64 kept. One record per tick the"));
-    Serial.println(F("  beat fit saw while locked (the raw data of a tick-tock chart)."));
-    Serial.println(F("  seq     per-stream counter (restarts at 0 on a stream reset)"));
-    Serial.println(F("  grid    bumps whenever the fit restarts its grid (status started)"));
-    Serial.println(F("  k       grid index in half-periods since the grid origin"));
-    Serial.println(F("  p       parity k&1: 0 = tick, 1 = tock (stable within a grid)"));
-    Serial.println(F("  u_us    arrival time minus the nominal grid (us); the even and"));
+    Serial.println(
+        F("CLI: dsp beats [n] — the last n per-beat records, newest first"));
+    Serial.println(
+        F("  n = 1..16 (default 8) of the 64 kept. One record per tick the"));
+    Serial.println(
+        F("  beat fit saw while locked (the raw data of a tick-tock chart)."));
+    Serial.println(
+        F("  seq     per-stream counter (restarts at 0 on a stream reset)"));
+    Serial.println(F(
+        "  grid    bumps whenever the fit restarts its grid (status started)"));
+    Serial.println(
+        F("  k       grid index in half-periods since the grid origin"));
+    Serial.println(
+        F("  p       parity k&1: 0 = tick, 1 = tock (stable within a grid)"));
+    Serial.println(
+        F("  u_us    arrival time minus the nominal grid (us); the even and"));
     Serial.println(F("          odd k clouds are 2x the beat error apart"));
-    Serial.println(F("  amp     amplitude (deg) of this beat, n/a if the lift time is bad"));
+    Serial.println(F(
+        "  amp     amplitude (deg) of this beat, n/a if the lift time is bad"));
     Serial.println(F("  lift    lift time (ms)"));
-    Serial.println(F("  status  accepted | started | rejected (off-grid, not in the fit)"));
+    Serial.println(F(
+        "  status  accepted | started | rejected (off-grid, not in the fit)"));
     return;
   }
   if (equalsIgnoreCase(sub, "graph")) {
-    Serial.println(F("CLI: dsp graph — the DSP pipeline as text (same graph as the"));
+    Serial.println(
+        F("CLI: dsp graph — the DSP pipeline as text (same graph as the"));
     Serial.println(F("  WebHID hello caps.pipeline)"));
-    Serial.println(F("  chain      input > process blocks in order > pcm24 > usb. Process"));
-    Serial.println(F("             blocks run only when enabled and bypass is off."));
-    Serial.println(F("  analysis   read-only taps of the raw input, run before the chain;"));
-    Serial.println(F("             listed in execution order with '<-' naming their inputs"));
-    Serial.println(F("             (eventDetect feeds eventLog and beatRate)."));
-    Serial.println(F("  quartz     the quartz engine reads the same capture block (PCM1808"));
+    Serial.println(F(
+        "  chain      input > process blocks in order > pcm24 > usb. Process"));
+    Serial.println(
+        F("             blocks run only when enabled and bypass is off."));
+    Serial.println(F(
+        "  analysis   read-only taps of the raw input, run before the chain;"));
+    Serial.println(F("             listed in execution order with '<-' naming "
+                     "their inputs"));
+    Serial.println(
+        F("             (eventDetect feeds eventLog and beatRate)."));
+    Serial.println(F("  quartz     the quartz engine reads the same capture "
+                     "block (PCM1808"));
     Serial.println(F("             builds only; see 'help quartz')."));
     return;
   }
@@ -436,7 +456,8 @@ void printBeats(int argc, char **argv) {
   Serial.print(control_api_beat_seq());
   Serial.println(F(" (newest first)"));
   if (got == 0) {
-    Serial.println(F("CLI: tip: no beats yet - needs a locked beat rate (dsp beat)"));
+    Serial.println(
+        F("CLI: tip: no beats yet - needs a locked beat rate (dsp beat)"));
     return;
   }
   Serial.print(F("  "));
@@ -472,7 +493,8 @@ void printGraph() {
     first = false;
   }
   Serial.println();
-  Serial.println(F("  analysis (read-only taps of input, run first, in order):"));
+  Serial.println(
+      F("  analysis (read-only taps of input, run first, in order):"));
   char line[112];
   for (uint32_t i = 0; i < count; i++) {
     if (nodes[i].kind == DSP_NODE_ANALYSIS) {
@@ -944,48 +966,72 @@ void helpTimebase(void) {
   Serial.println(F("    timebase set -23.4 [manual|ntp] [unix_date] [duration_s]"));
   Serial.println(F("    timebase save                    # to flash (not while streaming)"));
   Serial.println(F("    timebase clear                   # 0 ppm in RAM (save to persist)"));
-  Serial.println(F("    timebase gps                     # fix, UTC, DOP, position, satellites"));
-  Serial.println(F("    timebase log                     # calibration history (24 entries)"));
-  Serial.println(F("    timebase log clear               # erase the history (writes flash)"));
-  Serial.println(F("    timebase logdelta [ppm]          # show / set the PPS log threshold"));
+  Serial.println(F("    timebase gps                     # fix, UTC, DOP, "
+                   "position, satellites"));
+  Serial.println(F("    timebase log                     # calibration history "
+                   "(24 entries)"));
+  Serial.println(F("    timebase log clear               # erase the history "
+                   "(writes flash)"));
+  Serial.println(F("    timebase logdelta [ppm]          # show / set the PPS "
+                   "log threshold"));
   Serial.println(F("  If an exact reference reads R s/d: ppm = -R / 0.0864."));
-  Serial.println(F("  Try: timebase help gps | timebase help log | timebase help logdelta"));
+  Serial.println(F(
+      "  Try: timebase help gps | timebase help log | timebase help logdelta"));
 }
 
 /** Help for {@code timebase gps}. */
 void helpTimebaseGps(void) {
-  Serial.println(F("CLI: timebase gps - GPS detail (builds with -DGPS_UART_RX=N)"));
-  Serial.println(F("  Fix, UTC, DOPs (n/a = unknown) and position, then a satellite"));
-  Serial.println(F("  table: sys (GP GL GA BD QZ or ?), prn, el / az (deg, - = unknown),"));
-  Serial.println(F("  snr (dB-Hz, - = not tracked) and used (in the position fix)."));
-  Serial.println(F("  Satellites not heard for 5 s are dropped. Max 32 are listed."));
+  Serial.println(
+      F("CLI: timebase gps - GPS detail (builds with -DGPS_UART_RX=N)"));
+  Serial.println(
+      F("  Fix, UTC, DOPs (n/a = unknown) and position, then a satellite"));
+  Serial.println(F(
+      "  table: sys (GP GL GA BD QZ or ?), prn, el / az (deg, - = unknown),"));
+  Serial.println(
+      F("  snr (dB-Hz, - = not tracked) and used (in the position fix)."));
+  Serial.println(
+      F("  Satellites not heard for 5 s are dropped. Max 32 are listed."));
 }
 
 /** Help for {@code timebase log}. */
 void helpTimebaseLog(void) {
   Serial.println(F("CLI: timebase log [clear] - calibration history"));
-  Serial.println(F("  The last 24 calibrations, oldest first: date (UTC), ppm, source,"));
-  Serial.println(F("  duration and why it was logged (save | delta | monthly)."));
-  Serial.println(F("  'timebase log clear' erases it (flash write: refused while a USB"));
+  Serial.println(
+      F("  The last 24 calibrations, oldest first: date (UTC), ppm, source,"));
+  Serial.println(
+      F("  duration and why it was logged (save | delta | monthly)."));
+  Serial.println(
+      F("  'timebase log clear' erases it (flash write: refused while a USB"));
   Serial.println(F("  audio stream is open)."));
-  Serial.println(F("  Policy: every successful 'timebase save' is logged ('save')."));
-  Serial.println(F("  A GPS PPS measurement (locked >= 10 min, full 64-pulse window,"));
-  Serial.println(F("  dated by GPS UTC) is logged when it differs from the previous"));
-  Serial.println(F("  entry by >= logdelta ppm and at least a day later ('delta'), or"));
-  Serial.println(F("  30 days after it ('monthly'); the first PPS entry is 'delta'."));
-  Serial.println(F("  Only 24 are kept, oldest dropped. Entries are written to flash"));
-  Serial.println(F("  only when no USB audio stream is open and no quartz measurement"));
+  Serial.println(
+      F("  Policy: every successful 'timebase save' is logged ('save')."));
+  Serial.println(
+      F("  A GPS PPS measurement (locked >= 10 min, full 64-pulse window,"));
+  Serial.println(
+      F("  dated by GPS UTC) is logged when it differs from the previous"));
+  Serial.println(
+      F("  entry by >= logdelta ppm and at least a day later ('delta'), or"));
+  Serial.println(
+      F("  30 days after it ('monthly'); the first PPS entry is 'delta'."));
+  Serial.println(
+      F("  Only 24 are kept, oldest dropped. Entries are written to flash"));
+  Serial.println(
+      F("  only when no USB audio stream is open and no quartz measurement"));
   Serial.println(F("  is running; until then 'pending=yes'."));
 }
 
 /** Help for {@code timebase logdelta}. */
 void helpTimebaseLogDelta(void) {
   Serial.println(F("CLI: timebase logdelta [ppm] - PPS log threshold"));
-  Serial.println(F("  Show or set (0.05..10 ppm, default 0.2, saved to flash) the"));
+  Serial.println(
+      F("  Show or set (0.05..10 ppm, default 0.2, saved to flash) the"));
   Serial.println(F("  change versus the previous log entry that makes a PPS"));
-  Serial.println(F("  measurement worth logging as 'delta' (at least a day after the"));
-  Serial.println(F("  previous entry; a 'monthly' entry is logged regardless). Setting"));
-  Serial.println(F("  it writes flash: refused while a USB audio stream is open."));
+  Serial.println(
+      F("  measurement worth logging as 'delta' (at least a day after the"));
+  Serial.println(
+      F("  previous entry; a 'monthly' entry is logged regardless). Setting"));
+  Serial.println(
+      F("  it writes flash: refused while a USB audio stream is open."));
 }
 
 /**
@@ -1056,7 +1102,8 @@ void printTimebase(void) {
   }
   snprintf(buf, sizeof(buf),
            "CLI: timebase log logdelta_ppm=%.3f pending=%s (see: timebase log)",
-           static_cast<double>(tb.log_delta_ppm), tb.log_pending ? "yes" : "no");
+           static_cast<double>(tb.log_delta_ppm),
+           tb.log_pending ? "yes" : "no");
   Serial.println(buf);
 }
 
@@ -1081,7 +1128,8 @@ timebase_log_t g_cliLog;
 /** {@code timebase gps}: fix, UTC, DOPs, position and the satellite table. */
 void printTimebaseGps() {
   if (!control_api_gps_built()) {
-    Serial.println(F("CLI: ERR GPS not built in (build with -DGPS_UART_RX=<gpio>)"));
+    Serial.println(
+        F("CLI: ERR GPS not built in (build with -DGPS_UART_RX=<gpio>)"));
     return;
   }
   control_api_get_gps(&g_cliGps);
@@ -1108,14 +1156,14 @@ void printTimebaseLog() {
   control_api_timebase_log(&g_cliLog);
   char line[112];
   char utc[24];
-  snprintf(line, sizeof(line),
-           "CLI: timebase log entries=%lu/%u pending=%s logdelta_ppm=%.3f "
-           "last_write=%s",
-           static_cast<unsigned long>(g_cliLog.count), TIMEBASE_LOG_CAP,
-           control_api_timebase_log_pending() ? "yes" : "no",
-           static_cast<double>(control_api_timebase_log_delta_ppm()),
-           formatUtc(control_api_timebase_log_last_write_unix(), utc,
-                     sizeof(utc)));
+  snprintf(
+      line, sizeof(line),
+      "CLI: timebase log entries=%lu/%u pending=%s logdelta_ppm=%.3f "
+      "last_write=%s",
+      static_cast<unsigned long>(g_cliLog.count), TIMEBASE_LOG_CAP,
+      control_api_timebase_log_pending() ? "yes" : "no",
+      static_cast<double>(control_api_timebase_log_delta_ppm()),
+      formatUtc(control_api_timebase_log_last_write_unix(), utc, sizeof(utc)));
   Serial.println(line);
   if (g_cliLog.count == 0) {
     return;
@@ -1258,7 +1306,8 @@ void cmdTimebase(int argc, char **argv) {
     printTimebase();
     return;
   }
-  Serial.println(F("CLI: ERR usage: timebase [set|save|clear|gps|log|logdelta|help]"));
+  Serial.println(
+      F("CLI: ERR usage: timebase [set|save|clear|gps|log|logdelta|help]"));
 }
 
 /** Extended help for {@code display}. */
@@ -2503,28 +2552,34 @@ void cmdRun(int argc, char **argv) {
 // clang-format on
 
 static const CliCommand kCommands[] = {
-    {"help", "?", cmdHelp, F("Show command list or help <cmd>"), F("help [command]"),
-     helpHelp},
+    {"help", "?", cmdHelp, F("Show command list or help <cmd>"),
+     F("help [command]"), helpHelp},
     {"version", "ver", cmdVersion, F("Firmware / board / source"), F("version"),
      helpVersion},
     {"status", nullptr, cmdStatus, F("USB / stream / DSP summary"), F("status"),
      helpStatus},
-    {"time", nullptr, cmdTime, F("Device microsecond timer (calibration probe)"),
-     F("time"), helpTime},
-    {"timebase", "tb", cmdTimebase, F("Sample-clock calibration (ppm), GPS, history"),
-     F("timebase [set <ppm> [src] [date] [dur]|save|clear|gps|log [clear]|logdelta [ppm]]"),
+    {"time", nullptr, cmdTime,
+     F("Device microsecond timer (calibration probe)"), F("time"), helpTime},
+    {"timebase", "tb", cmdTimebase,
+     F("Sample-clock calibration (ppm), GPS, history"),
+     F("timebase [set <ppm> [src] [date] [dur]|save|clear|gps|log "
+       "[clear]|logdelta [ppm]]"),
      helpTimebase},
-    {"device", "dev", cmdDevice, F("Mode: USB microphone or standalone timegrapher"),
+    {"device", "dev", cmdDevice,
+     F("Mode: USB microphone or standalone timegrapher"),
      F("device [status|mode [usbmic|standalone]]"), helpDevice},
-    {"run", nullptr, cmdRun, F("Start / stop capture + timing without a USB stream"),
+    {"run", nullptr, cmdRun,
+     F("Start / stop capture + timing without a USB stream"),
      F("run [start|stop|status]"), helpRun},
-    {"display", "oled", cmdDisplay, F("OLED status, bus scan, contrast / period"),
-     F("display [contrast <1-255>|period <ms>]"),
-     helpDisplay},
+    {"display", "oled", cmdDisplay,
+     F("OLED status, bus scan, contrast / period"),
+     F("display [contrast <1-255>|period <ms>]"), helpDisplay},
     {"diag", nullptr, cmdDiag, F("Periodic diagnostic dump on|off"),
      F("diag [on|off]"), helpDiag},
     {"dsp", nullptr, cmdDsp, F("DSP control plane"),
-     F("dsp list|bypass|on|off|get|set|events|beat|beats|graph|metrics|timing|match|spectrum|errors|help"),
+     F("dsp "
+       "list|bypass|on|off|get|set|events|beat|beats|graph|metrics|timing|"
+       "match|spectrum|errors|help"),
      helpDsp},
     {"quartz", "qz", cmdQuartz, F("Quartz watch timing: motor / LCD / fork"),
      F("quartz [status|mode|gate|fork|ts|ksigma|restart|pulses|help] [arg]"),

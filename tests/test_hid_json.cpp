@@ -394,7 +394,6 @@ dsp_quartz_t realistic_motor() {
 
 } // namespace
 
-
 /**
  * Writes {@code head}, then what {@code encode} appends, then the closing
  * {@code "}"} of the envelope, into a 2048-byte buffer (the real
@@ -474,10 +473,9 @@ void test_device_status() {
   char buf[256];
   int n = hid_json::encode_device_status(buf, sizeof(buf), 0, s);
   check(n > 0 && is_json(buf), "device status json");
-  check(std::strcmp(buf,
-                    "{\"mode\":\"standalone\",\"running\":true,"
-                    "\"runRequested\":true,\"usbStreaming\":false,"
-                    "\"streamState\":\"idle\",\"saved\":true}") == 0,
+  check(std::strcmp(buf, "{\"mode\":\"standalone\",\"running\":true,"
+                         "\"runRequested\":true,\"usbStreaming\":false,"
+                         "\"streamState\":\"idle\",\"saved\":true}") == 0,
         "device status fields");
   const char *names[] = {"unconfigured", "idle",      "prefill",
                          "active",       "suspended", "error"};
@@ -485,8 +483,8 @@ void test_device_status() {
     s.stream_state = static_cast<stream_state_t>(i);
     s.mode = DEVICE_MODE_USB_MIC;
     n = hid_json::encode_device_status(buf, sizeof(buf), 0, s);
-    const std::string want = std::string("\"streamState\":\"") + names[i] +
-                             "\",";
+    const std::string want =
+        std::string("\"streamState\":\"") + names[i] + "\",";
     check(n > 0 && std::strstr(buf, want.c_str()) != nullptr &&
               std::strstr(buf, "\"mode\":\"usbMic\"") != nullptr,
           "device stream state names");
@@ -498,12 +496,11 @@ void test_beats() {
   const auto r = realistic_beat(3);
   int n = hid_json::encode_beat(buf, sizeof(buf), 0, r);
   check(n > 0 && is_json(buf), "realistic beat json");
-  check(std::strcmp(buf,
-                    "{\"seq\":3,\"gridId\":1,\"sampleIndex\":\"1259566\","
-                    "\"tS\":26.2208000,\"k\":3,\"parity\":1,\"uUs\":-9.5,"
-                    "\"nominalUs\":69444.4,\"amplitudeDeg\":287.4,"
-                    "\"amplitudeValid\":true,\"liftMs\":2.345,"
-                    "\"status\":\"accepted\"}") == 0,
+  check(std::strcmp(buf, "{\"seq\":3,\"gridId\":1,\"sampleIndex\":\"1259566\","
+                         "\"tS\":26.2208000,\"k\":3,\"parity\":1,\"uUs\":-9.5,"
+                         "\"nominalUs\":69444.4,\"amplitudeDeg\":287.4,"
+                         "\"amplitudeValid\":true,\"liftMs\":2.345,"
+                         "\"status\":\"accepted\"}") == 0,
         "realistic beat fields");
   std::printf("beat realistic: %s\n", buf);
 
@@ -566,7 +563,8 @@ void test_beats() {
   len = enveloped(
       kResponseHead,
       [&](char *d, std::size_t l, int off) {
-        return hid_json::encode_beats(d, l, off, list.data(), hid_json::kBeatsMax, &emitted);
+        return hid_json::encode_beats(d, l, off, list.data(),
+                                      hid_json::kBeatsMax, &emitted);
       },
       msg);
   check(len > 0 && is_json(msg.data()) && emitted == 8u,
@@ -574,15 +572,16 @@ void test_beats() {
   check(hid_json::kBeatsMax == 8u, "caps.beatsMax is 8");
   check(static_cast<std::size_t>(len) < kMaxJson, "getBeats fits 2048");
   check(has(msg, "\"seq\":100000,"), "getBeats keeps the leading beat");
-  std::printf("getBeats realistic (8 requested): %u beats, %d bytes\n",
-              emitted, len);
+  std::printf("getBeats realistic (8 requested): %u beats, %d bytes\n", emitted,
+              len);
   for (uint32_t i = 0; i < list.size(); i++) {
     list[i] = worst_beat(i);
   }
   len = enveloped(
       kResponseHead,
       [&](char *d, std::size_t l, int off) {
-        return hid_json::encode_beats(d, l, off, list.data(), hid_json::kBeatsMax, &emitted);
+        return hid_json::encode_beats(d, l, off, list.data(),
+                                      hid_json::kBeatsMax, &emitted);
       },
       msg);
   check(len > 0 && is_json(msg.data()) && emitted >= 7u, "getBeats worst");
@@ -700,7 +699,8 @@ void test_events() {
         return hid_json::encode_events(d, l, off, list.data(), 32u, &emitted);
       },
       msg);
-  check(len > 0 && is_json(msg.data()) && static_cast<std::size_t>(len) <= kMaxJson,
+  check(len > 0 && is_json(msg.data()) &&
+            static_cast<std::size_t>(len) <= kMaxJson,
         "worst event notify json");
   check(emitted >= 5u && emitted < 32u, "worst event notify count");
   check(has(msg, "\"peakSample\":\"18446744073709551515\""),
@@ -715,7 +715,8 @@ void test_events() {
   nf.peak_abs = NAN;
   nf.energy = INFINITY;
   n = hid_json::encode_event(buf, sizeof(buf), 0, nf);
-  check(n > 0 && is_json(buf) && std::strstr(buf, "nan") == nullptr && std::strstr(buf, "inf") == nullptr,
+  check(n > 0 && is_json(buf) && std::strstr(buf, "nan") == nullptr &&
+            std::strstr(buf, "inf") == nullptr,
         "event non-finite floats");
 
   /* Empty list. */
@@ -746,8 +747,10 @@ void test_int64() {
   check(std::strcmp(s, "1731916800123") == 0, "i64_dec Date.now()");
 
   char buf[64];
-  const int n = hid_json::encode_ping(buf, sizeof(buf), 0, 1731916800123LL, 5000u);
-  check(n > 0 && std::strcmp(buf, "{\"t\":1731916800123,\"uptimeMs\":5000}") == 0,
+  const int n =
+      hid_json::encode_ping(buf, sizeof(buf), 0, 1731916800123LL, 5000u);
+  check(n > 0 &&
+            std::strcmp(buf, "{\"t\":1731916800123,\"uptimeMs\":5000}") == 0,
         "ping echoes a 64-bit t");
 }
 
@@ -829,10 +832,10 @@ void test_gps() {
   /* 32 realistic satellites all fit too. */
   g = realistic_gps(32);
   len = enveloped(kResponseHead, enc(g), msg);
-  check(len > 0 && is_json(msg.data()) && count_of(msg, "[\"G") +
-                                                  count_of(msg, "[\"B") +
-                                                  count_of(msg, "[\"Q") ==
-                                              32,
+  check(len > 0 && is_json(msg.data()) &&
+            count_of(msg, "[\"G") + count_of(msg, "[\"B") +
+                    count_of(msg, "[\"Q") ==
+                32,
         "gps 32 realistic all kept");
   std::printf("getGps 32 realistic: %d bytes\n", len);
 
@@ -884,8 +887,8 @@ void test_timebase_log() {
                         float delta, uint32_t last) {
     return [&l, offset, pending, delta, last, &emitted](char *d, std::size_t n,
                                                         int off) {
-      return hid_json::encode_timebase_log(d, n, off, l, offset, pending,
-                                           delta, last, &emitted);
+      return hid_json::encode_timebase_log(d, n, off, l, offset, pending, delta,
+                                           last, &emitted);
     };
   };
 
@@ -894,8 +897,9 @@ void test_timebase_log() {
   check(len > 0 && is_json(msg.data()) && emitted == 3u &&
             count_of(msg, "\"dateUnix\":") == 3,
         "log 3 entries");
-  check(has(msg, "\"entries\":[{\"dateUnix\":1700000000,\"ppm\":-12.345,"
-                 "\"source\":\"pps\",\"durationS\":3600,\"reason\":\"delta\"},"),
+  check(has(msg,
+            "\"entries\":[{\"dateUnix\":1700000000,\"ppm\":-12.345,"
+            "\"source\":\"pps\",\"durationS\":3600,\"reason\":\"delta\"},"),
         "log entry fields, oldest first");
   check(has(msg, "],\"total\":3,\"offset\":0,\"pending\":true,"
                  "\"logDeltaPpm\":0.2,\"lastWriteUnix\":1700172800}"),
@@ -915,9 +919,10 @@ void test_timebase_log() {
   timebase_log_t empty;
   timebase_log_init(&empty);
   len = enveloped(kResponseHead, enc(empty, 0, false, 0.2f, 0), msg);
-  check(len > 0 && is_json(msg.data()) &&
-            has(msg, "\"entries\":[],\"total\":0,\"offset\":0,\"pending\":false"),
-        "empty log");
+  check(
+      len > 0 && is_json(msg.data()) &&
+          has(msg, "\"entries\":[],\"total\":0,\"offset\":0,\"pending\":false"),
+      "empty log");
 
   /* Source / reason names. */
   timebase_log_t two;
@@ -1075,8 +1080,7 @@ void test_pipeline_and_hello() {
   check(len > 0 && is_json(msg.data()) && has(msg, "\"quartz\":false,") &&
             has(msg, "\"gps\":false,\"pps\":false,"),
         "hello without quartz / gps / pps");
-  check(!has(msg, "\"key\":\"quartz\"") &&
-            !has(msg, "\"inputs\":[\"quartz\""),
+  check(!has(msg, "\"key\":\"quartz\"") && !has(msg, "\"inputs\":[\"quartz\""),
         "hello without quartz has no quartz pipeline node");
   std::printf("hello without quartz: %d bytes with envelope\n", len);
 

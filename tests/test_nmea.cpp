@@ -299,8 +299,12 @@ int main() {
   nmea_init(&n);
 
   /* Valid RMC (NMEA 4.1 with mode / nav status), GN talker. */
-  assert(feed(&n, frame("GNRMC,123519.00,A,4807.038,N,01131.000,E,0.02,,151126,,,A,V")) ==
-         NMEA_GOT_RMC);
+  assert(
+      feed(
+          &n,
+          frame(
+              "GNRMC,123519.00,A,4807.038,N,01131.000,E,0.02,,151126,,,A,V")) ==
+      NMEA_GOT_RMC);
   assert(n.rmc_valid && n.time_valid);
   /* 2026-11-15 12:35:19 UTC */
   assert(n.unix_s == 1763210119u + 365u * 86400u);
@@ -323,9 +327,10 @@ int main() {
   assert(!n.time_valid);
 
   /* GGA. */
-  assert(feed(&n, frame("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,")) ==
-         NMEA_GOT_GGA);
-  assert(n.gga_quality == 1u && n.sats == 8u && n.hdop > 0.89f && n.hdop < 0.91f);
+  assert(feed(&n, frame("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,"
+                        "46.9,M,,")) == NMEA_GOT_GGA);
+  assert(n.gga_quality == 1u && n.sats == 8u && n.hdop > 0.89f &&
+         n.hdop < 0.91f);
   feed(&n, frame("GNGGA,123520,,,,,0,00,99.99,,,,,,"));
   assert(n.gga_quality == 0u && n.sats == 0u && n.hdop > 99.9f);
 

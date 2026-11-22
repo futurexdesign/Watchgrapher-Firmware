@@ -114,7 +114,8 @@ static inline float ui_trend_scale(const float *v, size_t n) {
  * @param out      Destination buffer.
  * @param n        Size of {@code out} in bytes (output is truncated to fit).
  */
-static inline void ui_format_signed_fixed(bool valid, float v, int decimals, char *out, size_t n) {
+static inline void ui_format_signed_fixed(bool valid, float v, int decimals,
+                                          char *out, size_t n) {
   if (!valid || !isfinite(v)) {
     snprintf(out, n, "---");
     return;
@@ -143,7 +144,8 @@ static constexpr size_t kUiQuartzRateMaxChars = 6;
  * so the mechanical one-decimal format would hide everything interesting;
  * 0.001 s/d (12 ppb) is about the resolution of a 60 s motor gate.
  */
-static inline void ui_format_quartz_rate(bool valid, float s_day, char *out, size_t n) {
+static inline void ui_format_quartz_rate(bool valid, float s_day, char *out,
+                                         size_t n) {
   if (!valid || !isfinite(s_day)) {
     snprintf(out, n, "---");
     return;
@@ -204,8 +206,8 @@ static inline void ui_format_hz(float hz, char *out, size_t n) {
  * @param out    Destination buffer.
  * @param n      Size of {@code out} in bytes.
  */
-static inline void ui_format_jump(bool valid, float us, uint32_t count, char micro, char *out,
-                                  size_t n) {
+static inline void ui_format_jump(bool valid, float us, uint32_t count,
+                                  char micro, char *out, size_t n) {
   if (!valid || !isfinite(us) || us <= 0.f) {
     snprintf(out, n, "--");
   } else if (us < 999.95f) {
@@ -228,7 +230,8 @@ static inline void ui_format_jump(bool valid, float us, uint32_t count, char mic
  * @param out       Destination buffer.
  * @param n         Size of {@code out} in bytes.
  */
-static inline void ui_format_gate(float elapsed_s, float gate_s, bool done, char *out, size_t n) {
+static inline void ui_format_gate(float elapsed_s, float gate_s, bool done,
+                                  char *out, size_t n) {
   if (done) {
     snprintf(out, n, "done");
     return;
@@ -250,7 +253,8 @@ static inline void ui_format_gate(float elapsed_s, float gate_s, bool done, char
  * Header tag for a quartz mode: "MOTOR", "LCD", "FORK"; "QUARTZ" for any
  * other value (the display only calls it for non-mechanical modes).
  */
-[[nodiscard]] static inline const char *ui_quartz_mode_tag(dsp_quartz_mode_t mode) {
+[[nodiscard]] static inline const char *
+ui_quartz_mode_tag(dsp_quartz_mode_t mode) {
   switch (mode) {
   case DSP_QUARTZ_MODE_MOTOR:
     return "MOTOR";
@@ -269,7 +273,8 @@ static inline void ui_format_gate(float elapsed_s, float gate_s, bool done, char
  * the capacitive pickup on RIGHT ("CLIP: open JP2"); motor and fork use the
  * inductive pickup on LEFT ("CLIP: open JP1"), which is also the default.
  */
-[[nodiscard]] static inline const char *ui_quartz_clip_hint(dsp_quartz_mode_t mode) {
+[[nodiscard]] static inline const char *
+ui_quartz_clip_hint(dsp_quartz_mode_t mode) {
   return mode == DSP_QUARTZ_MODE_LCD ? "CLIP: open JP2" : "CLIP: open JP1";
 }
 
@@ -309,11 +314,9 @@ static constexpr size_t kUiStatusMaxChars = 21;
  * @param inhib     Motor inhibition status (ignored for LCD / fork).
  * @return A static string, never null.
  */
-[[nodiscard]] static inline const char *ui_quartz_status_text(bool streaming,
-                                                              bool standalone,
-                                                              dsp_quartz_mode_t mode,
-                                                              dsp_quartz_state_t state,
-                                                              dsp_quartz_inhibition_t inhib) {
+[[nodiscard]] static inline const char *
+ui_quartz_status_text(bool streaming, bool standalone, dsp_quartz_mode_t mode,
+                      dsp_quartz_state_t state, dsp_quartz_inhibition_t inhib) {
   if (!streaming && state != DSP_QUARTZ_STATE_DONE) {
     return standalone ? "stopped" : "no host stream";
   }

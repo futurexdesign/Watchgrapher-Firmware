@@ -178,11 +178,15 @@ inline const char *formatUtc(uint32_t unix, char *buf, std::size_t n) noexcept {
   if (m <= 2) {
     y++;
   }
-  std::snprintf(buf, n, "%04ld-%02ld-%02ld %02lu:%02lu:%02luZ",
-                static_cast<long>(y), static_cast<long>(m),
-                static_cast<long>(d), static_cast<unsigned long>(rem / 3600u),
-                static_cast<unsigned long>(rem % 3600u / 60u),
-                static_cast<unsigned long>(rem % 60u));
+  /* y is 1970..2106 for a uint32_t input; m and d are calendar-bounded. The
+   * no-op moduli let gcc's -Wformat-truncation prove the 20-char bound. */
+  std::snprintf(buf, n, "%04u-%02u-%02u %02u:%02u:%02uZ",
+                static_cast<unsigned>(y) % 10000u,
+                static_cast<unsigned>(m) % 100u,
+                static_cast<unsigned>(d) % 100u,
+                static_cast<unsigned>(rem / 3600u) % 100u,
+                static_cast<unsigned>(rem % 3600u / 60u),
+                static_cast<unsigned>(rem % 60u));
   return buf;
 }
 

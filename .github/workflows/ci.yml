@@ -161,9 +161,11 @@ jobs:
 
           # git-clang-format prints a unified diff of what it would change, or
           # a notice when nothing needs formatting. Any diff header means fail.
+          # It exits non-zero when it has a diff; "|| true" keeps the runner's
+          # implicit "bash -e" from aborting here before the diff is printed.
           report=$(git clang-format --diff "$base" -- src include tests \
             ':!third_party' ':!include/tick_tock_pcm.h' \
-            ':!include/pcm1808_i2s_*.pio.h' 2>&1)
+            ':!include/pcm1808_i2s_*.pio.h' 2>&1) || true
           if printf '%s\n' "$report" | grep -qE '^(\+\+\+|---) '; then
             printf '%s\n' "$report"
             echo "::error::clang-format would change lines changed in this push/PR."

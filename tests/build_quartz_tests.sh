@@ -17,7 +17,10 @@ out="$(cd "$out" && pwd)"
 
 cc="${CC:-cc}"
 cxx="${CXX:-c++}"
-defs=(-DARM_MATH_LOOPUNROLL)
+# __GNUC_PYTHON__ is CMSIS-DSP's host-build switch: arm_math_types.h then skips
+# cmsis_compiler.h (Arm-only intrinsics). Apple clang gets the same path via
+# __APPLE_CC__, but Linux gcc/clang need it set explicitly.
+defs=(-DARM_MATH_LOOPUNROLL -D__GNUC_PYTHON__)
 inc=(-I"$root/include" -I"$root/tests" -I"$root/third_party/CMSIS-DSP/Include")
 srcs=("$root"/src/quartz/quartz_dsp.cpp "$root"/src/quartz/motor_timing.cpp
       "$root"/src/quartz/lcd_timing.cpp "$root"/src/quartz/tone_timing.cpp)

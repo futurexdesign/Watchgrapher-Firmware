@@ -568,10 +568,10 @@ quartz_hints(const ui_quartz_t &q) {
 void draw_motor(const ui_snapshot_t &s) {
   const ui_quartz_t &q = s.quartz;
   const bool corrected = q.inhibition == DSP_QUARTZ_INHIB_CORRECTED;
-  draw_quartz_headline(
-      ui_quartz_status_text(s.streaming, s.standalone, q.mode, q.state, q.inhibition),
-      corrected ? q.rate_valid : q.raw_rate_valid,
-      corrected ? q.rate_s_day : q.raw_rate_s_day);
+  draw_quartz_headline(ui_quartz_status_text(s.streaming, s.standalone, q.mode,
+                                             q.state, q.inhibition),
+                       corrected ? q.rate_valid : q.raw_rate_valid,
+                       corrected ? q.rate_s_day : q.raw_rate_s_day);
 
   char v[24];
   ui_format_quartz_rate(q.raw_rate_valid, q.raw_rate_s_day, v, sizeof(v));
@@ -610,9 +610,9 @@ void draw_motor(const ui_snapshot_t &s) {
 void draw_tone(const ui_snapshot_t &s) {
   const ui_quartz_t &q = s.quartz;
   const bool lcd = q.mode == DSP_QUARTZ_MODE_LCD;
-  draw_quartz_headline(
-      ui_quartz_status_text(s.streaming, s.standalone, q.mode, q.state, q.inhibition),
-      q.rate_valid, q.rate_s_day);
+  draw_quartz_headline(ui_quartz_status_text(s.streaming, s.standalone, q.mode,
+                                             q.state, q.inhibition),
+                       q.rate_valid, q.rate_s_day);
 
   char v[16];
   /* ref_hz is 0 until the LCD pattern search succeeds: shows "--". */

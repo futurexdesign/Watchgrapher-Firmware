@@ -44,7 +44,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define NMEA_MAX_LEN 96u /* NMEA limit is 82 incl. "$" and CRLF */
+#define NMEA_MAX_LEN    96u /* NMEA limit is 82 incl. "$" and CRLF */
 #define NMEA_MAX_FIELDS 24u /* GSV 4.1: 1 + 3 + 4*4 + 1 = 21 */
 
 /** Bits returned by {@link nmea_feed}. */
@@ -91,9 +91,9 @@ typedef struct {
   bool in_sentence;
 
   /* Latest RMC. */
-  bool rmc_valid;     /**< Status 'A' and mode (if present) not 'N'. */
-  bool time_valid;    /**< UTC date and time parsed (needs a date >= 2020). */
-  uint32_t unix_s;    /**< UTC seconds of the last RMC with valid time. */
+  bool rmc_valid;  /**< Status 'A' and mode (if present) not 'N'. */
+  bool time_valid; /**< UTC date and time parsed (needs a date >= 2020). */
+  uint32_t unix_s; /**< UTC seconds of the last RMC with valid time. */
 
   /* Latest GGA. */
   uint8_t gga_quality; /**< 0 = no fix, 1 = GPS, 2 = DGPS, ... */
@@ -131,9 +131,12 @@ typedef struct {
 static inline void nmea_init(nmea_t *n) { memset(n, 0, sizeof(*n)); }
 
 static inline int nmea_hex(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
   return -1;
 }
 
@@ -141,15 +144,18 @@ static inline int nmea_hex(char c) {
 static inline int32_t nmea_digits(const char *s, size_t len) {
   int32_t v = 0;
   for (size_t i = 0; i < len; i++) {
-    if (s[i] < '0' || s[i] > '9') return -1;
+    if (s[i] < '0' || s[i] > '9')
+      return -1;
     v = v * 10 + (s[i] - '0');
   }
   return v;
 }
 
-/** Leading unsigned integer of a field (stops at '.' or end), or -1 if empty. */
+/** Leading unsigned integer of a field (stops at '.' or end), or -1 if empty.
+ */
 static inline int32_t nmea_uint(const char *s) {
-  if (!s || *s < '0' || *s > '9') return -1;
+  if (!s || *s < '0' || *s > '9')
+    return -1;
   int32_t v = 0;
   while (*s >= '0' && *s <= '9') {
     v = v * 10 + (*s - '0');
@@ -160,11 +166,13 @@ static inline int32_t nmea_uint(const char *s) {
 
 /** Small decimal like "1.27" (no exponent), or -1 if empty / malformed. */
 static inline float nmea_float(const char *s) {
-  if (!s || !*s) return -1.f;
+  if (!s || !*s)
+    return -1.f;
   float v = 0.f, scale = 0.f;
   for (; *s; s++) {
     if (*s == '.') {
-      if (scale != 0.f) return -1.f;
+      if (scale != 0.f)
+        return -1.f;
       scale = 1.f;
     } else if (*s >= '0' && *s <= '9') {
       if (scale != 0.f) {
@@ -185,23 +193,30 @@ static inline int32_t nmea_days_from_civil(int32_t y, uint32_t m, uint32_t d) {
   y -= m <= 2u;
   const int32_t era = (y >= 0 ? y : y - 399) / 400;
   const uint32_t yoe = (uint32_t)(y - era * 400);
-  const uint32_t doy = (153u * (m + (m > 2u ? (uint32_t)-3 : 9u)) + 2u) / 5u + d - 1u;
+  const uint32_t doy =
+      (153u * (m + (m > 2u ? (uint32_t)-3 : 9u)) + 2u) / 5u + d - 1u;
   const uint32_t doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
   return era * 146097 + (int32_t)doe - 719468;
 }
 
 /** Parses "hhmmss[.ss]" + "ddmmyy" into UNIX seconds; false if malformed. */
-static inline bool nmea_parse_datetime(const char *t, const char *d, uint32_t *out) {
-  if (strlen(t) < 6u || strlen(d) != 6u) return false;
-  const int32_t hh = nmea_digits(t, 2), mi = nmea_digits(t + 2, 2), ss = nmea_digits(t + 4, 2);
-  const int32_t dd = nmea_digits(d, 2), mo = nmea_digits(d + 2, 2), yy = nmea_digits(d + 4, 2);
-  if (hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 60 || dd < 1 || dd > 31 ||
-      mo < 1 || mo > 12 || yy < 0) {
+static inline bool nmea_parse_datetime(const char *t, const char *d,
+                                       uint32_t *out) {
+  if (strlen(t) < 6u || strlen(d) != 6u)
+    return false;
+  const int32_t hh = nmea_digits(t, 2), mi = nmea_digits(t + 2, 2),
+                ss = nmea_digits(t + 4, 2);
+  const int32_t dd = nmea_digits(d, 2), mo = nmea_digits(d + 2, 2),
+                yy = nmea_digits(d + 4, 2);
+  if (hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 60 || dd < 1 ||
+      dd > 31 || mo < 1 || mo > 12 || yy < 0) {
     return false;
   }
-  /* Two-digit year: 80..99 → 19xx (also what a GPS week-rollover bug looks like). */
+  /* Two-digit year: 80..99 → 19xx (also what a GPS week-rollover bug looks
+   * like). */
   const int32_t year = yy >= 80 ? 1900 + yy : 2000 + yy;
-  if (year < 2020) return false;
+  if (year < 2020)
+    return false;
   const int32_t days = nmea_days_from_civil(year, (uint32_t)mo, (uint32_t)dd);
   *out = (uint32_t)days * 86400u + (uint32_t)(hh * 3600 + mi * 60 + ss);
   return true;
@@ -513,7 +528,8 @@ static inline unsigned nmea_line(nmea_t *n) {
     return 0;
   }
   uint8_t sum = 0;
-  for (char *p = s; p < star; p++) sum ^= (uint8_t)*p;
+  for (char *p = s; p < star; p++)
+    sum ^= (uint8_t)*p;
   if (sum != (uint8_t)(nmea_hex(star[1]) * 16 + nmea_hex(star[2]))) {
     n->checksum_errors++;
     return 0;
@@ -530,17 +546,20 @@ static inline unsigned nmea_line(nmea_t *n) {
       f[nf++] = p + 1;
     }
   }
-  if (strlen(f[0]) != 5u) return 0; /* "GNRMC": talker + type */
+  if (strlen(f[0]) != 5u)
+    return 0; /* "GNRMC": talker + type */
   const char *type = f[0] + 2;
 
   if (strcmp(type, "RMC") == 0 && nf >= 10u) {
     bool valid = f[2][0] == 'A';
-    if (nf >= 13u && f[12][0] == 'N') valid = false; /* mode: not valid */
+    if (nf >= 13u && f[12][0] == 'N')
+      valid = false; /* mode: not valid */
     n->gsa_new_epoch = true;
     n->rmc_valid = valid;
     uint32_t t = 0;
     n->time_valid = nmea_parse_datetime(f[1], f[9], &t);
-    if (n->time_valid) n->unix_s = t;
+    if (n->time_valid)
+      n->unix_s = t;
     return NMEA_GOT_RMC;
   }
   if (strcmp(type, "GGA") == 0 && nf >= 9u) {
@@ -588,7 +607,8 @@ static inline unsigned nmea_feed(nmea_t *n, char c) {
     n->len = 0;
     return 0;
   }
-  if (!n->in_sentence) return 0;
+  if (!n->in_sentence)
+    return 0;
   if (c == '\r' || c == '\n') {
     n->in_sentence = false;
     n->buf[n->len] = '\0';

@@ -3,7 +3,8 @@
  * @brief Host test for the least-squares beat timing fit.
  *
  * Build and run:
- *   c++ -std=c++17 -Iinclude tests/test_beat_fit.cpp src/mechanical/beat_fit.cpp -o /tmp/t && /tmp/t
+ *   c++ -std=c++17 -Iinclude tests/test_beat_fit.cpp
+ * src/mechanical/beat_fit.cpp -o /tmp/t && /tmp/t
  */
 
 #include "mechanical/beat_fit.h"

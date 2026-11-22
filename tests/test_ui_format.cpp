@@ -195,41 +195,57 @@ int main() {
   eq(ui_quartz_clip_hint(DSP_QUARTZ_MODE_FORK), "CLIP: open JP1");
   eq(ui_quartz_clip_hint(DSP_QUARTZ_MODE_LCD), "CLIP: open JP2");
   for (int m = 0; m < DSP_QUARTZ_MODE_COUNT; m++) {
-    assert(std::strlen(ui_quartz_clip_hint(static_cast<dsp_quartz_mode_t>(m))) <= kUiStatusMaxChars);
+    assert(std::strlen(ui_quartz_clip_hint(
+               static_cast<dsp_quartz_mode_t>(m))) <= kUiStatusMaxChars);
   }
 
   {
     const auto M = DSP_QUARTZ_MODE_MOTOR;
     const auto MEAS = DSP_QUARTZ_STATE_MEASURING;
-    eq(ui_quartz_status_text(false, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED), "no host stream");
-    eq(ui_quartz_status_text(false, true, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED), "stopped");
-    eq(ui_quartz_status_text(false, false, M, DSP_QUARTZ_STATE_DONE, DSP_QUARTZ_INHIB_CORRECTED),
+    eq(ui_quartz_status_text(false, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
+       "no host stream");
+    eq(ui_quartz_status_text(false, true, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
+       "stopped");
+    eq(ui_quartz_status_text(false, false, M, DSP_QUARTZ_STATE_DONE,
+                             DSP_QUARTZ_INHIB_CORRECTED),
        "corrected");
-    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_WAIT_TIMEBASE, DSP_QUARTZ_INHIB_NONE),
+    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_WAIT_TIMEBASE,
+                             DSP_QUARTZ_INHIB_NONE),
        "clock check...");
-    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_UNSUPPORTED_RATE, DSP_QUARTZ_INHIB_NONE),
+    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_UNSUPPORTED_RATE,
+                             DSP_QUARTZ_INHIB_NONE),
        "unsupported rate");
-    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_ACQUIRING, DSP_QUARTZ_INHIB_NONE),
+    eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_ACQUIRING,
+                             DSP_QUARTZ_INHIB_NONE),
        "acquiring...");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_NONE), "acquiring...");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_NO_JUMP_LONG_GATE), "no inhibition");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_MAY_INCLUDE_INHIBITION),
+    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_NONE),
+       "acquiring...");
+    eq(ui_quartz_status_text(true, false, M, MEAS,
+                             DSP_QUARTZ_INHIB_NO_JUMP_LONG_GATE),
+       "no inhibition");
+    eq(ui_quartz_status_text(true, false, M, MEAS,
+                             DSP_QUARTZ_INHIB_MAY_INCLUDE_INHIBITION),
        "may incl. inhib.");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_NEED_ONE_MORE_CYCLE),
+    eq(ui_quartz_status_text(true, false, M, MEAS,
+                             DSP_QUARTZ_INHIB_NEED_ONE_MORE_CYCLE),
        "need 1 more cycle");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTION_PENDING), "correcting...");
-    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED), "corrected");
-    eq(ui_quartz_status_text(true, false, DSP_QUARTZ_MODE_LCD, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
+    eq(ui_quartz_status_text(true, false, M, MEAS,
+                             DSP_QUARTZ_INHIB_CORRECTION_PENDING),
+       "correcting...");
+    eq(ui_quartz_status_text(true, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
+       "corrected");
+    eq(ui_quartz_status_text(true, false, DSP_QUARTZ_MODE_LCD, MEAS,
+                             DSP_QUARTZ_INHIB_CORRECTED),
        "measuring");
     /* Every combination fits one size-1 row. */
     for (int st = 0; st <= 3; st++) {
       for (int m = 0; m < DSP_QUARTZ_MODE_COUNT; m++) {
         for (int s = 0; s < DSP_QUARTZ_STATE_COUNT; s++) {
           for (int i = 0; i < DSP_QUARTZ_INHIB_COUNT; i++) {
-            const char *t = ui_quartz_status_text((st & 1) != 0, (st & 2) != 0,
-                                                  static_cast<dsp_quartz_mode_t>(m),
-                                                  static_cast<dsp_quartz_state_t>(s),
-                                                  static_cast<dsp_quartz_inhibition_t>(i));
+            const char *t = ui_quartz_status_text(
+                (st & 1) != 0, (st & 2) != 0, static_cast<dsp_quartz_mode_t>(m),
+                static_cast<dsp_quartz_state_t>(s),
+                static_cast<dsp_quartz_inhibition_t>(i));
             assert(t != nullptr && std::strlen(t) <= kUiStatusMaxChars);
           }
         }

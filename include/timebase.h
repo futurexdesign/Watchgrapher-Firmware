@@ -70,7 +70,8 @@ typedef enum {
 
 /** One satellite of {@link timebase_gps_t}. */
 typedef struct {
-  uint8_t sys;  /**< nmea_sys_t (1 GPS, 2 GLONASS, 3 Galileo, 4 BeiDou, 5 QZSS, 0 ?). */
+  uint8_t sys; /**< nmea_sys_t (1 GPS, 2 GLONASS, 3 Galileo, 4 BeiDou, 5 QZSS, 0
+                  ?). */
   uint16_t prn; /**< Normalised PRN. */
   int8_t el;    /**< Elevation degrees, -1 unknown. */
   int16_t az;   /**< Azimuth degrees, -1 unknown. */
@@ -78,21 +79,22 @@ typedef struct {
   bool used;    /**< In the current position solution (GSA). */
 } timebase_gps_sat_t;
 
-/** Detailed GPS state for the control plane / CLI (see {@link timebase_gps_get}). */
+/** Detailed GPS state for the control plane / CLI (see {@link
+ * timebase_gps_get}). */
 typedef struct {
-  bool fix;            /**< Same definition as timebase_info_t::gps_fix. */
-  uint8_t quality;     /**< GGA fix quality, 0 = none / stale. */
-  uint32_t utc_unix;   /**< UTC seconds, 0 = never received. */
-  int32_t age_ms;      /**< Since the last RMC, -1 = never. */
-  uint8_t sats_used;   /**< Satellites in use (GGA), 0 if stale. */
-  float hdop;          /**< GGA HDOP (GSA HDOP if GGA is stale), 0 = unknown. */
-  float pdop;          /**< GSA PDOP, 0 = unknown. */
-  float vdop;          /**< GSA VDOP, 0 = unknown. */
-  double lat;          /**< Degrees, + = N; valid if pos_valid. */
-  double lon;          /**< Degrees, + = E; valid if pos_valid. */
-  float alt_m;         /**< Altitude above MSL (m); valid if pos_valid. */
-  bool pos_valid;      /**< lat / lon / alt are current and valid. */
-  uint8_t n_sats;      /**< Valid entries of {@code sats}. */
+  bool fix;          /**< Same definition as timebase_info_t::gps_fix. */
+  uint8_t quality;   /**< GGA fix quality, 0 = none / stale. */
+  uint32_t utc_unix; /**< UTC seconds, 0 = never received. */
+  int32_t age_ms;    /**< Since the last RMC, -1 = never. */
+  uint8_t sats_used; /**< Satellites in use (GGA), 0 if stale. */
+  float hdop;        /**< GGA HDOP (GSA HDOP if GGA is stale), 0 = unknown. */
+  float pdop;        /**< GSA PDOP, 0 = unknown. */
+  float vdop;        /**< GSA VDOP, 0 = unknown. */
+  double lat;        /**< Degrees, + = N; valid if pos_valid. */
+  double lon;        /**< Degrees, + = E; valid if pos_valid. */
+  float alt_m;       /**< Altitude above MSL (m); valid if pos_valid. */
+  bool pos_valid;    /**< lat / lon / alt are current and valid. */
+  uint8_t n_sats;    /**< Valid entries of {@code sats}. */
   timebase_gps_sat_t sats[TIMEBASE_GPS_MAX_SATS];
 } timebase_gps_t;
 
@@ -183,10 +185,12 @@ void timebase_get(timebase_info_t *out);
  */
 void timebase_log_snapshot(timebase_log_t *out);
 
-/** @return True if a log entry is staged in RAM but not yet committed to flash. */
+/** @return True if a log entry is staged in RAM but not yet committed to flash.
+ */
 bool timebase_log_pending(void);
 
-/** @return GPS UTC (UNIX s) of the last successful log write, 0 = none / unknown. */
+/** @return GPS UTC (UNIX s) of the last successful log write, 0 = none /
+ * unknown. */
 uint32_t timebase_log_last_write_unix(void);
 
 /**

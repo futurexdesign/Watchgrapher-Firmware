@@ -152,8 +152,9 @@ uint32_t g_log_last_write_unix = 0;
 uint32_t g_log_attempt_ms = 0;
 uint32_t g_log_retry_ms = 0; /**< Minimum spacing for the next attempt. */
 bool g_log_attempted = false;
-constexpr uint32_t kLogAttemptMs = 10000u; /**< After a deferral-free attempt. */
-constexpr uint32_t kLogRetryMs = 60000u;   /**< After a failed / busy attempt. */
+constexpr uint32_t kLogAttemptMs =
+    10000u;                              /**< After a deferral-free attempt. */
+constexpr uint32_t kLogRetryMs = 60000u; /**< After a failed / busy attempt. */
 
 /** Stages {@code log} in the TBLOG region (no commit). */
 bool stage_log(const timebase_log_t &log) {
@@ -267,7 +268,8 @@ void gps_poll() {
       g_gps_line_errors++;
       continue;
     }
-    const unsigned got = nmea_feed_at(&g_nmea, static_cast<char>(dr & 0xFFu), now);
+    const unsigned got =
+        nmea_feed_at(&g_nmea, static_cast<char>(dr & 0xFFu), now);
     if (got & NMEA_GOT_RMC) {
       g_rmc_ms = now ? now : 1u;
       if (g_nmea.time_valid) {
@@ -311,9 +313,9 @@ PIO g_pps_pio = nullptr;
 uint g_pps_sm = 0;
 bool g_pps_ok = false;
 bool g_pps_locked = false;
-bool g_pps_lock_active = false;  /**< Lock streak running. */
+bool g_pps_lock_active = false;   /**< Lock streak running. */
 uint32_t g_pps_lock_start_ms = 0; /**< millis() when the streak began. */
-uint32_t g_pps_eval_ms = 0;      /**< Last log-policy evaluation. */
+uint32_t g_pps_eval_ms = 0;       /**< Last log-policy evaluation. */
 uint32_t g_pps_last_good_ms = 0;
 uint32_t g_pps_no_fix = 0; /**< Pulses discarded because GPS had no fix. */
 pps_filter_t g_pps;
@@ -585,7 +587,8 @@ timebase_save_result_t timebase_log_clear_saved(void) {
   }
   const flash_store_commit_result_t cr = flash_store_commit_paused();
   if (cr != FLASH_STORE_COMMIT_OK) {
-    (void)stage_log(g_log); /* keep the old log; do not leave the clear staged */
+    (void)stage_log(
+        g_log); /* keep the old log; do not leave the clear staged */
     return cr == FLASH_STORE_COMMIT_BUSY ? TIMEBASE_SAVE_BUSY
                                          : TIMEBASE_SAVE_FAILED;
   }

@@ -17,7 +17,6 @@
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
-#include <hardware/timer.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -27,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <hardware/timer.h>
 
 namespace {
 
@@ -479,14 +479,22 @@ int encode_timing(char *dst, size_t dstlen, int off) {
       "\"underruns\":%lu,\"shortWrites\":%lu,\"ringMin\":%lu,\"ringMax\":%lu,"
       "\"quartzBlockUsLast\":%lu,\"quartzBlockUsMean\":%lu,"
       "\"quartzBlockUsMax\":%lu,\"quartzBlocks\":%lu}",
-      static_cast<unsigned long>(t.dsp_block_us_last), static_cast<unsigned long>(t.dsp_block_us_mean),
-      static_cast<unsigned long>(t.dsp_block_us_max), static_cast<unsigned long>(t.dsp_block_budget_us),
-      static_cast<unsigned long>(t.dsp_block_samples), static_cast<unsigned long>(t.dsp_blocks),
-      static_cast<unsigned long>(t.loop_us_last), static_cast<unsigned long>(t.loop_us_mean),
-      static_cast<unsigned long>(t.loop_us_max), static_cast<unsigned long>(t.loop_count),
-      static_cast<unsigned long>(t.idle_us_per_s), static_cast<unsigned>(t.loop_busy_pct),
-      static_cast<unsigned long>(t.underruns), static_cast<unsigned long>(t.short_writes),
-      static_cast<unsigned long>(t.ring_min), static_cast<unsigned long>(t.ring_max),
+      static_cast<unsigned long>(t.dsp_block_us_last),
+      static_cast<unsigned long>(t.dsp_block_us_mean),
+      static_cast<unsigned long>(t.dsp_block_us_max),
+      static_cast<unsigned long>(t.dsp_block_budget_us),
+      static_cast<unsigned long>(t.dsp_block_samples),
+      static_cast<unsigned long>(t.dsp_blocks),
+      static_cast<unsigned long>(t.loop_us_last),
+      static_cast<unsigned long>(t.loop_us_mean),
+      static_cast<unsigned long>(t.loop_us_max),
+      static_cast<unsigned long>(t.loop_count),
+      static_cast<unsigned long>(t.idle_us_per_s),
+      static_cast<unsigned>(t.loop_busy_pct),
+      static_cast<unsigned long>(t.underruns),
+      static_cast<unsigned long>(t.short_writes),
+      static_cast<unsigned long>(t.ring_min),
+      static_cast<unsigned long>(t.ring_max),
       static_cast<unsigned long>(t.quartz_block_us_last),
       static_cast<unsigned long>(t.quartz_block_us_mean),
       static_cast<unsigned long>(t.quartz_block_us_max),
@@ -924,7 +932,8 @@ int result_beats(const char *req, char *dst, size_t dstlen, int off) {
   return hid_json::encode_beats(dst, dstlen, off, g_beats, n, nullptr);
 }
 
-/** {@code getGps}: the {@code GpsInfo} object ({@link hid_json::encode_gps}). */
+/** {@code getGps}: the {@code GpsInfo} object ({@link hid_json::encode_gps}).
+ */
 int result_gps(const char *, char *dst, size_t dstlen, int off) {
   control_api_get_gps(&g_gps);
   return hid_json::encode_gps(dst, dstlen, off, g_gps);
@@ -943,14 +952,12 @@ int result_timebase_log(const char *req, char *dst, size_t dstlen, int off) {
   control_api_timebase_log(&g_tblog);
   return hid_json::encode_timebase_log(
       dst, dstlen, off, g_tblog, static_cast<uint32_t>(offset),
-      control_api_timebase_log_pending(),
-      control_api_timebase_log_delta_ppm(),
+      control_api_timebase_log_pending(), control_api_timebase_log_delta_ppm(),
       control_api_timebase_log_last_write_unix(), nullptr);
 }
 
 /** {@code clearTimebaseLog} reply: the (empty) log as offset 0. */
-int result_timebase_log_first(const char *, char *dst, size_t dstlen,
-                              int off) {
+int result_timebase_log_first(const char *, char *dst, size_t dstlen, int off) {
   return result_timebase_log("", dst, dstlen, off);
 }
 
@@ -1107,16 +1114,20 @@ int result_timebase(const char *, char *dst, size_t dstlen, int off) {
       static_cast<double>(tb.ppm), timebase_source_name(tb.source),
       static_cast<double>(tb.cal_ppm), timebase_source_name(tb.cal_source),
       static_cast<unsigned long>(tb.cal_date_unix),
-      static_cast<unsigned long>(tb.cal_duration_s), tb.cal_saved ? "true" : "false",
-      static_cast<double>(tb.log_delta_ppm), tb.log_pending ? "true" : "false",
-      tb.pps_enabled ? "true" : "false", tb.pps_locked ? "true" : "false",
-      static_cast<double>(tb.pps_ppm), static_cast<unsigned long>(tb.pps_pulses),
-      static_cast<unsigned long>(tb.pps_good), static_cast<unsigned long>(tb.pps_rejects),
-      static_cast<unsigned long>(tb.pps_no_fix), tb.gps_enabled ? "true" : "false",
-      tb.gps_fix ? "true" : "false", tb.gps_quality, tb.gps_sats,
-      static_cast<double>(tb.gps_hdop), static_cast<unsigned long>(tb.gps_utc_unix),
+      static_cast<unsigned long>(tb.cal_duration_s),
+      tb.cal_saved ? "true" : "false", static_cast<double>(tb.log_delta_ppm),
+      tb.log_pending ? "true" : "false", tb.pps_enabled ? "true" : "false",
+      tb.pps_locked ? "true" : "false", static_cast<double>(tb.pps_ppm),
+      static_cast<unsigned long>(tb.pps_pulses),
+      static_cast<unsigned long>(tb.pps_good),
+      static_cast<unsigned long>(tb.pps_rejects),
+      static_cast<unsigned long>(tb.pps_no_fix),
+      tb.gps_enabled ? "true" : "false", tb.gps_fix ? "true" : "false",
+      tb.gps_quality, tb.gps_sats, static_cast<double>(tb.gps_hdop),
+      static_cast<unsigned long>(tb.gps_utc_unix),
       tb.gps_age_ms == 0xFFFFFFFFu ? -1L : static_cast<long>(tb.gps_age_ms),
-      static_cast<unsigned long>(tb.gps_sentences), static_cast<unsigned long>(tb.gps_errors),
+      static_cast<unsigned long>(tb.gps_sentences),
+      static_cast<unsigned long>(tb.gps_errors),
       static_cast<unsigned long>(tb.gps_overruns));
 }
 
@@ -1152,8 +1163,7 @@ bool apply_set_timebase(int64_t id, const char *req) {
     json_get_double(req, "dateUnix", &date);
     json_get_double(req, "durationS", &dur);
     if (!(std::fabs(ppm) <= static_cast<double>(TIMEBASE_PPM_MAX)) ||
-        date < 0.0 || date > 4294967295.0 || dur < 0.0 ||
-        dur > 4294967295.0) {
+        date < 0.0 || date > 4294967295.0 || dur < 0.0 || dur > 4294967295.0) {
       send_error(id, "badParam", "ppm must be -1000..1000");
       return false;
     }
@@ -1178,9 +1188,9 @@ bool apply_set_timebase(int64_t id, const char *req) {
     }
   }
   /* With logDeltaPpm alone the stored calibration is left untouched. */
-  if (has_ppm && !timebase_set(static_cast<float>(ppm), src,
-                               static_cast<uint32_t>(date),
-                               static_cast<uint32_t>(dur))) {
+  if (has_ppm &&
+      !timebase_set(static_cast<float>(ppm), src, static_cast<uint32_t>(date),
+                    static_cast<uint32_t>(dur))) {
     send_error(id, "badParam", "ppm must be -1000..1000");
     return false;
   }
@@ -1460,7 +1470,8 @@ void push_notify_events(void) {
     return;
   }
   dsp_event_t *ev = g_ev_scratch;
-  const auto n = control_api_copy_events(ev, DSP_EVENT_LOG_CAP); /* newest first */
+  const auto n =
+      control_api_copy_events(ev, DSP_EVENT_LOG_CAP); /* newest first */
   if (n == 0) {
     return;
   }
