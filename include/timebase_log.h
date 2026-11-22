@@ -154,6 +154,8 @@ static inline uint32_t timebase_log_crc32(const void *data, size_t n) {
 
 /** Empties the log (all bytes zero, so flash images are deterministic). */
 static inline void timebase_log_init(timebase_log_t *log) {
+  /* Zero bits are 0.0f on IEEE-754; memset also zeroes padding. */
+  // cppcheck-suppress memsetClassFloat
   memset(log, 0, sizeof(*log));
 }
 
@@ -273,6 +275,8 @@ timebase_log_pps_decision(const timebase_log_t *log,
  */
 static inline void timebase_log_encode(const timebase_log_t *log,
                                        timebase_log_record_t *out) {
+  /* Zeroes padding too, so the flash record is byte-deterministic. */
+  // cppcheck-suppress memsetClassFloat
   memset(out, 0, sizeof(*out));
   out->magic = TIMEBASE_LOG_MAGIC;
   out->version = TIMEBASE_LOG_VERSION;

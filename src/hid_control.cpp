@@ -46,10 +46,13 @@ constexpr uint8_t kTimingHzMax = 5;
 constexpr uint8_t kQuartzHzMax = 5;
 
 /* Report descriptor: Usage Page 0xFFA0, Usage 0x0001, Report ID 1, 63-byte IO. */
+// clang-format off
 uint8_t const kHidReportDesc[] = {
     HID_USAGE_PAGE_N(0xFFA0, 2),
     HID_USAGE(0x01),
     HID_COLLECTION(HID_COLLECTION_APPLICATION),
+    /* TinyUSB's HID_* macros are not on cppcheck's include path. */
+    // cppcheck-suppress unknownMacro
     HID_REPORT_ID(1) HID_USAGE(0x02),
     HID_LOGICAL_MIN(0x00),
     HID_LOGICAL_MAX_N(0xff, 2),
@@ -63,6 +66,7 @@ uint8_t const kHidReportDesc[] = {
     HID_REPORT_COUNT(63),
     HID_OUTPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
     HID_COLLECTION_END};
+// clang-format on
 
 Adafruit_USBD_HID g_hid;
 

@@ -128,7 +128,11 @@ typedef struct {
   uint32_t checksum_errors; /**< Missing / bad checksum or overlong line. */
 } nmea_t;
 
-static inline void nmea_init(nmea_t *n) { memset(n, 0, sizeof(*n)); }
+static inline void nmea_init(nmea_t *n) {
+  /* Zero bits are 0.0f on IEEE-754. */
+  // cppcheck-suppress memsetClassFloat
+  memset(n, 0, sizeof(*n));
+}
 
 static inline int nmea_hex(char c) {
   if (c >= '0' && c <= '9')

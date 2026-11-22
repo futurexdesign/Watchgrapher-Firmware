@@ -44,8 +44,11 @@ bool in_range(uint32_t offset, size_t len) {
 
 /** Compares the RAM image with the flash sector (XIP read). */
 bool flash_matches_image() {
+  /* _EEPROM_start is a linker symbol marking the start of the flash sector,
+   * not a single byte, so indexing past it is intended. */
   const uint8_t *flash = &_EEPROM_start;
   for (uint32_t i = 0; i < FLASH_STORE_SIZE; i++) {
+    // cppcheck-suppress objectIndex
     if (flash[i] != EEPROM.read(static_cast<int>(i))) {
       return false;
     }
