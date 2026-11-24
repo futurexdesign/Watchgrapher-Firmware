@@ -27,6 +27,10 @@ constexpr dsp_param_info_t kBeatParams[] = {
     {"cal_ppm", "calPpm", false},
     {"window_s", "windowS", true},
     {"avg_s", "avgS", true},
+    /* 0 = unlock (default), 1 = drop timed by the beat template. */
+    {"timing_landmark", "timingLandmark", true},
+    /* Seconds after a cut before samples enter the averages (0..60). */
+    {"settle_s", "settleS", true},
 };
 constexpr dsp_param_info_t kGateParams[] = {
     {"floor_db", "floorDb", true},
@@ -38,11 +42,6 @@ constexpr dsp_param_info_t kAgcParams[] = {
     {"target", "target", true},
     {"tau_s", "tauS", true},
     {"gain_db", "gainDb", false},
-};
-constexpr dsp_param_info_t kMatchParams[] = {
-    {"threshold", "threshold", true},
-    {"learn", "learn", true},
-    {"score", "score", false},
 };
 constexpr dsp_param_info_t kSpectrumParams[] = {{"stride", "stride", true}};
 
@@ -76,8 +75,6 @@ constexpr dsp_block_info_t kBlocks[] = {
      count_of(kNotchParams), DSP_GROUP_PROCESS, 1},
     {DSP_BLOCK_AGC, "agc", "agc", true, kAgcParams, count_of(kAgcParams),
      DSP_GROUP_PROCESS, 6},
-    {DSP_BLOCK_MATCHED_FILTER, "matched_filter", "matchedFilter", false,
-     kMatchParams, count_of(kMatchParams), DSP_GROUP_ANALYSIS, 1},
     {DSP_BLOCK_FIR_BANK, "fir_bank", "firBank", true, kPresetParams,
      count_of(kPresetParams), DSP_GROUP_PROCESS, 3},
     {DSP_BLOCK_SPECTRUM, "spectrum", "spectrum", false, kSpectrumParams,
@@ -98,9 +95,8 @@ static_assert(ids_in_order(), "kBlocks must be ordered by dsp_block_id_t");
  * Pipeline graph. Derived from dsp_graph_process (dsp_graph.cpp):
  *
  *   analyze(buf)       -- taps the RAW input block, never modifies it:
- *     levelMeter(pre) -> matchedFilter -> spectrum -> noiseFloor
- *       -> eventDetect (tick_detect_block; reads noiseFloor and, when a
- *          template is learned, gates on the matchedFilter score)
+ *     levelMeter(pre) -> spectrum -> noiseFloor
+ *       -> eventDetect (tick_detect_block; reads noiseFloor)
  *       eventDetect close callback -> eventLog (ring) and beatRate (beat
  *          analysis), in that order. They are siblings, both fed by
  *          eventDetect; beatRate does NOT read eventLog.
@@ -113,9 +109,6 @@ static_assert(ids_in_order(), "kBlocks must be ordered by dsp_block_id_t");
  * levelMeter is one block that measures both ends: pre on "input" and post
  * on the end of the chain ("limiter"), so its inputs are {input, limiter}.
  * That is not a cycle: the post tap only reads, and levelMeter feeds nothing.
- * The matchedFilter also learns from the closed event's wave (feedback from
- * eventDetect to matchedFilter, one event late); that is state feedback,
- * not sample flow, and is omitted to keep the graph acyclic.
  *
  * quartz: the engine reads the raw LEFT/RIGHT codes of the same DMA block as
  * "input" (pcm1808_capture.cpp), after the block is queued for USB, and
@@ -123,7 +116,7 @@ static_assert(ids_in_order(), "kBlocks must be ordered by dsp_block_id_t");
  */
 constexpr const char *kInInput[] = {"input"};
 constexpr const char *kInLevel[] = {"input", "limiter"};
-constexpr const char *kInEvent[] = {"input", "noiseFloor", "matchedFilter"};
+constexpr const char *kInEvent[] = {"input", "noiseFloor"};
 constexpr const char *kInFromEvent[] = {"eventDetect"};
 constexpr const char *kInNotch[] = {"input"};
 constexpr const char *kInFilter[] = {"notch"};
@@ -144,7 +137,6 @@ constexpr dsp_pipeline_node_t node(const char *key, dsp_node_kind_t kind,
 constexpr dsp_pipeline_node_t kNodes[] = {
     {"input", DSP_NODE_SOURCE, 0, nullptr, 0}, /* raw capture, no inputs */
     node("levelMeter", DSP_NODE_ANALYSIS, 0, kInLevel),
-    node("matchedFilter", DSP_NODE_ANALYSIS, 1, kInInput),
     node("spectrum", DSP_NODE_ANALYSIS, 2, kInInput),
     node("noiseFloor", DSP_NODE_ANALYSIS, 3, kInInput),
     node("eventDetect", DSP_NODE_ANALYSIS, 4, kInEvent),
@@ -179,6 +171,46 @@ const char *dsp_block_name(dsp_block_id_t id) {
 const char *dsp_block_json_name(dsp_block_id_t id) {
   const auto *b = dsp_block_info(id);
   return b ? b->json_name : "unknown";
+}
+
+const char *dsp_beat_state_name(dsp_beat_state_t s) {
+  switch (s) {
+  case DSP_BEAT_STATE_LOCKING:
+    return "locking";
+  case DSP_BEAT_STATE_LOCKED:
+    return "locked";
+  case DSP_BEAT_STATE_NO_WATCH:
+    return "noWatch";
+  case DSP_BEAT_STATE_LISTENING:
+  default:
+    return "listening";
+  }
+}
+
+const char *dsp_cut_reason_name(dsp_cut_reason_t r) {
+  switch (r) {
+  case DSP_CUT_RESET:
+    return "reset";
+  case DSP_CUT_GAP:
+    return "gap";
+  case DSP_CUT_JUMP:
+    return "jump";
+  case DSP_CUT_RATE:
+    return "rate";
+  case DSP_CUT_CLOCK:
+    return "clock";
+  case DSP_CUT_LOCK_LOST:
+    return "lockLost";
+  case DSP_CUT_NO_WATCH:
+    return "noWatch";
+  case DSP_CUT_NONE:
+  default:
+    return "none";
+  }
+}
+
+const char *dsp_be_source_name(dsp_be_source_t s) {
+  return s == DSP_BE_SOURCE_DROP ? "drop" : "unlock";
 }
 
 bool dsp_block_is_process(dsp_block_id_t id) {

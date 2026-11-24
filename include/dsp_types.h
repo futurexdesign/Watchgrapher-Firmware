@@ -65,7 +65,6 @@ typedef enum {
   DSP_BLOCK_SOFT_GATE,
   DSP_BLOCK_NOTCH,
   DSP_BLOCK_AGC,
-  DSP_BLOCK_MATCHED_FILTER,
   DSP_BLOCK_FIR_BANK,
   DSP_BLOCK_SPECTRUM,
   DSP_BLOCK_COUNT
@@ -162,11 +161,82 @@ typedef struct {
   float rate_s_day;    /**< Daily rate deviation (s/d). */
   float beat_error_ms; /**< Beat error / repère (ms). */
   float amplitude_deg; /**< Balance amplitude (degrees). */
+  /**
+   * Beat-error angle (degrees): amplitude × π × vph / 7200 × BE (s), so beat
+   * errors of different amplitudes compare on one scale (opentimegrapher M5).
+   * Rolling: mean of the per-tick angles where both BE and amplitude were
+   * valid.
+   */
+  float beat_error_angle_deg;
   uint32_t samples;    /**< Instant: 0/1. Rolling: count contributing ticks. */
   bool rate_valid;
   bool beat_error_valid;
   bool amplitude_valid;
+  /** True when beat error and amplitude are valid (and a lock exists). */
+  bool beat_error_angle_valid;
 } dsp_beat_timing_window_t;
+
+/**
+ * Why the beat analysis started a new stretch (a "cut"). Nothing is fitted or
+ * averaged across a cut: the rate fit, the rolling means, the amplitude
+ * history and, when the nominal rate changed, the stage-B templates start
+ * empty. See {@code beat_analysis.h}.
+ */
+typedef enum {
+  /** No cut since the stream reset. */
+  DSP_CUT_NONE = 0,
+  /** Stream reset (capture start); not counted in {@code cuts}. */
+  DSP_CUT_RESET,
+  /** More than 2 s without an accepted beat. */
+  DSP_CUT_GAP,
+  /** Timing jump: consecutive beats off the current grid. */
+  DSP_CUT_JUMP,
+  /** The nominal A/h changed (another watch or rate). */
+  DSP_CUT_RATE,
+  /** Timebase correction or its verification changed. */
+  DSP_CUT_CLOCK,
+  /** The lock on a nominal rate was lost. */
+  DSP_CUT_LOCK_LOST,
+  /** The no-watch rule fired. */
+  DSP_CUT_NO_WATCH,
+} dsp_cut_reason_t;
+
+/**
+ * Coarse state of the beat analysis, for hosts and displays.
+ *
+ *   - {@code LISTENING}: no tick since the stream reset, or the capture rate
+ *     is unverified.
+ *   - {@code LOCKING}: ticks seen, but either no lock on a nominal rate or the
+ *     current stretch is shorter than 5 s (no rate or beat-error reading yet).
+ *   - {@code LOCKED}: locked and the current stretch spans at least 5 s
+ *     (readings exist; {@code settled} says whether they are final).
+ *   - {@code NO_WATCH}: the no-watch rule fired and no lock has returned.
+ *
+ * With the timing engine off (USB microphone mode) the state follows the lock
+ * alone: {@code LOCKED} when locked, {@code LOCKING} after the first tick
+ * without a lock, {@code LISTENING} before it. No stretch exists then, so the
+ * 5 s rule and {@code NO_WATCH} do not apply.
+ */
+typedef enum {
+  DSP_BEAT_STATE_LISTENING = 0,
+  DSP_BEAT_STATE_LOCKING,
+  DSP_BEAT_STATE_LOCKED,
+  DSP_BEAT_STATE_NO_WATCH,
+} dsp_beat_state_t;
+
+/**
+ * Where the reported beat error comes from.
+ *
+ *   - {@code UNLOCK}: the unlock landmark: the unlock-timed fit, or, in drop
+ *     mode, the median over 2 s shape windows of the drop beat error corrected
+ *     by each side's unlock-to-drop time.
+ *   - {@code DROP}: the drop-timed fit (drop mode with fewer than 3 usable
+ *     windows, or windows that disagree in sign beyond their spread).
+ */
+typedef enum {
+  DSP_BE_SOURCE_UNLOCK = 0,
+  DSP_BE_SOURCE_DROP,
+} dsp_be_source_t;
 
 /**
  * Escapement timing estimate from unlock-based intervals (Witschi-style).
@@ -202,18 +272,98 @@ typedef struct {
    */
   bool timebase_ok;
   uint32_t rate_points; /**< Ticks in the rate fit window (0 = no fit). */
-  float jitter_us;      /**< RMS unlock-time residual about the fit (µs). */
+  float jitter_us;      /**< RMS residual about the fit (µs). */
+  /**
+   * Beats timed at the drop by the beat-template stage since the last stream
+   * reset ({@code timingLandmark = drop}); 0 with the unlock landmark.
+   */
+  uint32_t drop_timed_beats;
+  /**
+   * Beats that were to be timed at the drop but fell back to the unlock
+   * (template still learning, correlation below 0.4, or the beat outside the
+   * envelope ring) since the last stream reset. Such a beat keeps the unlock
+   * plus the side's mean lift once the fit runs on drop times.
+   */
+  uint32_t drop_fallbacks;
+  /** Analysis state (see {@link dsp_beat_state_t}). */
+  dsp_beat_state_t state;
+  /**
+   * The timing engine runs. False in USB microphone mode
+   * ({@link dsp_graph_set_analysis}): only tick detection and the A/h lock are
+   * live then ({@code locked}, {@code vph_raw}, {@code vph_nearest},
+   * {@code confidence}, {@code interval_samples}, {@code state}). Rate, beat
+   * error, amplitude and the rolling means are invalid and no beat records
+   * are produced. Reported as {@code analysis: "on" | "off"}.
+   */
+  bool analysis;
+  /**
+   * Cuts since the stream reset (the reset itself is not counted). A cut is
+   * counted only when it ended a stretch that had beats.
+   */
+  uint32_t cuts;
+  /** Reason of the latest cut; {@code DSP_CUT_RESET} after a stream reset. */
+  dsp_cut_reason_t last_cut;
+  /**
+   * Span of the current stretch (s): first to latest accepted beat since the
+   * last cut, on the corrected clock; 0 when no stretch is open. Rate and beat
+   * error are reported from 5 s on (provisional) and are {@code settled} from
+   * 10 s on.
+   */
+  float stretch_s;
+  /**
+   * The stretch spans at least 10 s: rate and beat error are no longer
+   * provisional. False before that and while unlocked. Hosts may grey out
+   * unsettled readings.
+   */
+  bool settled;
+  /**
+   * True once the fit runs on drop times ({@code timingLandmark = drop} and the
+   * handover has happened); false while it runs on unlock times. Reported as
+   * {@code timingSource}.
+   */
+  bool timing_drop;
+  /**
+   * Handovers from unlock to drop times since the stream reset (the fit
+   * continues across one; only the rolling beat-error samples are cleared).
+   */
+  uint32_t handovers;
   float cal_ppm;          /**< Sample-clock correction applied (ppm, + = fast). */
   const char *cal_source; /**< "none" / "manual" / "ntp" / "pps" (static string). */
 
   float rate_s_day;     /**< Instant daily rate (s/d); alias of instant.rate_s_day. */
   float beat_error_ms;  /**< Instant beat error (ms). */
   float amplitude_deg;  /**< Instant amplitude (degrees). */
+  /**
+   * Amplitude of the Tick and Tock side (degrees): median over the 2 s shape
+   * windows of the averaging span (drop mode only, {@code timingLandmark} 1).
+   * Tick is the side that comes late; see {@code beat_error_signed_ms}.
+   */
+  float amplitude_tick_deg;
+  float amplitude_tock_deg;
+  bool amplitude_tick_valid; /**< {@code amplitude_tick_deg} is a reading. */
+  bool amplitude_tock_valid; /**< {@code amplitude_tock_deg} is a reading. */
+  /** Windows of the span that gave an amplitude on both sides. */
+  uint32_t amplitude_windows_used;
+  /** Windows of the span that held any beat. */
+  uint32_t amplitude_windows_total;
+  /**
+   * Signed beat error (ms): positive when the Tick comes late. Tick is the side
+   * that came late over the first seconds of the watch and keeps that label
+   * until the nominal rate changes, so the value starts positive and can turn
+   * negative. Valid with {@code beat_error_valid}; its magnitude is
+   * {@code beat_error_ms}. Unlock mode: always the magnitude.
+   */
+  float beat_error_signed_ms;
+  dsp_be_source_t beat_error_source; /**< Where the beat error comes from. */
   float lift_angle_deg; /**< Configured lift angle λ used for amplitude. */
   float lift_time_ms;   /**< Latest unlock→drop lift time (ms). */
+  /** Instant beat-error angle (deg); same as instant.beat_error_angle_deg. */
+  float beat_error_angle_deg;
   bool rate_valid;
   bool beat_error_valid;
   bool amplitude_valid;
+  /** True when beat error and amplitude are valid and locked. */
+  bool beat_error_angle_valid;
 
   dsp_beat_timing_window_t instant; /**< Last computed tick set (same as top-level). */
   dsp_beat_timing_window_t avg_1s;  /**< Rolling ~1 s mean of instant values. */
@@ -232,7 +382,6 @@ typedef struct {
   float post_rms;
   float noise_floor;      /**< Event-detect noise EMA (float full-scale). */
   float agc_gain_db;      /**< Current slow-AGC gain in dB (0 if AGC off). */
-  float match_score;      /**< Latest matched-filter peak score (0 if unused). */
   uint32_t clip_count;    /**< Hard clamps at PCM24 full scale. */
   uint32_t limiter_count; /**< Soft clamps at ±1.0 in the limiter block. */
 } dsp_metrics_t;
@@ -280,14 +429,6 @@ typedef struct {
   uint32_t source_hz;
   bool valid;
 } dsp_spectrum_t;
-
-/** Matched-filter learning / score state. */
-typedef struct {
-  float score;         /**< Last block peak correlation (normalized). */
-  float template_peak; /**< Peak |sample| in learned template. */
-  uint32_t template_len;
-  bool learned;
-} dsp_matched_t;
 
 /** Why a process block was auto-ejected (or a fault was logged). */
 typedef enum {

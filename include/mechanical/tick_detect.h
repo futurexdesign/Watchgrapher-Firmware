@@ -9,7 +9,7 @@
  * {@link tick_detect_block} once per analysis block. The detector owns the
  * per-sample state machine:
  *
- *   - open when {@code |x| > thr_open} (unless vetoed by the matched filter),
+ *   - open when {@code |x| > thr_open},
  *     with the window start {@code preroll_ms} before the onset,
  *   - track peak, energy, and three-point local maxima ("pulses") with a
  *     ~0.75 ms refractory and a parabolic sub-sample vertex,
@@ -18,10 +18,6 @@
  *     below {@code max(thr_open, 0.25 × tick peak EMA)},
  *   - on close: unlock = first pulse, drop = loudest pulse, lift = drop −
  *     unlock, then report the event through the callback.
- *
- * The first {@link TICK_DETECT_WAVE_LEN} raw samples of the open window are
- * kept so the graph's matched filter can learn a template from them inside
- * the close callback ({@link tick_detect_wave}).
  *
  * Not thread-safe: call only from the core that runs the DSP graph.
  *
@@ -35,9 +31,6 @@
 
 #include <cstdint>
 
-/** Raw samples of each open window kept for matched-filter learning. */
-inline constexpr uint32_t TICK_DETECT_WAVE_LEN = 64u;
-
 /**
  * Per-block inputs from the graph. Every field is constant for the duration
  * of one {@link tick_detect_block} call.
@@ -48,28 +41,20 @@ struct tick_detect_block_params_t {
   float preroll_ms;   /**< Window start before the onset sample (ms). */
   float tail_ms;      /**< Time below the close threshold that ends it (ms). */
   uint32_t source_hz; /**< Analysis sample rate (Hz). */
-  /**
-   * Matched-filter veto: when {@code true} no new window may open in this
-   * block (filter enabled, template learned, block score below threshold).
-   */
-  bool open_veto;
 };
 
 /**
  * Close callback. Called once per accepted event, from inside
- * {@link tick_detect_block}, while {@link tick_detect_wave} still holds that
- * event's samples. {@code ev.confidence} is the detector's own
- * {@code min(1, peak / thr_open / 4)}; the graph blends in the matched-filter
- * score before logging.
+ * {@link tick_detect_block}. {@code ev.confidence} is
+ * {@code min(1, peak / thr_open / 4)}.
  *
  * @param ev Closed event with unlock / drop landmarks filled in.
  */
 using tick_detect_event_fn = void (*)(const dsp_event_t &ev);
 
 /**
- * Clears the detector state machine, captured wave, pulse list and the tick
- * peak EMA (back to 0.05 FS). Parameters live in the graph and are not
- * touched.
+ * Clears the detector state machine, pulse list and the tick peak EMA (back
+ * to 0.05 FS). Parameters live in the graph and are not touched.
  *
  * @see dsp_graph_init, dsp_graph_reset_stream
  */
@@ -94,15 +79,3 @@ void tick_detect_reset();
 void tick_detect_block(const float *x, uint32_t n, uint64_t base,
                        const tick_detect_block_params_t &params,
                        tick_detect_event_fn on_event);
-
-/**
- * Raw samples captured from the start of the current window (onset sample
- * first). Valid inside the {@link tick_detect_event_fn} callback; reset to
- * zero length when the window closes.
- *
- * @param n Receives the sample count (0..{@link TICK_DETECT_WAVE_LEN}); must
- *        not be {@code nullptr}.
- * @return Pointer to the internal buffer of {@link TICK_DETECT_WAVE_LEN}
- *         floats.
- */
-[[nodiscard]] const float *tick_detect_wave(uint32_t *n);

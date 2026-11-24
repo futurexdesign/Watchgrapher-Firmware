@@ -16,7 +16,7 @@
  * detector ({@code event_detect}, mechanical/tick_detect.h) and the timing
  * estimate ({@code beat_rate}, mechanical/beat_analysis.h). This file keeps
  * the generic parts they depend on: meters, noise floor, the event-detect
- * threshold (shared with soft_gate), the event log, and the matched filter.
+ * threshold (shared with soft_gate), and the event log.
  *
  * @see dsp_graph.h, control_api.cpp, mechanical/tick_detect.h,
  *      mechanical/beat_analysis.h
@@ -29,6 +29,7 @@
 #include "dsp_blocks.h"
 #include "mechanical/beat_analysis.h"
 #include "mechanical/tick_detect.h"
+#include "mechanical/tick_shape.h"
 #include "perf_timing.h"
 #if AUDIO_SOURCE == PCM1808
 #include "quartz/quartz_engine.h"
@@ -82,19 +83,6 @@ float g_gate_lin = 1.0f;
 float g_gate_floor_lin = 0.25f; /* -12 dB between ticks */
 float g_gate_attack_ms = 1.0f;
 float g_gate_release_ms = 40.0f;
-
-/* Matched filter (analysis). */
-constexpr uint32_t kMatchLen = 64u;
-static_assert(kMatchLen == TICK_DETECT_WAVE_LEN,
-              "matched-filter template learns from the detector's wave");
-float g_match_tmpl[kMatchLen];
-float g_match_hist[kMatchLen];
-float g_match_score = 0.f;
-float g_match_threshold = 0.35f;
-bool g_match_learned = false;
-bool g_match_learn = true;
-float g_match_tmpl_energy = 1.f;
-float g_match_tmpl_peak = 0.f;
 
 /* FIR bank (process). */
 constexpr uint32_t kFirTaps = 64u;
@@ -327,87 +315,6 @@ void design_fir(dsp_filter_preset_t preset) {
   g_fir_active = true;
 }
 
-void match_update_hist(const float *x, uint32_t n) {
-  if (n >= kMatchLen) {
-    memcpy(g_match_hist, x + (n - kMatchLen), kMatchLen * sizeof(float));
-    return;
-  }
-  memmove(g_match_hist, g_match_hist + n, (kMatchLen - n) * sizeof(float));
-  memcpy(g_match_hist + (kMatchLen - n), x, n * sizeof(float));
-}
-
-float match_score_block(const float *x, uint32_t n) {
-  if (!g_match_learned || g_match_tmpl_energy < 1e-12f) {
-    return 0.f;
-  }
-  float best = 0.f;
-  float window[kMatchLen];
-  /* Build contiguous view: hist tail + block (cap work). */
-  const uint32_t total = kMatchLen + n;
-  for (uint32_t i = 0; i + kMatchLen <= total; i++) {
-    for (uint32_t k = 0; k < kMatchLen; k++) {
-      uint32_t idx = i + k;
-      window[k] = (idx < kMatchLen) ? g_match_hist[idx] : x[idx - kMatchLen];
-    }
-    float dot = 0.f;
-    arm_dot_prod_f32(g_match_tmpl, window, kMatchLen, &dot);
-    float sc = fabsf(dot) / g_match_tmpl_energy;
-    if (sc > best) {
-      best = sc;
-    }
-  }
-  return best;
-}
-
-void match_learn_from_wave(void) {
-  uint32_t wave_n = 0;
-  const float *wave = tick_detect_wave(&wave_n);
-  if (!g_match_learn || wave_n < (kMatchLen / 4u)) {
-    return;
-  }
-  float tmp[kMatchLen];
-  memset(tmp, 0, sizeof(tmp));
-  uint32_t n = wave_n < kMatchLen ? wave_n : kMatchLen;
-  /* Center on peak inside wave. */
-  uint32_t peak_i = 0;
-  float peak = 0.f;
-  for (uint32_t i = 0; i < n; i++) {
-    float a = fabsf(wave[i]);
-    if (a > peak) {
-      peak = a;
-      peak_i = i;
-    }
-  }
-  auto start = static_cast<int32_t>(peak_i) - static_cast<int32_t>(kMatchLen / 2u);
-  for (uint32_t i = 0; i < kMatchLen; i++) {
-    auto src = start + static_cast<int32_t>(i);
-    tmp[i] = (src >= 0 && src < static_cast<int32_t>(n)) ? wave[src] : 0.f;
-  }
-  float energy = 0.f;
-  arm_power_f32(tmp, kMatchLen, &energy);
-  energy = sqrtf(fmaxf(energy, 1e-12f));
-  for (uint32_t i = 0; i < kMatchLen; i++) {
-    tmp[i] /= energy;
-  }
-  if (!g_match_learned) {
-    memcpy(g_match_tmpl, tmp, sizeof(tmp));
-    g_match_learned = true;
-  } else {
-    for (uint32_t i = 0; i < kMatchLen; i++) {
-      g_match_tmpl[i] = 0.9f * g_match_tmpl[i] + 0.1f * tmp[i];
-    }
-  }
-  arm_power_f32(g_match_tmpl, kMatchLen, &g_match_tmpl_energy);
-  g_match_tmpl_energy = sqrtf(fmaxf(g_match_tmpl_energy, 1e-12f));
-  g_match_tmpl_peak = 0.f;
-  for (uint32_t i = 0; i < kMatchLen; i++) {
-    float a = fabsf(g_match_tmpl[i]);
-    if (a > g_match_tmpl_peak) {
-      g_match_tmpl_peak = a;
-    }
-  }
-}
-
 void spectrum_push(const float *x, uint32_t n) {
   if (!g_en[DSP_BLOCK_SPECTRUM] || !g_rfft_ok) {
     return;
@@ -463,26 +370,7 @@ void spectrum_push(const float *x, uint32_t n) {
 }
 
 /**
- * Close callback for {@link tick_detect_block}: blends the matched-filter
- * score into the event confidence, logs the event and feeds the timing
- * analysis ({@link push_event}), then lets the matched filter learn from the
- * event's captured wave while {@link tick_detect_wave} still holds it.
- *
- * @param detected Closed event from the detector.
- */
-void on_tick_event(const dsp_event_t &detected) {
-  dsp_event_t ev = detected;
-  if (g_en[DSP_BLOCK_MATCHED_FILTER] && g_match_learned) {
-    ev.confidence = fminf(1.f, 0.5f * ev.confidence + 0.5f * g_match_score);
-  }
-  push_event(ev);
-  if (g_en[DSP_BLOCK_MATCHED_FILTER]) {
-    match_learn_from_wave();
-  }
-}
-
-/**
- * Analysis path: meters, noise EMA, matched-filter score, spectrum, then the
+ * Analysis path: meters, noise EMA, spectrum, then the
  * mechanical tick detector ({@link tick_detect_block}), which feeds the event
  * log and beat analysis through {@link on_tick_event}.
  *
@@ -508,11 +396,6 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
   g_pre_peak = fmaxf(g_pre_peak * 0.95f, peak);
   g_pre_rms_ema = 0.9f * g_pre_rms_ema + 0.1f * rms;
 
-  if (g_en[DSP_BLOCK_MATCHED_FILTER]) {
-    g_match_score = match_score_block(x, n);
-  } else {
-    g_match_score = 0.f;
-  }
   spectrum_push(x, n);
 
   if (g_en[DSP_BLOCK_NOISE_FLOOR] || g_en[DSP_BLOCK_EVENT_DETECT] ||
@@ -541,12 +424,12 @@ void analyze(const float *x, uint32_t n, uint64_t base) {
       g_preroll_ms,
       g_tail_ms,
       g_source_hz,
-      /* Matched-filter gate: a learned template must agree before opening. */
-      g_en[DSP_BLOCK_MATCHED_FILTER] && g_match_learned &&
-          g_match_score < g_match_threshold,
   };
-  tick_detect_block(x, n, base, params, on_tick_event);
-  match_update_hist(x, n);
+  /* Stage B envelope ring (timingLandmark = drop); before the detector so the
+   * ring already holds the samples of any event that closes in this block. */
+  tick_shape_push(x, n, base);
+  tick_detect_block(x, n, base, params, push_event);
+  beat_analysis_on_block_end();
 }
 
 /**
@@ -675,6 +558,8 @@ void quartz_hook_set_source_rate(uint32_t hz) {
 }
 /** @param ok Capture rate verified. */
 void quartz_hook_set_timebase(bool ok) { quartz::engine::set_timebase(ok); }
+/** @param on The engine measures (standalone) or not (USB microphone mode). */
+void quartz_hook_set_analysis(bool on) { quartz::engine::set_analysis(on); }
 
 #else
 
@@ -683,6 +568,7 @@ void quartz_hook_init() {}
 void quartz_hook_reset_stream() {}
 void quartz_hook_set_source_rate(uint32_t) {}
 void quartz_hook_set_timebase(bool) {}
+void quartz_hook_set_analysis(bool) {}
 
 #endif
 } // namespace
@@ -693,6 +579,7 @@ float dsp_sample_from_pcm1808_left24(int32_t left24) {
 
 void dsp_graph_reset_stream(void) {
   tick_detect_reset();
+  tick_shape_reset();
   g_event_count = 0;
   g_event_head = 0;
   beat_analysis_reset();
@@ -704,8 +591,6 @@ void dsp_graph_reset_stream(void) {
   g_post_rms_ema = 0.f;
   g_agc_lin = 1.0f;
   g_gate_lin = 1.0f;
-  g_match_score = 0.f;
-  memset(g_match_hist, 0, sizeof(g_match_hist));
   g_fft_fill = 0;
   g_fft_stride_i = 0;
   g_spectrum = {};
@@ -714,6 +599,24 @@ void dsp_graph_reset_stream(void) {
   memset(g_notch_state, 0, sizeof(g_notch_state));
   memset(g_fir_state, 0, sizeof(g_fir_state));
   quartz_hook_reset_stream();
+}
+
+void dsp_graph_set_analysis(bool on) {
+  if (on == beat_analysis_enabled()) {
+    return;
+  }
+  /*
+   * A mode switch starts a new session: the detector, the event log, the
+   * templates and the timing state are cleared in both directions, so that
+   * nothing timed for one watch or one mode is shown in the other. The
+   * detector is cleared because it may hold a half-open event.
+   */
+  tick_detect_reset();
+  tick_shape_reset();
+  g_event_count = 0;
+  g_event_head = 0;
+  beat_analysis_set_enabled(on);
+  quartz_hook_set_analysis(on);
 }
 
 void dsp_graph_init(void) {
@@ -743,17 +646,13 @@ void dsp_graph_init(void) {
   g_fft_stride = 1;
   g_fft_stride_i = 0;
   g_spectrum = {};
-  memset(g_match_tmpl, 0, sizeof(g_match_tmpl));
-  memset(g_match_hist, 0, sizeof(g_match_hist));
-  g_match_learned = false;
-  g_match_learn = true;
-  g_match_score = 0.f;
-  g_match_threshold = 0.35f;
   g_noise = 1e-4f;
   g_event_count = 0;
   g_event_head = 0;
   g_source_hz_measured = 0.f;
   tick_detect_reset();
+  tick_shape_configure(g_source_hz);
+  tick_shape_reset();
   beat_analysis_init();
   g_err_count = 0;
   g_err_head = 0;
@@ -775,6 +674,7 @@ void dsp_graph_set_source_rate(uint32_t hz) {
   }
   design_fir(g_en[DSP_BLOCK_FIR_BANK] ? g_fir_preset : DSP_FILTER_BYPASS);
   g_fft_fill = 0;
+  tick_shape_configure(hz);
   quartz_hook_set_source_rate(hz);
 }
 
@@ -893,7 +793,6 @@ void dsp_graph_get_metrics(dsp_metrics_t *out) {
       (g_en[DSP_BLOCK_AGC] && !g_bypass)
           ? (20.f * log10f(fmaxf(g_agc_lin, 1e-9f)))
           : 0.f;
-  out->match_score = g_match_score;
   out->clip_count = g_clip;
   out->limiter_count = g_lim;
 }
@@ -903,16 +802,6 @@ void dsp_graph_get_spectrum(dsp_spectrum_t *out) {
     return;
   }
   *out = g_spectrum;
-}
-
-void dsp_graph_get_matched(dsp_matched_t *out) {
-  if (!out) {
-    return;
-  }
-  out->score = g_match_score;
-  out->template_peak = g_match_tmpl_peak;
-  out->template_len = kMatchLen;
-  out->learned = g_match_learned;
 }
 
 void dsp_graph_get_beat(dsp_beat_rate_t *out) {
@@ -1036,19 +925,6 @@ bool dsp_graph_set_param(dsp_block_id_t id, const char *param, float value) {
     dsp_graph_note_enable(DSP_BLOCK_FIR_BANK);
     return true;
   }
-  if (id == DSP_BLOCK_MATCHED_FILTER) {
-    if (strcmp(param, "threshold") == 0) {
-      if (value < 0.f || value > 2.f) {
-        return false;
-      }
-      g_match_threshold = value;
-      return true;
-    }
-    if (strcmp(param, "learn") == 0) {
-      g_match_learn = value >= 0.5f;
-      return true;
-    }
-  }
   if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
     auto s = static_cast<int>(value);
     if (s < 1 || s > 16) {
@@ -1153,20 +1029,6 @@ bool dsp_graph_get_param(dsp_block_id_t id, const char *param, float *out) {
   if (id == DSP_BLOCK_FIR_BANK && strcmp(param, "preset") == 0) {
     *out = static_cast<float>(g_fir_preset);
     return true;
-  }
-  if (id == DSP_BLOCK_MATCHED_FILTER) {
-    if (strcmp(param, "threshold") == 0) {
-      *out = g_match_threshold;
-      return true;
-    }
-    if (strcmp(param, "learn") == 0) {
-      *out = g_match_learn ? 1.f : 0.f;
-      return true;
-    }
-    if (strcmp(param, "score") == 0) {
-      *out = g_match_score;
-      return true;
-    }
   }
   if (id == DSP_BLOCK_SPECTRUM && strcmp(param, "stride") == 0) {
     *out = static_cast<float>(g_fft_stride);

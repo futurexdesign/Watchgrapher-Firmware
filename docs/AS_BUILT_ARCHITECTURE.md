@@ -22,11 +22,11 @@ Three compile-time audio sources (`-DAUDIO_SOURCE=…`):
 |---|---|
 | **ADC** | RP2350 onboard SAR ADC → DMA → oversample/DC/scale → **PCM24** ring → USB |
 | **PCM1808** | External PCM1808 I²S (PIO + DMA) → float DSP graph → **PCM24** ring → USB |
-| **SYNTHETIC** | Looped S16 `tick-tock.wav` table, MSB-aligned into PCM24 → USB (host/USB validation) |
+| **SYNTHETIC** | Looped S16 `tick-tock.wav` table, MSB-aligned into PCM24 → USB (raw loop), and also through the mechanical DSP graph in 5 ms blocks, so rate, amplitude and beat error work without a pickup (HID, BLE, OLED checks). Paced by the USB pull while a host records, else by the microsecond timer at 48 kHz (standalone, `run start`, BLE only) |
 
 **RP2350 / RP2354 only.** RP2040 PlatformIO environments have been removed.
 
-**Two modalities.** The device runs in one of two persisted modes (§4.3): **USB microphone** (default; a host records the audio and capture follows the USB stream) or **standalone timegrapher** (capture and analysis run on their own from boot, results on the OLED, CLI and HID; the USB audio feed is silent). A run latch (`start` / `stop`) also lets a USB-mic device measure without a stream. The web front end is the sibling repo `timegrapher-web` (WebHID, with a virtual device for development).
+**Two modalities.** The device runs in one of two persisted modes (§4.3): **USB microphone** (default; a host records the audio and capture follows the USB stream) or **standalone timegrapher** (capture and analysis run on their own from boot, results on the OLED, CLI and HID; the USB audio feed is silent). A run latch (`start` / `stop`) also lets a USB-mic device capture without a stream. The timing engines run **only in standalone mode**: in USB microphone mode the host does the timing, so the device runs just tick detection and the beat-rate lock (see "Mode effects" in §4.3). The web front end is the sibling repo `timegrapher-web` (WebHID, with a virtual device for development).
 
 **Quartz-watch timing (PCM1808 builds only).** The PCM1808 is a stereo ADC, and both channels are decoded. **LEFT** carries the inductive pickup (coil, OUT_IND) and **RIGHT** the capacitive pickup (electrode, OUT_CAP). The USB microphone and the mechanical DSP graph use **LEFT only**, so the host still sees one mono channel. A separate quartz engine (§8.5) times stepper-motor pulses and tuning forks on LEFT and LCD drive on RIGHT, from the raw 24-bit codes. It is selected at run time by the quartz mode (`mechanical` at boot, which leaves the engine idle). On ADC and SYNTHETIC builds the mode stays `mechanical`. Only the engine's name tables are linked there; the pipelines and their ~41 KB store are dropped. User guide: [QUARTZ_TIMING.md](QUARTZ_TIMING.md).
 
@@ -70,7 +70,7 @@ PCM1808 pins: **Pico 2 PCB** MCLK **GP21**, LRCK **GP20**, DOUT **GP19**, BCK **
 
 `CFG_TUSB_CONFIG_FILE` is unreliable under PlatformIO (project `include/` is not first for library compiles). TinyUSB is configured **only** by the `-DCFG_TUD_*` flags in `platformio.ini` (the former `include/tusb_config.h` mirror was removed; it was never compiled). `usb_descriptors.cpp` asserts `CFG_TUD_AUDIO_FUNC_1_DESC_LEN` against the real descriptor length.
 
-Key audio flags: `N_BYTES_PER_SAMPLE_TX=3`, `EP_SZ_IN=147` (49×3), `EP_IN_SW_BUF_SZ=588`, `EP_IN_FLOW_CONTROL=1`.
+Key audio flags: `N_BYTES_PER_SAMPLE_TX=3`, `EP_SZ_IN=147` (49×3), `EP_IN_SW_BUF_SZ=2352` (16 packets: flow control keeps it ~half full, ~8 ms of main-loop stall tolerance), `EP_IN_FLOW_CONTROL=1`.
 
 ---
 
@@ -266,6 +266,14 @@ Suspend/resume: suspend aborts boost and drops capture; resume re-arms recording
 
 **Mode effects.** In standalone, `device_boot_run()` sets the latch at boot and `device_mode_set()` sets it when entering the mode (and clears it when entering USB mic). `audio_source_feeds_ring()` is `false` in standalone (and with no armed stream): the capture backends (`adc_capture`, `pcm1808_capture`, the synthetic generator) skip `audio_ring_push` and the 24 to 48 kHz repeat, and `usb_audio_task` sends zero-filled IN packets, not an underrun. A stream opened in standalone moves `PREFILL` to `ACTIVE` without waiting for the ring.
 
+**Timing engines per mode.** `device_mode_init()` (boot) and `device_mode_set()` (after the mode is persisted) call `dsp_graph_set_analysis(mode == standalone)`. Both run in the core-0 main loop, between capture blocks, so the engine state is never changed from another context; there is no flag to poll per block. In **USB microphone mode** (analysis off):
+
+| Runs | Off |
+|---|---|
+| Meters, noise floor, spectrum, the event log; tick detection (stage A, `tick_detect`); the A/h lock (`beat_analysis`: interval median, `vph_raw`, `locked`, `vph_nearest`, `confidence`); the process path for the USB stream | The rate / beat-error fit, rolling means, cuts and the no-watch rule; stage B (`tick_shape`: envelope front end, templates, drop timing, shape windows); amplitude; the per-beat ring; the quartz engine (`quartz::engine::process` returns at once and is not timed, `get` reports `analysis` off, state `idle`) |
+
+Entering either mode clears the detector, the event log and all timing state (`beat_analysis_reset`, `tick_shape_reset`), and the quartz engine starts a new measurement when it is switched on. The stage B templates are forgotten on purpose: a mode switch is a new session, often with another watch, and a template learned on the old one would mis-time the first beats of the new one (learning takes 16 beats, under 6 s at 21,600 A/h). The block parameters (`liftAngle`, `timingLandmark`, `vph`, ...) and the quartz mode setting are kept, so selecting standalone again starts the same engine configuration. `getBeat` reports `analysis` `"on"` / `"off"`; with it off `locked`, `vphNearest` and `state` (`listening` / `locking` / `locked`, following the lock only) are live and every rate, beat-error and amplitude field is invalid. `getQuartz` reports `analysis` and `state` `idle` with reason `USB Audio mode`. The OLED header keeps showing the nominal rate when locked ([DISPLAY.md](DISPLAY.md)).
+
 **Persistence.** `device_mode_set()` and `device_log_delta_ppm_set()` write one DEVICE-region record `{magic "DEV1", version, size, mode, logDeltaPpm, crc}`. They refuse (`DEVICE_SET_BUSY`) while the USB stream is open and keep the old value on failure.
 
 **Flash store** ([`flash_store.h`](../include/flash_store.h), `flash_store.cpp`): the **only** code that calls `EEPROM.begin` / `EEPROM.commit`. Arduino-Pico emulates EEPROM with one 4 KiB sector; the 1024-byte logical image is edited in RAM and committed whole.
@@ -390,7 +398,7 @@ Boot checks `clk_sys == 150e6` and `clk_usb == 48e6`. MCLK starts in `audio_sour
 
 ## 8. DSP graph (PCM1808 path)
 
-Implemented in [`dsp_graph.cpp`](../src/dsp_graph.cpp) / [`dsp_types.h`](../include/dsp_types.h). The mechanical escapement analysis is split out into `src/mechanical/`: [`tick_detect`](../include/mechanical/tick_detect.h) (`event_detect`: event windows and unlock / drop landmarks), [`beat_analysis`](../include/mechanical/beat_analysis.h) (`beat_rate`: lock, rate, beat error, amplitude, rolling averages, and its parameters) and [`beat_fit`](../include/mechanical/beat_fit.h) (the least-squares fit). `dsp_graph.cpp` keeps the meters, noise floor, event-detect threshold (shared with `soft_gate`), matched filter, event log, process path, quantize and watchdog, and calls the mechanical modules once per block / per closed event. Host control goes through [`control_api`](../include/control_api.h) (CDC CLI now; HID-ready later).
+Implemented in [`dsp_graph.cpp`](../src/dsp_graph.cpp) / [`dsp_types.h`](../include/dsp_types.h). The mechanical escapement analysis is split out into `src/mechanical/`: [`tick_detect`](../include/mechanical/tick_detect.h) (`event_detect`: event windows and unlock / drop landmarks), [`beat_analysis`](../include/mechanical/beat_analysis.h) (`beat_rate`: lock, rate, beat error, amplitude, rolling averages, and its parameters) and [`beat_fit`](../include/mechanical/beat_fit.h) (the least-squares fit). `dsp_graph.cpp` keeps the meters, noise floor, event-detect threshold (shared with `soft_gate`), event log, process path, quantize and watchdog, and calls the mechanical modules once per block / per closed event. Host control goes through [`control_api`](../include/control_api.h) (CDC CLI now; HID-ready later).
 
 ### 8.1 Pipeline order
 
@@ -425,7 +433,6 @@ CMSIS-DSP kernels: `arm_power_f32`, `arm_biquad_cascade_df1_*`, `arm_fir_f32`, `
 | `gain` | Process | off | Fixed make-up gain from `db` param |
 | `agc` | Process | off | Slow peak follower toward `target` FS (τ seconds; ±12 dB) |
 | `limiter` | Process | on | Hard clamp at ±1.0 FS before PCM24 quantize |
-| `matched_filter` | Analysis | off | 64-sample learned template + correlation gate for event opens |
 | `fir_bank` | Process | off | 64-tap Hamming FIR bandpass (same presets as filter_bank) |
 | `spectrum` | Analysis | off | 512-point RFFT; top-8 tonal peaks (`dsp spectrum`) |
 
@@ -438,7 +445,7 @@ CLI: `dsp help <block>` prints a short description and params; aliases include `
 - **Noise EMA:** adapts on quiet blocks only (peak below open threshold).
 - **Open event:** `|x| > max(noise×threshold, 4×pre_rms, 1e-3)` (default threshold **6**). Window start = onset − `preroll_ms` (default 25 ms).
 - **Close event:** hysteresis (`0.35×` open thr) for `tail_ms`, or max duration **80 ms**. Reject peaks below `max(open_thr, 0.25×tick_peak_ema)`. Log rise, snr_db, energy, confidence.
-- **Beat rate:** Keep up to 16 unlock-to-unlock half-intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of nominal A/h (auto common table `{14400…57600}` or manual `vph` param). Lock also requires a verified timebase. When locked, each tick's unlock time is refined to sub-sample precision (a parabolic vertex on the three-point peak) and assigned a half-beat number on the nominal grid, so a missed tick leaves a gap rather than a doubled interval. A least-squares fit of `t_k = a + P·k + c·(−1)^k` is then run over the last `windowS` seconds (default 6 s, range 2–30, capped at 256 ticks), with one 3.5σ outlier-rejection pass. `P` against the nominal half-period gives instant `rateSDay`, and `2|c|` gives instant `beatErrorMs`. The residual RMS is reported as `jitterUs` and the inlier count as `ratePoints`. On whole-sample timestamps this resolves about 0.1 s/d, where the old median of integer periods stepped in about 14 s/d at 24 kHz (host test `tests/test_beat_fit.cpp`). `calPpm` (±1000) removes sample-clock error. It comes from the `timebase` module: stored in flash, measured against NTP by `scripts/calibrate_timebase.py`, or measured live from GPS PPS. See [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md). Unlock→drop lift time (also sub-sample) + `liftAngle` (default 51°) → instant `amplitudeDeg` via `A = λ / (2 sin(π f t))`. Instant values are also averaged into rolling **`avg1s`** (~1 s) and **`avgLong`** windows (arithmetic mean, ≥2 samples per metric). The `avgLong` integration time is the `avgS` param (1–60 s, default 10; ring of 1024 tick samples, enough for 60 s at 57,600 A/h).
+- **Beat rate:** Keep up to 16 unlock-to-unlock half-intervals (~25 ms … 1 s at analysis rate). With ≥4 samples, median → `vph_raw = 3600 / period_s`. Lock if within **4%** of nominal A/h (auto common table `{14400…57600}` or manual `vph` param). Lock also requires a verified timebase. When locked, each tick's unlock time is refined to sub-sample precision (a parabolic vertex on the three-point peak) and assigned a half-beat number on the nominal grid, so a missed tick leaves a gap rather than a doubled interval. A least-squares fit of `t_k = a + P·k + c·(−1)^k` is then run over the last `windowS` seconds (default 6 s, range 2–30, capped at 256 ticks), with one 3.5σ outlier-rejection pass. `P` against the nominal half-period gives instant `rateSDay`, and `2|c|` gives instant `beatErrorMs`. The residual RMS is reported as `jitterUs` and the inlier count as `ratePoints`. On whole-sample timestamps this resolves about 0.1 s/d, where the old median of integer periods stepped in about 14 s/d at 24 kHz (host test `tests/test_beat_fit.cpp`). `calPpm` (±1000) removes sample-clock error. It comes from the `timebase` module: stored in flash, measured against NTP by `scripts/calibrate_timebase.py`, or measured live from GPS PPS. See [TIMEBASE_CALIBRATION.md](TIMEBASE_CALIBRATION.md). Unlock→drop lift time (also sub-sample) + `liftAngle` (default 51°) → instant `amplitudeDeg` via `A = λ / (2 sin(π f t))`. With `timingLandmark` = 1 (drop mode) amplitude and beat error also come from 2 s per-side shape windows: aligned beat envelopes are averaged per side, landmarks are taken at half height on the averaged shape, and `avgLong` carries the median over the windows of the span (`amplitudeTickDeg`, `amplitudeTockDeg`, `amplitudeWindows`, signed `beatErrorSignedMs` with `beatErrorSource`; see [HID_CONTROL_PLANE.md](HID_CONTROL_PLANE.md)). Instant values are also averaged into rolling **`avg1s`** (~1 s) and **`avgLong`** windows (arithmetic mean, ≥2 samples per metric). The `avgLong` integration time is the `avgS` param (1–60 s, default 10; ring of 1024 tick samples, enough for 60 s at 57,600 A/h).
 
 ### 8.4 Continuity watchdog / auto-eject
 
@@ -560,10 +567,9 @@ Fields: `seq`, `grid_id` (bumps on every `STARTED`, first grid 1), `sample_index
 |---|---|---:|---|
 | `input` | source | 0 | none (raw capture) |
 | `levelMeter` | analysis | 0 | `input`, `limiter` (pre on the input, post at the end of the chain) |
-| `matchedFilter` | analysis | 1 | `input` |
 | `spectrum` | analysis | 2 | `input` |
 | `noiseFloor` | analysis | 3 | `input` |
-| `eventDetect` | analysis | 4 | `input`, `noiseFloor`, `matchedFilter` |
+| `eventDetect` | analysis | 4 | `input`, `noiseFloor` |
 | `eventLog` | analysis | 5 | `eventDetect` |
 | `beatRate` | analysis | 6 | `eventDetect` (sibling of `eventLog`, does not read it) |
 | `notch` → `filterBank` → `firBank` → `softGate` → `gain` → `agc` → `limiter` | process | 1..7 | each reads the previous; `notch` reads `input` |
@@ -654,6 +660,16 @@ Locked model:
 - Firmware HID codec calls **`control_api` only**, same as the CLI.
 
 Firmware: `CFG_TUD_HID=1`, Usage Page `0xFFA0` / Usage `0x0001` / Report ID `0x01`. Smoke UI: [`hid/example.html`](hid/example.html) (localhost/HTTPS + user gesture).
+
+### 9.2 BLE transport (in progress, not yet built)
+
+The BLE control plane is **not in the tree yet**. It is specified in [`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md) and scheduled in [`plans/BLE_TRANSPORT_PLAN.md`](plans/BLE_TRANSPORT_PLAN.md). The planned firmware pieces are:
+
+- `control/*` (`frame`, `session`, `arbiter`, `control_handler`, `link`): the framing, the per-link session and the one-owner arbiter of HID_CONTROL_PLANE.md §4.6, split out of `hid_control.cpp`. Planned, not built.
+- `ble_control` (`src/ble_control.cpp`, `TG_BLE=1`): the GATT service, the rings and advertising. Planned.
+- `ble_core` (`src/ble_core.cpp`, `TG_BLE_CORE`): the radio bring-up, on core 1 in every W build (`TG_BLE_CORE=1`, decided by HW-19 on 2026-11-23; core 0 is the `TG_BLE_CORE=0` override, plan §5.8). Planned.
+
+Until these land, this section and the module table in §16 describe only the USB HID and CDC code above.
 
 ---
 

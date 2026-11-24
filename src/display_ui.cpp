@@ -23,6 +23,11 @@
  * placeholders until timing is locked on a verified timebase; the trend has a
  * gap wherever there was no lock.
  *
+ * In USB microphone mode (snapshot {@code standalone} false) everything below
+ * the header rule is replaced by a "USB AUDIO" section (see
+ * {@link draw_usb_audio}); the header is unchanged. The trend keeps sampling
+ * as above, so it is intact when the user switches back to standalone.
+ *
  * In a quartz mode (snapshot {@code quartz.mode} not mechanical) a quartz
  * layout replaces the one above; see "Quartz layouts" below and
  * docs/DISPLAY.md. The trend keeps sampling (it records gaps) so it is
@@ -134,6 +139,29 @@ void draw_gps(int16_t x0, int16_t y0, bool locked) {
   g_oled->setTextColor(SH110X_WHITE);
 }
 
+/**
+ * Bluetooth badge: an 11 x 11 px rounded square with the 5 x 9 px rune, drawn
+ * like {@link draw_gps}: same top edge and height, rounded corners from the
+ * shared {@code kUiBleRadius} (3 px; a 5 px radius would turn the 11 px square
+ * into a circle and clip the rune).
+ * - Outline with a white rune: BLE is on, no central connected (advertising).
+ * - Solid white with a black rune: a central is connected.
+ *
+ * The rune sits at (x0 + 3, y0 + 1): (11 - 5) / 2 = 3 px each side
+ * horizontally and (11 - 9) / 2 = 1 px vertically. The state is part of the
+ * frame buffer, so a change redraws through the frame-hash skip.
+ */
+void draw_ble(int16_t x0, int16_t y0, bool connected) {
+  const uint16_t rune = connected ? SH110X_BLACK : SH110X_WHITE;
+  if (connected) {
+    g_oled->fillRoundRect(x0, y0, kUiBleW, kUiBleW, kUiBleRadius, SH110X_WHITE);
+  } else {
+    g_oled->drawRoundRect(x0, y0, kUiBleW, kUiBleW, kUiBleRadius, SH110X_WHITE);
+  }
+  g_oled->drawBitmap(static_cast<int16_t>(x0 + 3), static_cast<int16_t>(y0 + 1),
+                     kUiBleRune, kUiBleRuneW, kUiBleRuneH, rune);
+}
+
 uint32_t frame_hash() {
   const uint8_t *p = g_oled->getBuffer();
   uint32_t h = 2166136261u; /* FNV-1a */
@@ -216,13 +244,13 @@ const char *status_text(const ui_snapshot_t &s, bool have) {
     return "starting...";
   }
   if (!s.streaming) {
-    return s.standalone ? "stopped" : "no host stream";
+    return s.standalone ? "stopped" : "no stream";
   }
   if (!s.timebase_ok) {
-    return "clock check...";
+    return "clock check";
   }
   if (s.events_seen == 0u) {
-    return "listening...";
+    return "listening";
   }
   return "locking...";
 }
@@ -237,18 +265,30 @@ int16_t text_w(const char *s, uint8_t size) {
   return static_cast<int16_t>(strlen(s) * 6u * size);
 }
 
+/** Layout for the right-hand header elements of snapshot {@code s}. */
+UiHeaderLayout header_layout(const ui_snapshot_t &s) {
+  return ui_header_layout(s.pps_enabled, s.ble_built && s.ble_enabled,
+                          s.standalone);
+}
+
 /**
- * Mode tag "SA" (standalone) or "USB", right-aligned at the right end of the
- * header, left of the GPS pill when present. The mechanical header text is at
- * most 14 characters (84 px) and the quartz header ends at x 78, so the tag
- * (at x >= 85) never collides.
+ * Mode tag "SA" (standalone) or "USB" at the position the layout gives it:
+ * right-aligned, left of the Bluetooth and GPS badges when present.
  */
-void draw_mode_tag(const ui_snapshot_t &s) {
-  const char *tag = s.standalone ? "SA" : "USB";
-  const int16_t xr = static_cast<int16_t>(kSize - (s.pps_enabled ? 25 : 1));
+void draw_mode_tag(const ui_snapshot_t &s, const UiHeaderLayout &l) {
   g_oled->setTextSize(1);
-  g_oled->setCursor(static_cast<int16_t>(xr - text_w(tag, 1)), 4);
-  g_oled->print(tag);
+  g_oled->setCursor(static_cast<int16_t>(l.tag_x), 4);
+  g_oled->print(s.standalone ? "SA" : "USB");
+}
+
+/** Draws the Bluetooth and GPS badges at their layout positions. */
+void draw_right_badges(const ui_snapshot_t &s, const UiHeaderLayout &l) {
+  if (l.ble_x >= 0) {
+    draw_ble(static_cast<int16_t>(l.ble_x), 2, s.ble_connected);
+  }
+  if (l.gps_x >= 0) {
+    draw_gps(static_cast<int16_t>(l.gps_x), 2, s.pps_locked);
+  }
 }
 
 void draw_header(const ui_snapshot_t &s, bool have, bool locked) {
@@ -263,10 +303,9 @@ void draw_header(const ui_snapshot_t &s, bool have, bool locked) {
     g_oled->print(status_text(s, have));
   }
   if (have) {
-    draw_mode_tag(s);
-  }
-  if (have && s.pps_enabled) {
-    draw_gps(kSize - 23, 2, s.pps_locked);
+    const UiHeaderLayout l = header_layout(s);
+    draw_mode_tag(s, l);
+    draw_right_badges(s, l);
   }
   g_oled->drawFastHLine(0, 17, kSize, SH110X_WHITE);
 }
@@ -420,34 +459,34 @@ constexpr const char *kJumpRef = "@8192";
  * tall, padded 3 px each side (same metrics as the GPS pill).
  */
 void draw_badge(int16_t x0, int16_t y0, const char *text) {
-  const int16_t w = static_cast<int16_t>(text_w(text, 1) + 6);
-  g_oled->fillRoundRect(x0, y0, w, 11, 5, SH110X_WHITE);
+  const int16_t w = static_cast<int16_t>(ui_badge_w(strlen(text)));
+  g_oled->fillRoundRect(x0, y0, w, kUiBadgeH, kUiBadgeRadius, SH110X_WHITE);
   g_oled->setTextColor(SH110X_BLACK);
   g_oled->setTextSize(1);
-  g_oled->setCursor(x0 + 3, y0 + 2);
+  g_oled->setCursor(x0 + kUiBadgePad, y0 + 2);
   g_oled->print(text);
   g_oled->setTextColor(SH110X_WHITE);
 }
 
 /**
  * Header: mode tag at the left (in the same spot as the mechanical bph),
- * an inverse UNCAL badge after it when no timebase correction is applied,
- * and the GPS badge at the right as in the mechanical layout.
+ * an inverse UNCAL badge (UNC when space is short) after it when no timebase
+ * correction is applied, and the Bluetooth and GPS badges at the right as in
+ * the mechanical layout.
  */
 void draw_quartz_header(const ui_snapshot_t &s) {
   const char *tag = ui_quartz_mode_tag(s.quartz.mode);
   g_oled->setTextSize(1);
   g_oled->setCursor(0, 4);
   g_oled->print(tag);
+  const UiHeaderLayout l = header_layout(s);
   if (!s.quartz.calibrated) {
-    /* Widest case "QUARTZ" (36 px) + 6 + badge (36 px) ends at x 78, clear
-     * of the GPS pill at x 105. */
-    draw_badge(static_cast<int16_t>(text_w(tag, 1) + 6), 2, "UNCAL");
+    /* "UNCAL" when it fits left of the tag, else the short "UNC". */
+    const UiUncalBadge b = ui_quartz_uncal_badge(tag, l.max_left_px);
+    draw_badge(static_cast<int16_t>(b.x), 2, b.text);
   }
-  draw_mode_tag(s);
-  if (s.pps_enabled) {
-    draw_gps(kSize - 23, 2, s.pps_locked);
-  }
+  draw_mode_tag(s, l);
+  draw_right_badges(s, l);
   g_oled->drawFastHLine(0, 17, kSize, SH110X_WHITE);
 }
 
@@ -641,10 +680,33 @@ void draw_tone(const ui_snapshot_t &s) {
   draw_hint_area(quartz_hints(q), note);
 }
 
+/** Prints {@code text} centred at {@code size}, top edge at {@code y}. */
+void draw_centred(const char *text, uint8_t size, int16_t y) {
+  g_oled->setTextSize(size);
+  g_oled->setCursor(static_cast<int16_t>((kSize - text_w(text, size)) / 2), y);
+  g_oled->print(text);
+}
+
+/**
+ * Main section of the USB microphone mode, below the header rule: the device
+ * only streams audio and the host measures, so there is no readout to show.
+ * "USB" over "AUDIO" at size 3 (54 and 90 px wide) is the largest text that
+ * fits: "USB AUDIO" on one line is 162 px at size 3 and only 108 px at size 2.
+ * Two small lines say what the screen is not showing.
+ */
+void draw_usb_audio() {
+  draw_centred("USB", 3, 32);
+  draw_centred("AUDIO", 3, 58);
+  draw_centred("timing on host", 1, 98);
+  draw_centred("analysis off", 1, 109);
+}
+
 /** Quartz frame: header, then the layout of the active mode. */
 void draw_quartz(const ui_snapshot_t &s) {
   draw_quartz_header(s);
-  if (s.quartz.mode == DSP_QUARTZ_MODE_MOTOR) {
+  if (!s.standalone) {
+    draw_usb_audio();
+  } else if (s.quartz.mode == DSP_QUARTZ_MODE_MOTOR) {
     draw_motor(s);
   } else {
     draw_tone(s);
@@ -670,9 +732,13 @@ void render(const ui_snapshot_t &s, bool have) {
     draw_quartz(s);
   } else {
     draw_header(s, have, locked);
-    draw_rate(s, locked);
-    draw_amp_be(s, locked);
-    draw_trend();
+    if (have && !s.standalone) {
+      draw_usb_audio();
+    } else {
+      draw_rate(s, locked);
+      draw_amp_be(s, locked);
+      draw_trend();
+    }
   }
 
   /* Most frames are identical (the rolling means and trend move at ~1 Hz):

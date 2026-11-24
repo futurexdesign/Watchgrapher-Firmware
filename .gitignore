@@ -16,6 +16,9 @@ __pycache__/
 *.pyc
 *.wav
 !/tick-tock.wav
+# Trimmed synthetic-source loops (assets/synth_clips/README.md)
+!/assets/synth_clips/*.wav
+!/assets/synth_clips/generated/*.wav
 
 # Host test build output (tests/run_all.sh)
 build/

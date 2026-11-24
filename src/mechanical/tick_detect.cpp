@@ -3,11 +3,9 @@
  * @brief Mechanical tick detector (event_detect block).
  *
  * Moved verbatim from the event half of {@code analyze()} in
- * {@code dsp_graph.cpp}. The open threshold, noise floor and matched-filter
- * veto now arrive in {@link tick_detect_block_params_t}, and accepted events
- * leave through a callback instead of a direct call to the graph's
- * {@code push_event}. The matched-filter confidence blend and template
- * learning stay in the graph (inside that callback).
+ * {@code dsp_graph.cpp}. The open threshold and noise floor now arrive in
+ * {@link tick_detect_block_params_t}, and accepted events leave through a
+ * callback instead of a direct call to the graph's {@code push_event}.
  *
  * @see mechanical/tick_detect.h, dsp_graph.cpp
  */
@@ -20,13 +18,18 @@ namespace {
 
 /** Intra-tick local maxima retained for unlock / drop landmarks. */
 constexpr uint32_t kMaxPulses = 8u;
+/**
+ * Longest pulse-strength window in samples (0.5 ms at up to 128 kHz). The
+ * strength of a pulse is the mean |x| over the last 0.5 ms, not its single
+ * peak sample: in a clipped recording every loud pulse hits the same ceiling,
+ * and the unlock (first pulse) won the "loudest pulse" tie, so the lift time
+ * came out 0 and the amplitude invalid (ST3600 clip, 2026-11-23).
+ */
+constexpr uint32_t kStrengthMax = 64u;
 
 /** EMA of accepted event peaks (for the min-peak gate). */
 float g_tick_peak_ema = 0.05f;
 float g_event_energy = 0.f;
-
-float g_event_wave[TICK_DETECT_WAVE_LEN];
-uint32_t g_event_wave_n = 0;
 
 bool g_in_event = false;
 uint64_t g_event_start = 0;
@@ -38,6 +41,8 @@ uint32_t g_below_count = 0;
 uint64_t g_pulse_idx[kMaxPulses];
 float g_pulse_frac[kMaxPulses]; /* parabolic sub-sample offset, -0.5..0.5 */
 float g_pulse_amp[kMaxPulses];
+/** 0.5 ms mean of |x| at each pulse: ranks the drop candidates. */
+float g_pulse_strength[kMaxPulses];
 uint32_t g_pulse_n = 0;
 uint64_t g_last_pulse_idx = 0;
 float g_prev_a = 0.f;
@@ -45,6 +50,48 @@ float g_prev2_a = 0.f;
 uint64_t g_prev_idx = 0;
 bool g_have_prev = false;
 bool g_have_prev2 = false;
+
+/** Ring of the last {@code g_strength_len} values of |x|, and their sum. */
+float g_strength_ring[kStrengthMax];
+float g_strength_sum = 0.f;
+uint32_t g_strength_pos = 0;
+uint32_t g_strength_len = 1;
+
+/**
+ * Adds one |x| to the running pulse-strength window.
+ *
+ * @return Mean |x| over the window, the strength of a pulse found now.
+ */
+float strength_update(float a) {
+  g_strength_sum += a - g_strength_ring[g_strength_pos];
+  g_strength_ring[g_strength_pos] = a;
+  g_strength_pos++;
+  if (g_strength_pos >= g_strength_len) {
+    g_strength_pos = 0;
+    /* Re-sum once per window so float rounding cannot accumulate. */
+    float s = 0.f;
+    for (uint32_t i = 0; i < g_strength_len; i++) {
+      s += g_strength_ring[i];
+    }
+    g_strength_sum = s;
+  }
+  return g_strength_sum / static_cast<float>(g_strength_len);
+}
+
+/** Sets the window to 0.5 ms at {@code fs}; clears it when the length changes.
+ */
+void strength_configure(float fs) {
+  auto len = static_cast<uint32_t>(0.0005f * fs + 0.5f);
+  len = len < 1u ? 1u : (len > kStrengthMax ? kStrengthMax : len);
+  if (len != g_strength_len) {
+    g_strength_len = len;
+    g_strength_pos = 0;
+    g_strength_sum = 0.f;
+    for (float &v : g_strength_ring) {
+      v = 0.f;
+    }
+  }
+}
 
 /**
  * Sub-sample position of a three-point local maximum {@code y0} between
@@ -60,24 +107,48 @@ float parabolic_offset(float ym, float y0, float yp) {
   return fminf(0.5f, fmaxf(-0.5f, d));
 }
 
-void push_pulse(uint64_t idx, float frac, float amp, uint32_t refractory) {
+/**
+ * Records an intra-tick pulse.
+ *
+ * Pulses closer than {@code refractory} merge (the louder peak keeps the
+ * position, the cluster keeps its highest strength). When the list is full,
+ * the first pulse (the unlock) always stays and a new pulse replaces the
+ * weakest later one if it is stronger, so a busy or clipped unlock group
+ * cannot crowd the drop out of the list.
+ */
+void push_pulse(uint64_t idx, float frac, float amp, float strength,
+                uint32_t refractory) {
   if (g_pulse_n > 0 && idx < g_last_pulse_idx + refractory) {
-    /* Same pulse cluster: keep the louder of the two. */
-    if (amp > g_pulse_amp[g_pulse_n - 1u]) {
-      g_pulse_idx[g_pulse_n - 1u] = idx;
-      g_pulse_frac[g_pulse_n - 1u] = frac;
-      g_pulse_amp[g_pulse_n - 1u] = amp;
+    /* Same pulse cluster. */
+    const uint32_t last = g_pulse_n - 1u;
+    if (amp > g_pulse_amp[last]) {
+      g_pulse_idx[last] = idx;
+      g_pulse_frac[last] = frac;
+      g_pulse_amp[last] = amp;
       g_last_pulse_idx = idx;
     }
+    g_pulse_strength[last] = fmaxf(g_pulse_strength[last], strength);
     return;
   }
-  if (g_pulse_n < kMaxPulses) {
-    g_pulse_idx[g_pulse_n] = idx;
-    g_pulse_frac[g_pulse_n] = frac;
-    g_pulse_amp[g_pulse_n] = amp;
+  uint32_t slot = g_pulse_n;
+  if (g_pulse_n == kMaxPulses) {
+    slot = 1u;
+    for (uint32_t p = 2; p < kMaxPulses; p++) {
+      if (g_pulse_strength[p] < g_pulse_strength[slot]) {
+        slot = p;
+      }
+    }
+    if (strength <= g_pulse_strength[slot]) {
+      return;
+    }
+  } else {
     g_pulse_n++;
-    g_last_pulse_idx = idx;
   }
+  g_pulse_idx[slot] = idx;
+  g_pulse_frac[slot] = frac;
+  g_pulse_amp[slot] = amp;
+  g_pulse_strength[slot] = strength;
+  g_last_pulse_idx = idx;
 }
 
 } // namespace
@@ -86,19 +157,18 @@ void tick_detect_reset() {
   g_in_event = false;
   g_below_count = 0;
   g_event_energy = 0.f;
-  g_event_wave_n = 0;
   g_pulse_n = 0;
   g_have_prev = false;
   g_have_prev2 = false;
   g_tick_peak_ema = 0.05f;
+  g_strength_sum = 0.f;
+  g_strength_pos = 0;
+  for (float &v : g_strength_ring) {
+    v = 0.f;
+  }
 }
 
 bool tick_detect_in_event() { return g_in_event; }
-
-const float *tick_detect_wave(uint32_t *n) {
-  *n = g_event_wave_n;
-  return g_event_wave;
-}
 
 void tick_detect_block(const float *x, uint32_t n, uint64_t base,
                        const tick_detect_block_params_t &params,
@@ -115,16 +185,14 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
   if (pulse_refrac < 1u) {
     pulse_refrac = 1u;
   }
+  strength_configure(fs);
 
   for (uint32_t i = 0; i < n; i++) {
     float a = fabsf(x[i]);
     uint64_t idx = base + i;
+    const float strength = strength_update(a);
     if (!g_in_event) {
-      bool open_ok = a > thr_open;
-      if (open_ok && params.open_veto) {
-        open_ok = false;
-      }
-      if (open_ok) {
+      if (a > thr_open) {
         g_in_event = true;
         g_event_start = (idx > preroll) ? (idx - preroll) : 0;
         g_event_onset = idx;
@@ -132,7 +200,6 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
         g_event_peak = a;
         g_event_energy = a * a;
         g_below_count = 0;
-        g_event_wave_n = 0;
         g_pulse_n = 0;
         g_last_pulse_idx = 0;
         g_prev_a = a;
@@ -140,14 +207,8 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
         g_prev_idx = idx;
         g_have_prev = true;
         g_have_prev2 = false;
-        if (g_event_wave_n < TICK_DETECT_WAVE_LEN) {
-          g_event_wave[g_event_wave_n++] = x[i];
-        }
       }
     } else {
-      if (g_event_wave_n < TICK_DETECT_WAVE_LEN) {
-        g_event_wave[g_event_wave_n++] = x[i];
-      }
       g_event_energy += a * a;
       if (a > g_event_peak) {
         g_event_peak = a;
@@ -159,7 +220,7 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
         const float pulse_thr = fmaxf(thr_close, 0.25f * g_event_peak);
         if (g_prev_a >= g_prev2_a && g_prev_a >= a && g_prev_a >= pulse_thr) {
           push_pulse(g_prev_idx, parabolic_offset(g_prev2_a, g_prev_a, a),
-                     g_prev_a, pulse_refrac);
+                     g_prev_a, strength, pulse_refrac);
         }
       }
       g_prev2_a = g_prev_a;
@@ -181,7 +242,7 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
             const float pulse_thr = fmaxf(thr_close, 0.25f * g_event_peak);
             if (g_prev_a >= pulse_thr &&
                 (!g_have_prev2 || g_prev_a >= g_prev2_a)) {
-              push_pulse(g_prev_idx, 0.f, g_prev_a, pulse_refrac);
+              push_pulse(g_prev_idx, 0.f, g_prev_a, strength, pulse_refrac);
             }
           }
 
@@ -198,16 +259,18 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
           ev.snr_db = 20.f * log10f(fmaxf(g_event_peak, 1e-9f) /
                                     fmaxf(params.noise_floor, 1e-9f));
           ev.energy = g_event_energy;
-          /* Matched-filter blend is applied by the graph's callback. */
           ev.confidence = fminf(1.f, g_event_peak / (thr_open + 1e-9f) / 4.f);
 
-          /* Unlock = first pulse; drop = loudest pulse (Witschi landmarks). */
+          /* Unlock = first pulse; drop = strongest pulse (Witschi
+           * landmarks). Strength is the 0.5 ms mean |x|, so a clipped
+           * recording still tells the drop burst from the unlock. The
+           * pulses are not in time order once the list has been full. */
           if (g_pulse_n > 0u) {
             ev.unlock_sample = g_pulse_idx[0];
             ev.unlock_frac = g_pulse_frac[0];
             uint32_t drop_i = 0;
             for (uint32_t p = 1; p < g_pulse_n; p++) {
-              if (g_pulse_amp[p] > g_pulse_amp[drop_i]) {
+              if (g_pulse_strength[p] > g_pulse_strength[drop_i]) {
                 drop_i = p;
               }
             }
@@ -238,7 +301,6 @@ void tick_detect_block(const float *x, uint32_t n, uint64_t base,
         g_in_event = false;
         g_below_count = 0;
         g_event_energy = 0.f;
-        g_event_wave_n = 0;
         g_pulse_n = 0;
         g_have_prev = false;
         g_have_prev2 = false;

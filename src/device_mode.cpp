@@ -6,11 +6,18 @@
  * versioned and CRC-checked, so an erased or foreign region reads as
  * "defaults" (USB_MIC, 0.2 ppm, not saved).
  *
- * @see device_mode.h, flash_store.h
+ * The timing engines follow the mode: {@link dsp_graph_set_analysis} is called
+ * with {@code true} in STANDALONE and {@code false} in USB_MIC, at boot
+ * ({@link device_mode_init}) and on every successful
+ * {@link device_mode_set}. Both run on core 0, in the main loop, so the engine
+ * state is never touched from another context.
+ *
+ * @see device_mode.h, flash_store.h, dsp_graph.h
  */
 
 #include "device_mode.h"
 
+#include "dsp_graph.h"
 #include "flash_store.h"
 #include "usb_audio.h"
 
@@ -134,6 +141,7 @@ void device_mode_init(void) {
     g_settings = kDefaults;
     g_have_saved = false;
   }
+  dsp_graph_set_analysis(g_settings.mode == DEVICE_MODE_STANDALONE);
 }
 
 void device_boot_run(void) {
@@ -159,6 +167,7 @@ device_mode_set_result_t device_mode_set(device_mode_t mode) {
   if (res != DEVICE_SET_OK) {
     return res;
   }
+  dsp_graph_set_analysis(mode == DEVICE_MODE_STANDALONE);
   if (mode == DEVICE_MODE_STANDALONE) {
     (void)device_run_start();
   } else {

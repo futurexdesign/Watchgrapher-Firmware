@@ -41,24 +41,141 @@ static volatile bool g_run_requested;
 static bool g_paused_was_running;
 
 #if AUDIO_SOURCE == SYNTHETIC
-#include "tick_tock_pcm.h"
-static uint32_t g_pcm_index;
+#include "dsp_graph.h"
+#include "synth_clip.h"
 
+#include <hardware/timer.h>
+
+/*
+ * The synthetic source feeds the DSP graph like a capture backend, so the
+ * beat analysis (rate, amplitude, beat error) runs on the looped recording:
+ * the whole HID / BLE / OLED path can be checked without a pickup. While a
+ * USB stream reads the ring, generation follows the host's pull (as before)
+ * and every sample is also analysed. Otherwise (standalone, run latch, BLE
+ * only) samples are generated against the microsecond timer at 48 kHz.
+ */
+
+#ifndef TG_SYNTH_SPEED
+/**
+ * Test-only: loop samples consumed per output sample. 1 plays the recording
+ * as recorded; 2 skips every other sample, so the loop plays at double speed
+ * (36,000 bph for the shipped 18,000 bph loop; plan section 14.6, HW-20). The
+ * pitch rises an octave and the sample rate stays 48 kHz. Never set it in a
+ * shipped env.
+ */
+#define TG_SYNTH_SPEED 1
+#endif
+static_assert(TG_SYNTH_SPEED == 1 || TG_SYNTH_SPEED == 2,
+              "TG_SYNTH_SPEED must be 1 or 2");
+static_assert(TICK_TOCK_PCM_LEN > static_cast<uint32_t>(TG_SYNTH_SPEED),
+              "the loop must be longer than one speed step");
+
+/** Samples per DSP block: 5 ms, the PCM1808 block size. */
+constexpr uint32_t kSynthBlock = APP_ADC_DMA_BUF_SAMPLES;
+/**
+ * Most samples generated per process call: one DSP block. Each block costs a
+ * DSP pass, and the USB IN FIFO holds only ~4 ms (CFG_TUD_AUDIO_FUNC_1_EP_IN_
+ * SW_BUF_SZ), so a main-loop pass must never run several blocks back to back
+ * (found on hardware: a ring refill of ~1400 samples ran six DSP blocks in
+ * one pass and the host saw gaps). The loop runs far faster than 200 Hz, so
+ * one block per pass keeps up.
+ */
+constexpr uint32_t kSynthMaxPerCall = kSynthBlock;
+/** Timer-paced backlog beyond this is skipped (a stalled loop). */
+constexpr uint32_t kSynthMaxDue = 4u * kSynthBlock;
+/** Microseconds per second, for the timer-paced generation. */
+constexpr uint64_t kUsPerSecond = 1000000u;
+
+static uint32_t g_pcm_index;
+/** Float input of the DSP block being filled. */
+static float g_synth_in[kSynthBlock];
+/** PCM24 output of the DSP graph (unused: USB keeps the raw loop). */
+static audio_sample_t g_synth_out[kSynthBlock];
+/** Samples in {@code g_synth_in}. */
+static uint32_t g_synth_fill;
+/** Source index of the next DSP block (samples since the start). */
+static uint64_t g_synth_index;
+/** Timer anchor of the timer-paced generation. */
+static uint64_t g_synth_anchor_us;
+/** Samples generated since {@code g_synth_anchor_us}. */
+static uint64_t g_synth_done;
+
+/**
+ * Restarts the loop and the analysis at sample 0, at the nominal rate.
+ * Called whenever capture (re)starts.
+ */
+static void synthetic_reset(void) {
+  g_pcm_index = 0;
+  g_synth_fill = 0;
+  g_synth_index = 0;
+  g_synth_anchor_us = time_us_64();
+  g_synth_done = 0;
+  dsp_graph_set_source_rate(APP_SAMPLE_RATE_HZ);
+  dsp_graph_reset_stream();
+  /* The loop is exactly 48 kHz by construction: nothing to measure. */
+  dsp_graph_set_timebase(true, static_cast<float>(APP_SAMPLE_RATE_HZ));
+}
+
+/** @return The next loop sample as MSB-aligned PCM24, also queued for DSP. */
+static audio_sample_t synthetic_next(void) {
+  /* S16 source → MSB-aligned PCM24. */
+  const audio_sample_t s =
+      static_cast<audio_sample_t>(kTickTockPcm[g_pcm_index]) << 8;
+  /* Wraps modulo the loop length; TG_SYNTH_SPEED 2 decimates by two. */
+  g_pcm_index += static_cast<uint32_t>(TG_SYNTH_SPEED);
+  if (g_pcm_index >= TICK_TOCK_PCM_LEN) {
+    g_pcm_index -= TICK_TOCK_PCM_LEN;
+  }
+  /* Same full-scale mapping as the PCM1808 path (1 / 2^23). */
+  g_synth_in[g_synth_fill++] = dsp_sample_from_pcm1808_left24(s);
+  if (g_synth_fill == kSynthBlock) {
+    (void)dsp_graph_process(g_synth_in, kSynthBlock, g_synth_index,
+                            g_synth_out);
+    g_synth_index += kSynthBlock;
+    g_synth_fill = 0;
+  }
+  return s;
+}
+
+/** Pushes {@code count} loop samples to the USB ring (and the analysis). */
 static void synthetic_generate(uint32_t count) {
   constexpr uint32_t kChunk = 64u;
   audio_sample_t tmp[kChunk];
   while (count > 0) {
     uint32_t n = count > kChunk ? kChunk : count;
     for (uint32_t i = 0; i < n; i++) {
-      /* S16 source → MSB-aligned PCM24 for USB. */
-      tmp[i] = (static_cast<audio_sample_t>(kTickTockPcm[g_pcm_index++])) << 8;
-      if (g_pcm_index >= TICK_TOCK_PCM_LEN) {
-        g_pcm_index = 0;
-      }
+      tmp[i] = synthetic_next();
     }
     audio_ring_push(tmp, n);
     count -= n;
   }
+  /* Keep the timer pacing anchored so a later switch to it starts clean. */
+  g_synth_anchor_us = time_us_64();
+  g_synth_done = 0;
+}
+
+/**
+ * Timer-paced generation for the analysis only (no ring consumer). A backlog
+ * longer than {@link kSynthMaxDue} (a stalled loop) is skipped: the loop
+ * position and the source index jump ahead together, so timing stays true.
+ */
+static void synthetic_run_clocked(void) {
+  const uint64_t elapsed = time_us_64() - g_synth_anchor_us;
+  const uint64_t target = elapsed * APP_SAMPLE_RATE_HZ / kUsPerSecond;
+  uint64_t due = target - g_synth_done;
+  if (due > kSynthMaxDue) {
+    const uint64_t skip = due - kSynthMaxDue;
+    g_pcm_index =
+        static_cast<uint32_t>((g_pcm_index + skip) % TICK_TOCK_PCM_LEN);
+    g_synth_index += skip;
+    g_synth_done += skip;
+    due = kSynthMaxDue;
+  }
+  const uint64_t now_n = due < kSynthMaxPerCall ? due : kSynthMaxPerCall;
+  for (uint64_t i = 0; i < now_n; i++) {
+    (void)synthetic_next();
+  }
+  g_synth_done += now_n;
 }
 #endif
 
@@ -103,7 +220,7 @@ static void enter_prefill(void) {
   audio_ring_reset();
   diagnostics_reset_adc_stats();
 #if AUDIO_SOURCE == SYNTHETIC
-  g_pcm_index = 0;
+  synthetic_reset();
 #endif
   g_awaiting_preamp = false;
   g_capture_request = (AUDIO_SOURCE != SYNTHETIC);
@@ -132,7 +249,7 @@ static void arm_recording(void) {
   audio_ring_reset();
   diagnostics_reset_adc_stats();
 #if AUDIO_SOURCE == SYNTHETIC
-  g_pcm_index = 0;
+  synthetic_reset();
 #endif
   if (uses_preamp()) {
     g_awaiting_preamp = true;
@@ -173,7 +290,7 @@ static void run_arm(uint32_t now) {
   audio_ring_reset();
   diagnostics_reset_adc_stats();
 #if AUDIO_SOURCE == SYNTHETIC
-  g_pcm_index = 0;
+  synthetic_reset();
 #endif
   if (uses_preamp()) {
     g_run_phase = RunPhase::Warmup;
@@ -312,8 +429,11 @@ void audio_source_process(void) {
         APP_RING_PREFILL_SAMPLES + APP_PKT_SAMPLES_NOM * 10u;
     uint32_t occ = audio_ring_occupancy();
     if (occ < target) {
-      synthetic_generate(target - occ);
+      const uint32_t need = target - occ;
+      synthetic_generate(need < kSynthMaxPerCall ? need : kSynthMaxPerCall);
     }
+  } else {
+    synthetic_run_clocked();
   }
 #endif
 

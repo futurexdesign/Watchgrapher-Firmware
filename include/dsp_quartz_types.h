@@ -213,6 +213,13 @@ typedef struct {
 typedef struct {
   dsp_quartz_mode_t mode;   /**< Active mode. */
   dsp_quartz_state_t state; /**< Measurement state. */
+  /**
+   * The quartz engine runs. False in USB microphone mode
+   * ({@link dsp_graph_set_analysis}): the mode setting is kept, but nothing is
+   * measured, {@code state} is {@code IDLE} and every rate field is zero.
+   * Reported as {@code analysis: "on" | "off"}.
+   */
+  bool analysis;
   /** Why the state is what it is ("capture rate not verified", "waiting
    * for 3 pulses", ...); static string, never null, "" when nothing to
    * add. For display and logs only: do not parse. */

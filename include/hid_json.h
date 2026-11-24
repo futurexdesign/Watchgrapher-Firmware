@@ -33,6 +33,7 @@
 #pragma once
 
 #include "device_mode.h"
+#include "diagnostics.h"
 #include "dsp_blocks.h"
 #include "dsp_quartz_types.h"
 #include "dsp_types.h"
@@ -186,12 +187,29 @@ struct HelloParams {
   bool quartz; /**< Build has the quartz engine (hides the quartz node). */
   bool gps;    /**< Build has GPS_UART_RX ({@code caps.gps}). */
   bool pps;    /**< Build has PPS_GPIO ({@code caps.pps}). */
+  bool ble;    /**< Build has BLE ({@code TG_BLE=1}); {@code caps.ble}. */
+  bool cli;    /**< Build has the serial CLI ({@code TG_SERIAL_CLI=1}). */
+  /**
+   * Link the request arrived on ({@code "usbHid"} or {@code "ble"}). Null
+   * omits both {@code link} and {@code control} (the shape before H7).
+   */
+  const char *link_kind = nullptr;
+  unsigned link_mtu = 0; /**< ATT MTU for {@code hello.link.mtu}; 0 = no key. */
+  /** TX frame size in bytes, {@code hello.link.frameMax}; 0 = no key. */
+  unsigned link_frame_max = 0;
+  /** Owner link name for {@code hello.control.owner}; null = JSON null. */
+  const char *control_owner = nullptr;
+  bool control_self = false; /**< The owner is the requesting link. */
+  unsigned lease_ms = 0;     /**< {@code hello.control.leaseMs}. */
 };
 
 /**
  * Appends the {@code hello} result (protocol version, identity and
  * {@code caps} including the block list, the new feature caps and the
- * {@code pipeline}). The pipeline comes from {@link dsp_pipeline_nodes}.
+ * {@code pipeline}), then, when {@code p.link_kind} is set, the
+ * {@code link} and {@code control} objects (plan section 4.6). The
+ * {@code caps.ble} and {@code caps.cli} keys are written only when true. The
+ * pipeline comes from {@link dsp_pipeline_nodes}.
  *
  * @param dst Output buffer.
  * @param dstlen Capacity of {@code dst}.
@@ -201,6 +219,96 @@ struct HelloParams {
  */
 [[nodiscard]] int encode_hello(char *dst, std::size_t dstlen, int off,
                                const HelloParams &p);
+
+/** {@code getLink.control} / {@code hello.control} inputs. */
+struct ControlParams {
+  const char *owner = nullptr; /**< Owner link name; null = JSON null. */
+  bool self = false;           /**< The owner is the requesting link. */
+  unsigned lease_ms = 0;       /**< {@code leaseMs}. */
+};
+
+/** {@code getLink.ble} inputs (a copy of the BLE status, text included). */
+struct BleLinkParams {
+  bool enabled = false;
+  const char *name = "";    /**< Advertised name {@code TG-XXXX}. */
+  const char *address = ""; /**< Bluetooth address text. */
+  bool advertising = false;
+  bool connected = false; /**< Connected with notifications on. */
+  unsigned mtu = 0;
+  unsigned conn_interval_us = 0;
+  /** {@code connParamStep}: 0 none, 1 15 ms asked, 2 15..30 ms, 3 gave up. */
+  unsigned conn_param_step = 0;
+  /** {@code connParamRejects}: requests the central rejected. */
+  unsigned conn_param_rejects = 0;
+  unsigned rx_frames = 0;
+  unsigned tx_frames = 0;
+  unsigned rx_dropped = 0;
+  unsigned rx_invalid = 0;
+  unsigned tx_retries = 0;
+  unsigned disconnects = 0;
+  unsigned last_disconnect_reason = 0;
+  unsigned core = 0; /**< Core running the radio (0 or 1). */
+  /** Free bytes of core 1's stack; negative = unknown (key omitted). Only
+   * written when {@code core} is 1. */
+  long core1_stack_free = -1;
+};
+
+/** {@code getLink} result inputs. */
+struct LinkStatusParams {
+  bool usb_mounted = false;
+  /** BLE status, or null on builds without BLE (the {@code ble} key is then
+   * absent). */
+  const BleLinkParams *ble = nullptr;
+  ControlParams control;
+};
+
+/**
+ * Appends the {@code control} object {@code {"owner","self","leaseMs"}}
+ * ({@code hello.control}, {@code getLink.control}).
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity of {@code dst}.
+ * @param off Current length (negative passes through).
+ * @param c Ownership state.
+ * @return New length, or -1 if it does not fit.
+ */
+[[nodiscard]] int encode_control(char *dst, std::size_t dstlen, int off,
+                                 const ControlParams &c);
+
+/**
+ * Appends the {@code getLink} result {@code {"usbHid":{"mounted"},"ble"?,
+ * "control"}}. Every value is bounded (the name is sanitised and cut), so the
+ * worst case fits the message limit with its envelope.
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity of {@code dst}.
+ * @param off Current length (negative passes through).
+ * @param s Link status.
+ * @return New length, or -1 if it does not fit.
+ */
+[[nodiscard]] int encode_link_status(char *dst, std::size_t dstlen, int off,
+                                     const LinkStatusParams &s);
+
+/**
+ * Appends the {@code getDiag} result: every field of {@link diag_counters_t}
+ * under the camelCase of its name, the {@code _count} suffix kept
+ * ({@code dma_overrun_count} gives {@code dmaOverrunCount}); see
+ * {@code HidDiag} in docs/hid/timegrapher_hid.d.ts.
+ *
+ * Most fields only increase. The ADC, ring and PCM peak / min / max fields
+ * are extrema of the current diagnostic window. Only the serial CLI's
+ * periodic print (with {@code diag on}) clears them, so in a build without
+ * the CLI they cover the time since boot or since the last stream open
+ * ({@link diagnostics_reset_adc_stats}).
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity of {@code dst}.
+ * @param off Current length (negative passes through).
+ * @param d Counter block ({@link diagnostics_get}).
+ * @return New length, or -1 if it does not fit.
+ */
+[[nodiscard]] int encode_diag(char *dst, std::size_t dstlen, int off,
+                              const diag_counters_t &d);
 
 /**
  * Appends the {@code PipelineNode} array
@@ -267,6 +375,44 @@ struct HelloParams {
 [[nodiscard]] int encode_beats(char *dst, std::size_t dstlen, int off,
                                const dsp_beat_t *beats, uint32_t n,
                                uint32_t *emitted);
+
+/** {@code caps.beatsPacked}: version of the packed beats layout. */
+inline constexpr uint8_t kBeatsPackedFormat = 1u;
+
+/** Most beats one packed batch carries (the {@code n} field is one byte,
+ * and 26 + 32 * 17 bytes encode to 760 characters). */
+inline constexpr uint32_t kBeatsPackedMax = 32u;
+
+/**
+ * Appends {@code {"p":"<base64>"}}: a batch of beats in the packed binary
+ * format of docs/plans/BLE_TRANSPORT_PLAN.md section 14.2, base64 encoded
+ * (RFC 4648 section 4, padded). The beats must be in ascending seq order.
+ *
+ * The batch is a prefix of {@code beats}. It ends before the first beat
+ * that changes the grid id or the nominal period, whose {@code dSeq}
+ * exceeds 255, whose {@code dSample} does not fit 32 bits or whose
+ * {@code dK} is outside int16, after {@link kBeatsPackedMax} beats, or
+ * before the beat that would not fit {@code dstlen} (keeping
+ * {@link kEnvelopeTail} free). The caller sends the rest in the next call.
+ * With {@code n == 0} or no room for one beat the string is empty and
+ * {@code emitted} is 0.
+ *
+ * Quantisation: u 0.1 us, amplitude 0.01 deg (0 when invalid), lift 1 us
+ * (saturating), fractional unlock sample 1/256.
+ *
+ * @param dst Output buffer.
+ * @param dstlen Capacity of {@code dst}.
+ * @param off Current length (negative passes through).
+ * @param beats Beats, oldest first.
+ * @param n Number of entries in {@code beats}.
+ * @param source_hz Sample rate of {@code t_s}; derives the fractional
+ *        sample. 0 gives a fraction of 0.
+ * @param emitted Receives how many leading beats were written (may be null).
+ * @return New length, or -1 if not even the empty string fits.
+ */
+[[nodiscard]] int encode_beats_packed(char *dst, std::size_t dstlen, int off,
+                                      const dsp_beat_t *beats, uint32_t n,
+                                      uint32_t source_hz, uint32_t *emitted);
 
 /**
  * Appends one {@code DspEvent} object {@code {"startSample","peakSample",

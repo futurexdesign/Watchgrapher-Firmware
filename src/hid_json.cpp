@@ -8,11 +8,14 @@
 
 #include "hid_json.h"
 
+#include "control/json_scan.h"
 #include "control_api.h"
 
-#include <cerrno>
+#include <array>
+#include <climits>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -198,14 +201,14 @@ int encode_quartz(char *dst, std::size_t dstlen, int off,
                 sizeof(cal_source));
   off = appendf(
       dst, dstlen, off,
-      "{\"mode\":\"%s\",\"state\":\"%s\",\"measurementId\":%lu,\"reason\":\"%"
-      "s\",\"sourceHz\":%lu,"
+      "{\"mode\":\"%s\",\"state\":\"%s\",\"analysis\":\"%s\","
+      "\"measurementId\":%lu,\"reason\":\"%s\",\"sourceHz\":%lu,"
       "\"timebaseOk\":%s,\"elapsedS\":%.7g,\"gateS\":%.6g,\"forkHz\":%.6g,"
       "\"tsMethod\":\"%s\",\"kSigma\":%.6g,\"sampleLossRestarts\":%lu,"
       "\"rateSDay\":%.6g,\"rateValid\":%s,\"calPpm\":%.6g,"
       "\"calSource\":\"%s\",\"calibrated\":%s,\"motor\":",
       control_api_quartz_mode_name(q.mode),
-      control_api_quartz_state_name(q.state),
+      control_api_quartz_state_name(q.state), q.analysis ? "on" : "off",
       static_cast<unsigned long>(q.measurement_id), reason,
       static_cast<unsigned long>(q.source_hz), jbool(q.timebase_ok),
       num(q.elapsed_s), num(q.gate_s), num(q.fork_hz),
@@ -410,12 +413,15 @@ int encode_hello(char *dst, std::size_t dstlen, int off, const HelloParams &p) {
       "\"maxJsonBytes\":%u,\"metricsHzMax\":%u,\"beatHzMax\":%u,"
       "\"timingHzMax\":%u,\"timing\":true,\"quartz\":%s,"
       "\"quartzHzMax\":%u,\"quartzPulsesMax\":%u,"
-      "\"deviceMode\":true,\"beats\":true,\"beatsMax\":%u,\"gps\":%s,"
-      "\"pps\":%s,\"timebaseLog\":true,\"timebaseLogMax\":%u,\"blocks\":[",
+      "\"deviceMode\":true,\"beats\":true,\"beatsMax\":%u,"
+      "\"beatsPacked\":%u,\"gps\":%s,"
+      "\"pps\":%s,\"timebaseLog\":true,\"timebaseLogMax\":%u,%s%s\"blocks\":[",
       p.fw_version, p.board, p.source, p.vid, p.pid, p.max_json,
       p.metrics_hz_max, p.beat_hz_max, p.timing_hz_max, jbool(p.quartz),
       p.quartz_hz_max, p.quartz_pulses_max, static_cast<unsigned>(kBeatsMax),
-      jbool(p.gps), jbool(p.pps), static_cast<unsigned>(kTimebaseLogMax));
+      static_cast<unsigned>(kBeatsPackedFormat), jbool(p.gps), jbool(p.pps),
+      static_cast<unsigned>(kTimebaseLogMax), p.ble ? "\"ble\":true," : "",
+      p.cli ? "\"cli\":true," : "");
   for (int i = 1; i < static_cast<int>(DSP_BLOCK_COUNT) && off >= 0; i++) {
     off = appendf(dst, dstlen, off, "%s\"%s\"", i > 1 ? "," : "",
                   dsp_block_json_name(static_cast<dsp_block_id_t>(i)));
@@ -424,7 +430,126 @@ int encode_hello(char *dst, std::size_t dstlen, int off, const HelloParams &p) {
   uint32_t count = 0;
   const auto *nodes = dsp_pipeline_nodes(&count);
   off = encode_pipeline(dst, dstlen, off, nodes, count, p.quartz);
-  return appendf(dst, dstlen, off, "}}");
+  off = appendf(dst, dstlen, off, "}");
+  if (p.link_kind != nullptr) {
+    off = appendf(dst, dstlen, off, ",\"link\":{\"kind\":\"%s\"", p.link_kind);
+    if (p.link_mtu != 0u) {
+      off = appendf(dst, dstlen, off, ",\"mtu\":%u", p.link_mtu);
+    }
+    if (p.link_frame_max != 0u) {
+      off = appendf(dst, dstlen, off, ",\"frameMax\":%u", p.link_frame_max);
+    }
+    off = appendf(dst, dstlen, off, "},\"control\":");
+    off = encode_control(
+        dst, dstlen, off,
+        ControlParams{p.control_owner, p.control_self, p.lease_ms});
+  }
+  return appendf(dst, dstlen, off, "}");
+}
+
+int encode_control(char *dst, std::size_t dstlen, int off,
+                   const ControlParams &c) {
+  if (c.owner != nullptr) {
+    return appendf(dst, dstlen, off,
+                   "{\"owner\":\"%s\",\"self\":%s,\"leaseMs\":%u}", c.owner,
+                   jbool(c.self), c.lease_ms);
+  }
+  return appendf(dst, dstlen, off,
+                 "{\"owner\":null,\"self\":%s,\"leaseMs\":%u}", jbool(c.self),
+                 c.lease_ms);
+}
+
+int encode_link_status(char *dst, std::size_t dstlen, int off,
+                       const LinkStatusParams &s) {
+  off = appendf(dst, dstlen, off, "{\"usbHid\":{\"mounted\":%s}",
+                jbool(s.usb_mounted));
+  if (s.ble != nullptr) {
+    const BleLinkParams &b = *s.ble;
+    char name[16];
+    char address[24];
+    json_sanitize(b.name, name, sizeof(name));
+    json_sanitize(b.address, address, sizeof(address));
+    off = appendf(dst, dstlen, off,
+                  ",\"ble\":{\"enabled\":%s,\"name\":\"%s\",\"address\":\"%s\","
+                  "\"advertising\":%s,\"connected\":%s,\"mtu\":%u,"
+                  "\"connIntervalUs\":%u,\"connParamStep\":%u,"
+                  "\"connParamRejects\":%u,\"rxFrames\":%u,\"txFrames\":%u,"
+                  "\"rxDropped\":%u,\"rxInvalid\":%u,\"txRetries\":%u,"
+                  "\"disconnects\":%u,\"lastDisconnectReason\":%u,\"core\":%u",
+                  jbool(b.enabled), name, address, jbool(b.advertising),
+                  jbool(b.connected), b.mtu, b.conn_interval_us,
+                  b.conn_param_step, b.conn_param_rejects, b.rx_frames,
+                  b.tx_frames, b.rx_dropped, b.rx_invalid, b.tx_retries,
+                  b.disconnects, b.last_disconnect_reason, b.core);
+    if (b.core == 1u && b.core1_stack_free >= 0) {
+      off = appendf(dst, dstlen, off, ",\"core1StackFree\":%lu",
+                    static_cast<unsigned long>(b.core1_stack_free));
+    }
+    off = appendf(dst, dstlen, off, "}");
+  }
+  off = appendf(dst, dstlen, off, ",\"control\":");
+  off = encode_control(dst, dstlen, off, s.control);
+  return appendf(dst, dstlen, off, "}");
+}
+
+int encode_diag(char *dst, std::size_t dstlen, int off,
+                const diag_counters_t &d) {
+  off = appendf(dst, dstlen, off, "{");
+  bool first = true;
+  const auto put = [&](const char *key, uint32_t v) {
+    off = appendf(dst, dstlen, off, "%s\"%s\":%lu", first ? "" : ",", key,
+                  static_cast<unsigned long>(v));
+    first = false;
+  };
+  put("usbEnumerationCount", d.usb_enumeration_count);
+  put("usbAudioStreamOpenCount", d.usb_audio_stream_open_count);
+  put("usbAudioStreamCloseCount", d.usb_audio_stream_close_count);
+  put("usbSuspendCount", d.usb_suspend_count);
+  put("usbResumeCount", d.usb_resume_count);
+  put("boostOnCount", d.boost_on_count);
+  put("boostOffCount", d.boost_off_count);
+  put("preampSettleStartCount", d.preamp_settle_start_count);
+  put("preampSettleDoneCount", d.preamp_settle_done_count);
+  put("preampStartAbortedCount", d.preamp_start_aborted_count);
+  put("usbSuspendDurationMs", d.usb_suspend_duration_ms);
+  put("adcTotalSampleCount", d.adc_total_sample_count);
+  put("adcConversionErrorCount", d.adc_conversion_error_count);
+  put("dmaCompleteCount", d.dma_complete_count);
+  put("dmaOverrunCount", d.dma_overrun_count);
+  put("pcmRingUnderrunCount", d.pcm_ring_underrun_count);
+  put("pcmRingOverrunCount", d.pcm_ring_overrun_count);
+  put("usbInPacketCount", d.usb_in_packet_count);
+  put("usbInSampleCount", d.usb_in_sample_count);
+  put("usbShortWriteCount", d.usb_short_write_count);
+  put("ringMinOccupancy", d.ring_min_occupancy);
+  put("ringMaxOccupancy", d.ring_max_occupancy);
+  put("adcMinCode", d.adc_min_code);
+  put("adcMaxCode", d.adc_max_code);
+  put("adcMeanCodeAccum", d.adc_mean_code_accum);
+  put("adcMeanCodeCount", d.adc_mean_code_count);
+  put("adcDcCounts", d.adc_dc_counts);
+  put("adcAcPeakCounts", d.adc_ac_peak_counts);
+  put("adcPcmPeakAbs", d.adc_pcm_peak_abs);
+  put("pcm1808ClockConfigOk", d.pcm1808_clock_config_ok);
+  put("pcm1808ClkSysHz", d.pcm1808_clk_sys_hz);
+  put("pcm1808ClkUsbHz", d.pcm1808_clk_usb_hz);
+  put("pcm1808MclkNominalHz", d.pcm1808_mclk_nominal_hz);
+  put("pcm1808StartupWaitCount", d.pcm1808_startup_wait_count);
+  put("pcm1808DmaBlocks", d.pcm1808_dma_blocks);
+  put("pcm1808StereoFramesReceived", d.pcm1808_stereo_frames_received);
+  put("pcm1808MonoSamplesEmitted", d.pcm1808_mono_samples_emitted);
+  put("pcm1808DmaBlockOverruns", d.pcm1808_dma_block_overruns);
+  put("pcm1808PioFifoStallOrOverflow", d.pcm1808_pio_fifo_stall_or_overflow);
+  put("pcm1808SamplePeakAbs", d.pcm1808_sample_peak_abs);
+  put("pcm1808SaturatedCount", d.pcm1808_saturated_count);
+  put("pcm1808RawLeftPeakAbs", d.pcm1808_raw_left_peak_abs);
+  put("pcm1808RawRightPeakAbs", d.pcm1808_raw_right_peak_abs);
+  put("pcm1808FrameRateMhz", d.pcm1808_frame_rate_mhz);
+  put("pcm1808RateStatus", d.pcm1808_rate_status);
+  put("pcm1808MclkRatio", d.pcm1808_mclk_ratio);
+  put("pcm1808Upsample", d.pcm1808_upsample);
+  put("pcm1808BlocksLost", d.pcm1808_blocks_lost);
+  return appendf(dst, dstlen, off, "}");
 }
 
 int encode_device_status(char *dst, std::size_t dstlen, int off,
@@ -476,6 +601,209 @@ int encode_beats(char *dst, std::size_t dstlen, int off,
   return appendf(dst, dstlen, off, "]}");
 }
 
+namespace {
+
+/** Bytes of the packed header (docs/plans/BLE_TRANSPORT_PLAN.md 14.2). */
+constexpr std::size_t kPackedHeaderBytes = 26u;
+/** Bytes of one packed beat. */
+constexpr std::size_t kPackedBeatBytes = 17u;
+/** Characters of the {@code {"p":"} prefix. */
+constexpr std::size_t kPackedOpen = 6u;
+/** Characters of the {@code "}} suffix. */
+constexpr std::size_t kPackedClose = 2u;
+
+/**
+ * Streams little-endian bytes into padded base64 without a staging buffer.
+ * The caller checks the total size before writing, so {@code put} never
+ * runs past the destination.
+ */
+class Base64Writer {
+public:
+  /** @param dst Where the next character goes. */
+  explicit Base64Writer(char *dst) noexcept : dst_(dst) {}
+
+  /** @param v Next byte of the binary block. */
+  void put(uint8_t v) noexcept {
+    carry_[filled_++] = v;
+    if (filled_ == 3u) {
+      emit(carry_[0], carry_[1], carry_[2], 3u);
+      filled_ = 0;
+    }
+  }
+
+  /** @param v Unsigned value, written little-endian in {@code bytes}. */
+  void put_le(uint64_t v, unsigned bytes) noexcept {
+    for (unsigned i = 0; i < bytes; i++) {
+      put(static_cast<uint8_t>(v >> (8u * i)));
+    }
+  }
+
+  /**
+   * Flushes the last one or two bytes with {@code =} padding.
+   *
+   * @return Where the next character goes (one past the last written).
+   */
+  char *finish() noexcept {
+    if (filled_ != 0u) {
+      emit(carry_[0], filled_ > 1u ? carry_[1] : uint8_t{0}, uint8_t{0},
+           filled_);
+      filled_ = 0;
+    }
+    return dst_;
+  }
+
+private:
+  /**
+   * Writes four characters for up to three bytes.
+   *
+   * @param a First byte.
+   * @param b Second byte (ignored when {@code count < 2}).
+   * @param c Third byte (ignored when {@code count < 3}).
+   * @param count Valid bytes, 1..3.
+   */
+  void emit(uint8_t a, uint8_t b, uint8_t c, unsigned count) noexcept {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const uint32_t w =
+        (static_cast<uint32_t>(a) << 16) | (static_cast<uint32_t>(b) << 8) | c;
+    dst_[0] = kAlphabet[(w >> 18) & 0x3Fu];
+    dst_[1] = kAlphabet[(w >> 12) & 0x3Fu];
+    dst_[2] = count > 1u ? kAlphabet[(w >> 6) & 0x3Fu] : '=';
+    dst_[3] = count > 2u ? kAlphabet[w & 0x3Fu] : '=';
+    dst_ += 4;
+  }
+
+  char *dst_;
+  std::array<uint8_t, 3> carry_{};
+  unsigned filled_ = 0;
+};
+
+/** @return Bit pattern of {@code v}, 0 when it is not finite. */
+[[nodiscard]] uint32_t f32_bits(float v) noexcept {
+  uint32_t bits = 0;
+  const float safe = std::isfinite(v) ? v : 0.0f;
+  std::memcpy(&bits, &safe, sizeof(bits));
+  return bits;
+}
+
+/**
+ * @param v Value.
+ * @param lo Lowest result.
+ * @param hi Highest result.
+ * @return {@code v} rounded to the nearest integer and clamped to
+ *         [lo, hi]; 0 (clamped) for NaN.
+ */
+[[nodiscard]] int64_t round_clamp(double v, int64_t lo, int64_t hi) noexcept {
+  if (!std::isfinite(v)) {
+    v = 0.0;
+  }
+  const double r = std::round(v);
+  if (r <= static_cast<double>(lo)) {
+    return lo;
+  }
+  if (r >= static_cast<double>(hi)) {
+    return hi;
+  }
+  return static_cast<int64_t>(r);
+}
+
+/**
+ * @param prev Previous beat of the batch.
+ * @param b Candidate beat.
+ * @return true when {@code b} can follow {@code prev} in the same batch.
+ */
+[[nodiscard]] bool packed_continues(const dsp_beat_t &prev,
+                                    const dsp_beat_t &b) noexcept {
+  if (b.grid_id != prev.grid_id ||
+      f32_bits(b.nominal_us) != f32_bits(prev.nominal_us)) {
+    return false;
+  }
+  const uint32_t d_seq = b.seq - prev.seq;
+  const bool seq_ok = b.seq > prev.seq && d_seq <= 255u;
+  const bool sample_ok = b.sample_index >= prev.sample_index &&
+                         b.sample_index - prev.sample_index <= UINT32_MAX;
+  const int64_t d_k = static_cast<int64_t>(b.k) - static_cast<int64_t>(prev.k);
+  return seq_ok && sample_ok && d_k >= INT16_MIN && d_k <= INT16_MAX;
+}
+
+/**
+ * Writes one packed beat (17 bytes).
+ *
+ * @param w Sink.
+ * @param prev Previous beat of the batch, or {@code b} itself for the first.
+ * @param b Beat.
+ * @param source_hz Sample rate for the fractional sample.
+ */
+void put_packed_beat(Base64Writer &w, const dsp_beat_t &prev,
+                     const dsp_beat_t &b, uint32_t source_hz) noexcept {
+  uint8_t status = 0;
+  if (b.status == DSP_BEAT_STARTED) {
+    status = 1u;
+  } else if (b.status == DSP_BEAT_REJECTED) {
+    status = 2u;
+  }
+  const auto flags = static_cast<uint8_t>(
+      (b.parity & 1u) | (b.amplitude_valid ? 2u : 0u) | (status << 2u));
+  const double frac_samples =
+      source_hz != 0u ? num(b.t_s) * static_cast<double>(source_hz) -
+                            static_cast<double>(b.sample_index)
+                      : 0.0;
+  const int64_t d_k = static_cast<int64_t>(b.k) - static_cast<int64_t>(prev.k);
+  const double amp = b.amplitude_valid ? num(b.amplitude_deg) : 0.0;
+  w.put(static_cast<uint8_t>(b.seq - prev.seq));
+  w.put(flags);
+  w.put_le(b.sample_index - prev.sample_index, 4);
+  w.put(static_cast<uint8_t>(round_clamp(frac_samples * 256.0, 0, 255)));
+  w.put_le(static_cast<uint64_t>(static_cast<uint16_t>(d_k)), 2);
+  w.put_le(static_cast<uint32_t>(static_cast<int32_t>(
+               round_clamp(num(b.u_us) * 10.0, INT32_MIN, INT32_MAX))),
+           4);
+  w.put_le(static_cast<uint64_t>(round_clamp(amp * 100.0, 0, UINT16_MAX)), 2);
+  w.put_le(static_cast<uint64_t>(
+               round_clamp(num(b.lift_ms) * 1000.0, 0, UINT16_MAX)),
+           2);
+}
+
+} // namespace
+
+int encode_beats_packed(char *dst, std::size_t dstlen, int off,
+                        const dsp_beat_t *beats, uint32_t n, uint32_t source_hz,
+                        uint32_t *emitted) {
+  /* Decide the batch length first so the writer never needs a bound. */
+  uint32_t count = 0;
+  const std::size_t base = off >= 0 ? static_cast<std::size_t>(off) : 0u;
+  while (beats != nullptr && count < n && count < kBeatsPackedMax &&
+         (count == 0u || packed_continues(beats[count - 1u], beats[count]))) {
+    const std::size_t bytes =
+        kPackedHeaderBytes + (count + 1u) * kPackedBeatBytes;
+    const std::size_t chars = 4u * ((bytes + 2u) / 3u);
+    if (base + kPackedOpen + chars + kPackedClose + kEnvelopeTail >= dstlen) {
+      break;
+    }
+    count++;
+  }
+  if (emitted != nullptr) {
+    *emitted = count;
+  }
+  off = appendf(dst, dstlen, off, "{\"p\":\"");
+  if (count != 0u && off >= 0) {
+    const dsp_beat_t &first = beats[0];
+    Base64Writer w(dst + off);
+    w.put(kBeatsPackedFormat);
+    w.put(static_cast<uint8_t>(count));
+    w.put_le(first.seq, 4);
+    w.put_le(first.grid_id, 4);
+    w.put_le(f32_bits(first.nominal_us), 4);
+    w.put_le(first.sample_index, 8);
+    w.put_le(static_cast<uint32_t>(first.k), 4);
+    for (uint32_t i = 0; i < count; i++) {
+      put_packed_beat(w, i != 0u ? beats[i - 1u] : first, beats[i], source_hz);
+    }
+    off = static_cast<int>(w.finish() - dst);
+  }
+  return appendf(dst, dstlen, off, "\"}");
+}
+
 int encode_event(char *dst, std::size_t dstlen, int off,
                  const dsp_event_t &ev) {
   char s0[24], s1[24], s2[24], s3[24];
@@ -521,31 +849,11 @@ int encode_events(char *dst, std::size_t dstlen, int off,
 }
 
 bool parse_i64(const char *s, int64_t *out) {
-  if (s == nullptr || out == nullptr) {
-    return false;
-  }
-  errno = 0;
-  char *end = nullptr;
-  const long long n = std::strtoll(s, &end, 10);
-  if (end == s || errno == ERANGE) {
-    return false;
-  }
-  *out = static_cast<int64_t>(n);
-  return true;
+  return control::json::parse_i64(s, out);
 }
 
 void i64_dec(int64_t v, char (&out)[24]) noexcept {
-  /* Magnitude as unsigned so INT64_MIN does not overflow. */
-  const uint64_t mag =
-      v < 0 ? 0u - static_cast<uint64_t>(v) : static_cast<uint64_t>(v);
-  char digits[24];
-  u64_dec(mag, digits);
-  if (v < 0) {
-    out[0] = '-';
-    std::memcpy(out + 1, digits, std::strlen(digits) + 1u);
-  } else {
-    std::memcpy(out, digits, std::strlen(digits) + 1u);
-  }
+  control::json::i64_dec(v, out);
 }
 
 int encode_ping(char *dst, std::size_t dstlen, int off, int64_t t,

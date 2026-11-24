@@ -14,6 +14,21 @@ export declare const TIMEGRAPHER_HID_USAGE = 0x0001;
 export declare const TIMEGRAPHER_HID_REPORT_ID = 0x01;
 
 /**
+ * BLE control service and characteristics (BLE_CONTROL_PLANE.md §4.1). Lowercase,
+ * as Web Bluetooth requires. Frames are the HID frames (BLE_CONTROL_PLANE.md §4.3).
+ */
+export declare const TIMEGRAPHER_BLE_SERVICE_UUID = 'c137e7c0-92b4-4d9e-87e0-9ba757169016';
+/** Host → device (Write, WriteWithoutResponse): one frame per ATT write. */
+export declare const TIMEGRAPHER_BLE_RX_UUID = 'c137e7c1-92b4-4d9e-87e0-9ba757169016';
+/** Device → host (Notify): one frame per notification. */
+export declare const TIMEGRAPHER_BLE_TX_UUID = 'c137e7c2-92b4-4d9e-87e0-9ba757169016';
+/**
+ * Read: UTF-8 JSON of at most 64 bytes (`p`, `mtu`, `fmax`, `seg`, and on firmware
+ * with large frames `txMax`: the largest device-to-host frame it uses, 244).
+ */
+export declare const TIMEGRAPHER_BLE_INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
+
+/**
  * Max reassembled JSON payload (bytes). The device sends replies up to 2047
  * bytes but accepts requests of at most 2030 bytes (35 fragments of 58);
  * longer requests are dropped silently, without a reply.
@@ -24,6 +39,8 @@ export declare const TIMEGRAPHER_HID_MAX_JSON_BYTES = 2048;
  * Error codes returned in HidErrorResponse. `notFound` and `internal` are
  * reserved: the current firmware never sends them. `tooLarge` is sent only
  * for a reply that exceeds 2047 bytes (never for an oversized request).
+ * `linkBusy`: another link holds control (HID_CONTROL_PLANE.md §4.6); the
+ * request was not dispatched.
  */
 export type HidErrorCode =
   | 'unknownOp'
@@ -33,6 +50,7 @@ export type HidErrorCode =
   | 'tooLarge'
   | 'busy'
   | 'flashError'
+  | 'linkBusy'
   | 'internal';
 
 /** CamelCase block keys in getState / patchState. */
@@ -48,7 +66,6 @@ export type DspBlockKey =
   | 'softGate'
   | 'notch'
   | 'agc'
-  | 'matchedFilter'
   | 'firBank'
   | 'spectrum';
 
@@ -99,13 +116,6 @@ export interface AgcParams {
   gainDb?: number;
 }
 
-export interface MatchedFilterParams {
-  threshold: number;
-  learn: number;
-  /** Latest score; read-only. */
-  score?: number;
-}
-
 export interface SpectrumParams {
   stride: number;
 }
@@ -127,6 +137,23 @@ export interface BeatRateParams {
    * Default 10. Also the averaging shown on the OLED. Not persisted.
    */
   avgS?: number;
+  /**
+   * Landmark timed for the rate fit: 0 = unlock (default), 1 = drop. The drop
+   * is timed by a learned beat template (16 beats per side, then 1/32 updates)
+   * and gives much lower jitter; the fit runs on unlock times until the
+   * templates are learned, then hands over to drop times (see
+   * {@link DspBeatRate.timingSource}).
+   * Beat error then comes from drop times and includes any difference in lift
+   * between the two sides. Changing it restarts the fit and the averages.
+   */
+  timingLandmark?: 0 | 1;
+  /**
+   * Seconds, 0..60 (default 0). After a cut the first `settleS` s of the new
+   * stretch do not enter the rolling means ({@link DspBeatRate.avg1s},
+   * {@link DspBeatRate.avgLong}), for rate, beat error and amplitude. The
+   * instant values are not affected. Not persisted.
+   */
+  settleS?: number;
 }
 
 export interface DspBlocksState {
@@ -141,7 +168,6 @@ export interface DspBlocksState {
   softGate?: BlockState<SoftGateParams>;
   notch?: BlockState<NotchParams>;
   agc?: BlockState<AgcParams>;
-  matchedFilter?: BlockState<MatchedFilterParams>;
   firBank?: BlockState<FilterBankParams>;
   spectrum?: BlockState<SpectrumParams>;
 }
@@ -218,7 +244,6 @@ export interface DspMetrics {
   postRms: number;
   noiseFloor: number;
   agcGainDb: number;
-  matchScore: number;
   clipCount: number;
   limiterCount: number;
 }
@@ -262,30 +287,96 @@ export interface DspSpectrum {
   peaks: DspSpectrumPeak[];
 }
 
-export interface DspMatched {
-  score: number;
-  templatePeak: number;
-  templateLen: number;
-  learned: boolean;
-}
-
 /** Instant or rolling-average view of rate / beat error / amplitude. */
 export interface DspBeatTimingWindow {
   rateSDay: number;
   beatErrorMs: number;
   amplitudeDeg: number;
+  /**
+   * Beat-error angle (degrees) = amplitudeDeg × π × vph / 7200 × beatErrorMs
+   * / 1000, at the nominal vph. Rolling: mean of the per-tick angles.
+   */
+  beatErrorAngleDeg: number;
   /** Instant: 0 or 1. Rolling: ticks contributing in the window. */
   samples: number;
   rateValid: boolean;
   beatErrorValid: boolean;
   amplitudeValid: boolean;
+  /** beatErrorAngleDeg is meaningful (BE and amplitude valid, locked). */
+  beatErrorAngleValid: boolean;
 }
+
+/**
+ * State of the beat analysis. `listening`: no tick since the stream reset, or
+ * the capture rate is unverified. `locking`: ticks seen, but no lock or the
+ * current stretch spans less than 5 s. `locked`: locked and the stretch spans
+ * at least 5 s (see `settled`). `noWatch`: the no-watch rule fired and no lock has held a
+ * stretch of 2 s since (`locked` may already be true again, without a rate).
+ */
+export type BeatState = 'listening' | 'locking' | 'locked' | 'noWatch';
+
+/**
+ * Whether a timing engine runs. 'off' in `usbMic` device mode: the host does
+ * the timing from the audio stream, and the device only detects ticks and the
+ * beat rate (`DspBeatRate`) or measures nothing (`DspQuartz`).
+ */
+export type AnalysisState = 'on' | 'off';
+
+/**
+ * Why the latest stretch of beats ended. `reset` is the value after a stream
+ * reset; it is not counted in `cuts`.
+ */
+export type BeatCutReason =
+  | 'none'
+  | 'reset'
+  | 'gap'
+  | 'jump'
+  | 'rate'
+  | 'clock'
+  | 'lockLost'
+  | 'noWatch';
 
 export interface DspBeatRate {
   vphRaw: number;
   vphNearest: number;
   confidence: number;
   locked: boolean;
+  /**
+   * See {@link BeatState}. With `analysis` 'off' it follows the lock alone:
+   * 'listening', 'locking' (ticks seen, no lock) or 'locked'; never 'noWatch'.
+   */
+  state: BeatState;
+  /**
+   * 'off' in `usbMic` mode (HID_CONTROL_PLANE.md §5.4): the timing engine does
+   * not run. `locked`, `vphNearest`, `vphRaw`, `confidence`,
+   * `intervalSamples` and `state` stay live; every `*Valid` flag is false, the
+   * rate, beat-error and amplitude values are 0, `stretchS` is 0 and no beats
+   * are recorded. Show "timing runs on the host" instead of the readings.
+   */
+  analysis: AnalysisState;
+  /**
+   * Cuts since the stream reset. A cut ends the stretch of beats: the next one
+   * starts with an empty fit, empty rolling means and an empty amplitude
+   * history. Counted only if the cut ended a stretch that had beats.
+   */
+  cuts: number;
+  /** Reason of the latest cut (see {@link BeatCutReason}). */
+  lastCut: BeatCutReason;
+  /**
+   * Span of the current stretch in seconds (first to latest accepted beat
+   * since the last cut, corrected clock); 0 when none is open. `rateValid` and
+   * `beatErrorValid` stay false until it reaches 5 (provisional readings; see
+   * {@link settled}).
+   */
+  stretchS: number;
+  /**
+   * The stretch spans at least 10 s: rate and beat error are final. Between 5
+   * and 10 s of stretch they are provisional and may be shown greyed. When it
+   * turns true the provisional rate and beat-error samples are dropped from
+   * the rolling means (`avg1s`, `avgLong`), which refill from settled
+   * readings.
+   */
+  settled: boolean;
   intervalSamples: number;
   eventsSeen: number;
   intervalsHeld: number;
@@ -297,8 +388,25 @@ export interface DspBeatRate {
   timebaseOk: boolean;
   /** Ticks in the least-squares rate fit (0 = no fit yet). */
   ratePoints: number;
-  /** RMS unlock-time scatter about the fit (µs). */
+  /** RMS scatter of the timed landmark (unlock or drop) about the fit (µs). */
   jitterUs: number;
+  /**
+   * Landmark the fit runs on: `unlock`, or `drop` after the handover. With
+   * `timingLandmark` 1 the fit starts on unlock times while the templates
+   * learn, then its stored points are shifted onto the drop time base (not a
+   * cut; the fit's rate is continuous).
+   */
+  timingSource: 'unlock' | 'drop';
+  /** Handovers from unlock to drop times since the stream reset. */
+  handovers: number;
+  /** Beats timed at the drop by the beat template since the last stream reset. */
+  dropTimedBeats: number;
+  /**
+   * Beats that should have been timed at the drop but fell back to the unlock
+   * (template learning, correlation below 0.4, or outside the envelope ring)
+   * since the last stream reset.
+   */
+  dropFallbacks: number;
   /** Sample-clock correction applied to all timing (ppm, + = board fast). */
   calPpm: number;
   /** Where calPpm came from. */
@@ -309,13 +417,45 @@ export interface DspBeatRate {
   beatErrorMs: number;
   /** Instant amplitude (degrees); same as instant.amplitudeDeg. */
   amplitudeDeg: number;
+  /**
+   * Signed beat error (ms), positive when the Tick comes late. Tick is the side
+   * that came late over the first seconds of the watch; the label holds until
+   * the nominal rate changes, so the value starts positive and can turn
+   * negative. Valid with beatErrorValid; beatErrorMs is its magnitude. Equals
+   * beatErrorMs with timingLandmark 0.
+   */
+  beatErrorSignedMs: number;
+  /**
+   * Where the beat error comes from: `unlock` (the unlock landmark: the
+   * unlock-timed fit, or the median over 2 s shape windows of the drop beat
+   * error corrected by each side's unlock-to-drop time) or `drop` (the
+   * drop-timed fit, while fewer than 3 windows exist or they disagree in sign).
+   */
+  beatErrorSource: 'unlock' | 'drop';
+  /**
+   * Amplitude of the Tick side (degrees): median over the 2 s shape windows of
+   * the averaging span. null unless timingLandmark is 1 and a window gave this
+   * side.
+   */
+  amplitudeTickDeg: number | null;
+  /** Amplitude of the Tock side (degrees); see amplitudeTickDeg. */
+  amplitudeTockDeg: number | null;
+  /**
+   * Shape windows of the averaging span: `used` gave an amplitude on both
+   * sides (and make up avgLong.amplitudeDeg), `total` held any beat.
+   */
+  amplitudeWindows: { used: number; total: number };
   /** Configured lift angle λ (degrees). */
   liftAngleDeg: number;
   /** Latest unlock→drop lift time (ms). */
   liftTimeMs: number;
+  /** Instant beat-error angle (degrees); same as instant.beatErrorAngleDeg. */
+  beatErrorAngleDeg: number;
   rateValid: boolean;
   beatErrorValid: boolean;
   amplitudeValid: boolean;
+  /** beatErrorAngleDeg is meaningful (BE and amplitude valid, locked). */
+  beatErrorAngleValid: boolean;
   /** Last computed tick set (mirrors top-level rate/BE/amp fields). */
   instant: DspBeatTimingWindow;
   /** Rolling ~1 s arithmetic mean of instant values. */
@@ -563,6 +703,11 @@ export interface DspQuartz {
   /** Measurement state. */
   state: QuartzStateName;
   /**
+   * 'off' in `usbMic` mode: nothing is measured, `state` is 'idle', `reason`
+   * is "USB Audio mode" and the mode setting is kept. 'on' otherwise.
+   */
+  analysis: AnalysisState;
+  /**
    * Current measurement (uint32). +1 on every (re)start, never repeats while
    * the firmware runs (wraps after 2^32); a change means drop history.
    */
@@ -727,9 +872,12 @@ export interface DspBeat {
   seq: number;
   /** Bumps whenever the beat fit restarts its grid (`status` 'started'). */
   gridId: number;
-  /** Integer part of the unlock sample time (uint64 string). */
+  /**
+   * Integer part of the sample time of the timed landmark: the unlock, or the
+   * drop when beatRate.timingLandmark is 1 (uint64 string).
+   */
   sampleIndex: SampleIndexString;
-  /** Unlock time (s of signal = sample / sourceHz), sub-sample precision. */
+  /** Time of that landmark (s of signal = sample / sourceHz), sub-sample precision. */
   tS: number;
   /** Grid index in half-period units since the grid origin. */
   k: number;
@@ -757,6 +905,22 @@ export interface DspBeats {
  * they do not fit one message; the rest follow in the next notify).
  */
 export type BeatsNotifyData = DspBeats;
+
+/**
+ * Packed beats (`beatsPacked` notify, packed getBeats result): one base64
+ * string (RFC 4648, padded) of a little-endian binary block, format version
+ * caps.beatsPacked. Header: u8 fmt (1), u8 n (1..32), u32 seq0, u32 gridId,
+ * f32 nominalUs, u64 sample0, i32 k0, then n beats of 17 bytes: u8 dSeq,
+ * u8 flags (bit 0 parity, bit 1 amplitudeValid, bits 2-3 status 0 accepted /
+ * 1 started / 2 rejected), u32 dSample, u8 frac (1/256 sample; tS =
+ * (sampleIndex + frac / 256) / sourceHz), i16 dK, i32 u (0.1 us), u16 amp
+ * (0.01 deg, 0 when invalid), u16 lift (us, saturating). Deltas are against
+ * the previous beat; the first beat's deltas are 0. A batch never spans a
+ * grid or nominal change. Empty string: no beats.
+ */
+export interface DspBeatsPacked {
+  p: string;
+}
 
 /** Pipeline node group (A3). */
 export type PipelineGroup = 'analysis' | 'process' | 'source' | 'sink' | 'quartz';
@@ -882,6 +1046,8 @@ export interface HidHelloCaps {
   beats?: boolean;
   /** Max getBeats.max (8). */
   beatsMax?: number;
+  /** Packed beats format version (1); absent = subscribe.beatsPacked and getBeats.packed do not exist. */
+  beatsPacked?: number;
   /** getGps exists AND the build has GPS_UART_RX (false: getGps replies badRequest). */
   gps?: boolean;
   /** The build has PPS_GPIO. */
@@ -892,6 +1058,42 @@ export interface HidHelloCaps {
   timebaseLogMax?: number;
   /** DSP data-flow graph. Absent on older firmware. */
   pipeline?: PipelineNode[];
+  /** Built with BLE (`TG_BLE=1`, Pico 2 W). Absent = false. See BLE_CONTROL_PLANE.md. */
+  ble?: boolean;
+  /** Serial CLI built (`TG_SERIAL_CLI=1`). Absent = false. */
+  cli?: boolean;
+}
+
+/** Control link a request arrived on (`hello.link`, `claim`, `controlReleased`). */
+export type HidLinkKind = 'usbHid' | 'ble';
+
+/** The link a `hello` arrived on (`hello.link`). */
+export interface HidHelloLink {
+  kind: HidLinkKind;
+  /** Negotiated ATT MTU. Present only for `ble`. */
+  mtu?: number;
+  /**
+   * Device-to-host frame size in bytes that applies to messages after this
+   * reply: 63 unless the host sent `hello {frameMax}` on BLE (BLE_CONTROL_PLANE.md
+   * §4.3a). Absent on older firmware.
+   */
+  frameMax?: number;
+}
+
+/**
+ * Who holds the control plane (`hello.control`, `getLink.control`). Only one
+ * link owns control at a time (HID_CONTROL_PLANE.md §4.6).
+ */
+export interface HidHelloControl {
+  /** Owning link, or null when no link owns control. */
+  owner: HidLinkKind | null;
+  /** True when the owner is the link this request arrived on. */
+  self: boolean;
+  /**
+   * Lease length in ms: an owner that sends no request for this long can be
+   * taken over. 10000 in current firmware.
+   */
+  leaseMs: number;
 }
 
 export interface HidHelloResult {
@@ -902,6 +1104,10 @@ export interface HidHelloResult {
   vid: number;
   pid: number;
   caps: HidHelloCaps;
+  /** The link this request arrived on. Absent on older firmware. */
+  link?: HidHelloLink;
+  /** Current owner of the control plane. Absent on older firmware. */
+  control?: HidHelloControl;
 }
 
 export interface HidSubscription {
@@ -920,6 +1126,12 @@ export interface HidSubscription {
    * still talk to older firmware, which omits it.
    */
   beats?: boolean;
+  /**
+   * Push new beats as `beatsPacked` notifies (at most 32 per notify, oldest
+   * first); replaces `beats` while set. Needs caps.beatsPacked; typed
+   * optional for older firmware.
+   */
+  beatsPacked?: boolean;
 }
 
 /** Partial subscribe body; omitted fields leave prior values unchanged. */
@@ -935,7 +1147,6 @@ export type HidOp =
   | 'resetTiming'
   | 'getBeat'
   | 'getSpectrum'
-  | 'getMatched'
   | 'getEvents'
   | 'getErrors'
   | 'clearErrors'
@@ -955,7 +1166,10 @@ export type HidOp =
   | 'getBeats'
   | 'getGps'
   | 'getTimebaseLog'
-  | 'clearTimebaseLog';
+  | 'clearTimebaseLog'
+  | 'claim'
+  | 'getLink'
+  | 'getDiag';
 
 interface HidEnvelopeBase {
   v: HidProtocolVersion;
@@ -968,6 +1182,14 @@ export interface HidRequestBase extends HidEnvelopeBase {
 
 export interface HidHelloRequest extends HidRequestBase {
   op: 'hello';
+  /**
+   * BLE only: asks for device-to-host frames of up to this many bytes on this
+   * connection (BLE_TRANSPORT_PLAN.md §14.3). The device answers this hello
+   * with the old size, then uses `min(frameMax, txMax, attMtu - 3)` (INFO
+   * `txMax`, 244 on the Pico 2 W); the result's `link.frameMax` reports it.
+   * Below 63 or absent keeps the current value. Ignored on USB HID.
+   */
+  frameMax?: number;
 }
 
 export interface HidPingRequest extends HidRequestBase {
@@ -1117,13 +1339,17 @@ export interface HidStopRequest extends HidRequestBase {
 }
 
 /**
- * Result: {@link DspBeats}, newest first. The reply holds as many of the
- * requested beats as fit one message (fewer than `max` is possible).
+ * Result: {@link DspBeats}, newest first, or with `packed: true`
+ * {@link DspBeatsPacked}, newest last. The reply holds as many of the
+ * requested beats as fit one message (fewer than `max` is possible); a packed
+ * reply holds the newest batch only.
  */
 export interface HidGetBeatsRequest extends HidRequestBase {
   op: 'getBeats';
   /** 1..caps.beatsMax (8), default 8; out-of-range values are clamped. */
   max?: number;
+  /** Return the packed form (needs caps.beatsPacked); `max` then goes up to 32. */
+  packed?: boolean;
 }
 
 /** Result: {@link GpsInfo}. `badRequest` "GPS not built in" when caps.gps is false. */
@@ -1148,9 +1374,209 @@ export interface HidGetSpectrumRequest extends HidRequestBase {
   op: 'getSpectrum';
 }
 
-/** Result: {@link DspMatched} (matched-filter score and template state). */
-export interface HidGetMatchedRequest extends HidRequestBase {
-  op: 'getMatched';
+/**
+ * Asks to own the control plane (HID_CONTROL_PLANE.md §4.6). Without
+ * `takeover` it fails with `linkBusy` while another link holds a live lease.
+ * With `takeover: true` it takes control at once; the previous owner gets a
+ * `controlReleased` notify. Result: {@link HidClaimResult}.
+ */
+export interface HidClaimRequest extends HidRequestBase {
+  op: 'claim';
+  /** Default false. */
+  takeover?: boolean;
+}
+
+/** Result of `claim`. */
+export interface HidClaimResult {
+  /** The link that owns control after the request (the requesting link). */
+  owner: HidLinkKind;
+  /** The owner before the request, or null when none. */
+  previous: HidLinkKind | null;
+}
+
+/**
+ * BLE link status (`getLink.ble`). Present only on builds with `TG_BLE=1`.
+ * Counters are since boot unless the firmware resets them.
+ */
+export interface HidBleLinkStatus {
+  /** BLE is turned on (`ble off` turns it off). */
+  enabled: boolean;
+  /** Advertised local name, `TG-XXXX`. */
+  name: string;
+  /** Bluetooth device address of the stand, as text. */
+  address: string;
+  /** Advertising is running (the stand is connectable and no central is connected). */
+  advertising: boolean;
+  /** A central is connected with notifications on. */
+  connected: boolean;
+  /** Negotiated ATT MTU (23 until the exchange completes). */
+  mtu: number;
+  /** Current connection interval (µs). */
+  connIntervalUs: number;
+  /**
+   * Progress of the device's connection-interval request: 0 none yet, 1 asked
+   * for 15 ms, 2 asked for 15 to 30 ms after a rejection, 3 gave up.
+   */
+  connParamStep: 0 | 1 | 2 | 3;
+  /** Connection-parameter requests the central rejected. */
+  connParamRejects: number;
+  /** Frames received on RX. */
+  rxFrames: number;
+  /** Frames sent on TX. */
+  txFrames: number;
+  /** Frames dropped because the RX ring was full. */
+  rxDropped: number;
+  /** RX writes rejected as invalid (longer than 63 bytes, bad length). */
+  rxInvalid: number;
+  /** TX sends deferred by the stack (backpressure). */
+  txRetries: number;
+  /** Connections lost since boot. */
+  disconnects: number;
+  /** HCI disconnect reason of the last loss; 0 = none since boot. */
+  lastDisconnectReason: number;
+  /** Core running the radio: 0 (`TG_BLE_CORE=0`) or 1 (`TG_BLE_CORE=1`). */
+  core: 0 | 1;
+  /** Free bytes of core 1's stack (high-water mark). Present only when `core` is 1. */
+  core1StackFree?: number;
+}
+
+/** Result of `getLink`: every link and who owns control. */
+export interface HidLinkStatus {
+  /** The USB HID link. */
+  usbHid: {
+    /** The USB device is enumerated and the HID interface is mounted. */
+    mounted: boolean;
+  };
+  /** The BLE link. Absent without `TG_BLE`. */
+  ble?: HidBleLinkStatus;
+  /** Same shape as `hello.control`. */
+  control: HidHelloControl;
+}
+
+/**
+ * Asks for the link status. Result: {@link HidLinkStatus}. An owner-only op
+ * (HID_CONTROL_PLANE.md §4.6): a non-owner gets `linkBusy` while another link
+ * holds a live lease. Otherwise the request auto-claims control for the
+ * requesting link, like any other op. To read ownership without claiming,
+ * use `hello.control`.
+ */
+export interface HidGetLinkRequest extends HidRequestBase {
+  op: 'getLink';
+}
+
+/**
+ * Asks for the diagnostic counters. Result: {@link HidDiag}. Same ownership
+ * rule as `getLink` (HID_CONTROL_PLANE.md §4.6): `linkBusy` for a non-owner
+ * while another link holds a live lease, otherwise auto-claim. Read
+ * `hello.control` to see the owner without claiming.
+ */
+export interface HidGetDiagRequest extends HidRequestBase {
+  op: 'getDiag';
+}
+
+/**
+ * Result of `getDiag`: the firmware diagnostic block (`diag_counters_t`,
+ * `include/diagnostics.h`) with camelCase names. Most fields are counters
+ * that only increase; the ADC, ring and PCM peak / min / max fields are
+ * extrema of the current diagnostic window.
+ */
+export interface HidDiag {
+  /** USB enumerations (bus resets seen by the device). */
+  usbEnumerationCount: number;
+  /** UAC2 audio streams opened by the host. */
+  usbAudioStreamOpenCount: number;
+  /** UAC2 audio streams closed. */
+  usbAudioStreamCloseCount: number;
+  /** USB suspend events. */
+  usbSuspendCount: number;
+  /** USB resume events. */
+  usbResumeCount: number;
+  /** Preamp boost rail switched on. */
+  boostOnCount: number;
+  /** Preamp boost rail switched off. */
+  boostOffCount: number;
+  /** Preamp settle waits started. */
+  preampSettleStartCount: number;
+  /** Preamp settle waits completed. */
+  preampSettleDoneCount: number;
+  /** Preamp starts aborted before settling. */
+  preampStartAbortedCount: number;
+  /** Total time spent suspended (ms). */
+  usbSuspendDurationMs: number;
+  /** Samples taken by the ADC or PCM1808 capture path. */
+  adcTotalSampleCount: number;
+  /** ADC conversion errors. */
+  adcConversionErrorCount: number;
+  /** Capture DMA buffers completed. */
+  dmaCompleteCount: number;
+  /** Capture DMA buffers overwritten before they were processed. */
+  dmaOverrunCount: number;
+  /** PCM ring reads that found it empty (USB audio starved). */
+  pcmRingUnderrunCount: number;
+  /** PCM ring writes that found it full (samples dropped). */
+  pcmRingOverrunCount: number;
+  /** USB IN audio packets sent. */
+  usbInPacketCount: number;
+  /** Audio samples sent in USB IN packets. */
+  usbInSampleCount: number;
+  /** USB IN writes that could not send a full packet. */
+  usbShortWriteCount: number;
+  /** Lowest PCM ring fill in the current diagnostic window (samples). */
+  ringMinOccupancy: number;
+  /** Highest PCM ring fill in the current diagnostic window (samples). */
+  ringMaxOccupancy: number;
+  /** Lowest ADC code in the current window. */
+  adcMinCode: number;
+  /** Highest ADC code in the current window. */
+  adcMaxCode: number;
+  /** Sum of ADC codes in the current window (for the mean). */
+  adcMeanCodeAccum: number;
+  /** Number of ADC codes summed in the current window. */
+  adcMeanCodeCount: number;
+  /** Learned or forced midrail (ADC counts) used for DC removal. */
+  adcDcCounts: number;
+  /** Max |code - dc| in the current window (ADC counts, pre-scale). */
+  adcAcPeakCounts: number;
+  /** Max |PCM24| after scale, before the optional LPF, in the window. */
+  adcPcmPeakAbs: number;
+  /** 1 when the PCM1808 clock configuration was accepted, else 0. */
+  pcm1808ClockConfigOk: number;
+  /** System clock frequency used for the PCM1808 clocks (Hz). */
+  pcm1808ClkSysHz: number;
+  /** USB clock frequency used for the PCM1808 clocks (Hz). */
+  pcm1808ClkUsbHz: number;
+  /** Nominal PCM1808 master clock (Hz). */
+  pcm1808MclkNominalHz: number;
+  /** Waits for the PCM1808 to start or settle before capture. */
+  pcm1808StartupWaitCount: number;
+  /** PCM1808 DMA blocks completed. */
+  pcm1808DmaBlocks: number;
+  /** Stereo frames received from the PCM1808 PIO. */
+  pcm1808StereoFramesReceived: number;
+  /** Mono samples emitted into the analysis path. */
+  pcm1808MonoSamplesEmitted: number;
+  /** PCM1808 DMA blocks overwritten before they were processed. */
+  pcm1808DmaBlockOverruns: number;
+  /** PIO FIFO stall or overflow events on the PCM1808 input. */
+  pcm1808PioFifoStallOrOverflow: number;
+  /** Max |sample| after scale in the window. */
+  pcm1808SamplePeakAbs: number;
+  /** Left-channel frames at the 24-bit full-scale or minimum code. */
+  pcm1808SaturatedCount: number;
+  /** Max |left24| of the raw I2S frames in the window (pre-DSP). */
+  pcm1808RawLeftPeakAbs: number;
+  /** Max |right24| of the raw I2S frames in the window (pre-DSP). */
+  pcm1808RawRightPeakAbs: number;
+  /** Last measured codec frame rate (milli-hertz; 0 = not measured yet). */
+  pcm1808FrameRateMhz: number;
+  /** Rate check state: 0 pending, 1 ok, 2 unsupported, 3 unknown. */
+  pcm1808RateStatus: number;
+  /** Accepted MCLK / fs ratio (256, 384, 512), or 0. */
+  pcm1808MclkRatio: number;
+  /** Sample repeat currently applied into the 48 kHz ring. */
+  pcm1808Upsample: number;
+  /** Captured blocks never processed; the source index skips them. */
+  pcm1808BlocksLost: number;
 }
 
 export type HidRequest =
@@ -1163,7 +1589,6 @@ export type HidRequest =
   | HidResetTimingRequest
   | HidGetBeatRequest
   | HidGetSpectrumRequest
-  | HidGetMatchedRequest
   | HidGetEventsRequest
   | HidGetErrorsRequest
   | HidClearErrorsRequest
@@ -1183,7 +1608,10 @@ export type HidRequest =
   | HidGetBeatsRequest
   | HidGetGpsRequest
   | HidGetTimebaseLogRequest
-  | HidClearTimebaseLogRequest;
+  | HidClearTimebaseLogRequest
+  | HidClaimRequest
+  | HidGetLinkRequest
+  | HidGetDiagRequest;
 
 export interface HidSuccessResponse<T = unknown> extends HidEnvelopeBase {
   id: number;
@@ -1256,6 +1684,23 @@ export interface HidBeatsNotify extends HidNotifyBase {
   data: BeatsNotifyData;
 }
 
+/** New beats in the packed format, oldest first (subscribe.beatsPacked). */
+export interface HidBeatsPackedNotify extends HidNotifyBase {
+  op: 'beatsPacked';
+  data: DspBeatsPacked;
+}
+
+/**
+ * Sent to the previous owner when another link takes control (`claim` with
+ * `takeover`, or an auto-claim after the lease expired), if its link is still
+ * connected (HID_CONTROL_PLANE.md §4.6). The host should stop subscriptions
+ * and show that control moved; `to` is the new owner.
+ */
+export interface HidControlReleasedNotify extends HidNotifyBase {
+  op: 'controlReleased';
+  data: { to: HidLinkKind };
+}
+
 export type HidNotify =
   | HidMetricsNotify
   | HidTimingNotify
@@ -1264,7 +1709,9 @@ export type HidNotify =
   | HidErrorNotify
   | HidQuartzNotify
   | HidQuartzPulseNotify
-  | HidBeatsNotify;
+  | HidBeatsNotify
+  | HidBeatsPackedNotify
+  | HidControlReleasedNotify;
 
 /** Any device → host JSON message. */
 export type HidInboundMessage = HidResponse | HidNotify;
@@ -1302,7 +1749,6 @@ export interface HidResultMap {
   resetTiming: { cleared: true };
   getBeat: DspBeatRate;
   getSpectrum: DspSpectrum;
-  getMatched: DspMatched;
   getEvents: { events: DspEvent[] };
   getErrors: { errors: DspError[] };
   clearErrors: { cleared: true };
@@ -1319,10 +1765,13 @@ export interface HidResultMap {
   setDevice: DeviceStatus;
   start: DeviceStatus;
   stop: DeviceStatus;
-  getBeats: DspBeats;
+  getBeats: DspBeats | DspBeatsPacked;
   getGps: GpsInfo;
   getTimebaseLog: TimebaseLog;
   clearTimebaseLog: TimebaseLog;
+  claim: HidClaimResult;
+  getLink: HidLinkStatus;
+  getDiag: HidDiag;
 }
 
 /** Notify `op` to `data` map. */
@@ -1335,4 +1784,6 @@ export interface HidNotifyDataMap {
   quartz: DspQuartz;
   quartzPulse: DspQuartzPulse;
   beats: BeatsNotifyData;
+  beatsPacked: DspBeatsPacked;
+  controlReleased: { to: HidLinkKind };
 }

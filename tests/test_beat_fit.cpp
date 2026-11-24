@@ -133,6 +133,21 @@ int main() {
     expect_near("late be", o.be_ms, 0.3, 0.005);
   }
 
+  /* beat_fit_span: newest minus oldest point, also after the window slides. */
+  {
+    beat_fit_t f;
+    beat_fit_reset(&f);
+    const double half = kFs * 3600.0 / 28800.0;
+    if (beat_fit_span(&f) != 0.0) {
+      std::printf("FAIL span of an empty fit\n");
+      assert(false);
+    }
+    for (int i = 0; i < 40; i++) {
+      (void)beat_fit_push(&f, 1000.0 + i * half, half, 2.0 * kFs, nullptr);
+    }
+    expect_near("span after slide (s)", beat_fit_span(&f) / kFs, 2.0, 0.126);
+  }
+
   /* Long run: window slides and rebases many times. */
   {
     Out o = run({36000, -15.0, 0.5, 0.0, false, 0, 0, 600.0, 0.0}, 6.0);
@@ -191,6 +206,45 @@ int main() {
     /* Gap longer than max restarts the grid: k and u restart at 0. */
     r = beat_fit_push(&f, tl + 100.0 * nominal, nominal, 2.0 * kFs, &pt);
     assert(r == BEAT_FIT_STARTED && pt.k == 0 && pt.u == 0.0);
+  }
+
+  /*
+   * beat_fit_shift_points: a fit fed unlock times and then shifted by a
+   * per-side offset matches a fit fed the shifted times from the start, also
+   * after the window has slid (odd k_base) and with a gain-induced rate.
+   */
+  {
+    static beat_fit_t a, b;
+    beat_fit_reset(&a);
+    beat_fit_reset(&b);
+    const double nominal = kFs * 3600.0 / 21600.0;
+    const double true_half = nominal * (1.0 - 12.0 / 86400.0);
+    const double off_even = 40.0, off_odd = 52.5; /* samples */
+    int32_t k = 0;
+    while (k < 300 || (a.k_base & 1) == 0) { /* slid, odd k_base */
+      const double t = 9000.0 + true_half * k;
+      beat_fit_push(&a, t, nominal, 4.0 * kFs);
+      beat_fit_push(&b, t + ((k & 1) ? off_odd : off_even), nominal, 4.0 * kFs);
+      k++;
+    }
+    assert((a.k_base & 1) != 0);
+    beat_fit_shift_points(&a, off_even, off_odd);
+    assert(a.u[a.head] == 0.f && a.k[a.head] == 0);
+    beat_fit_result_t ra{}, rb{};
+    assert(beat_fit_solve(&a, &ra) && beat_fit_solve(&b, &rb));
+    expect_near("shift half period", ra.half_period, rb.half_period, 1e-3);
+    expect_near("shift offset c", ra.alt_offset, rb.alt_offset, 1e-3);
+    expect_near("shift last_t", a.last_t, b.last_t, 1e-6);
+    expect_near("shift grid origin", a.grid_origin + 0.0, b.grid_origin, 1e-6);
+    /* The next point on the shifted base is accepted on the same slot. */
+    const double t_next = 9000.0 + true_half * k + (k & 1 ? off_odd : off_even);
+    beat_fit_point_t pa{}, pb{};
+    assert(beat_fit_push(&a, t_next, nominal, 4.0 * kFs, &pa) ==
+           BEAT_FIT_ACCEPTED);
+    assert(beat_fit_push(&b, t_next, nominal, 4.0 * kFs, &pb) ==
+           BEAT_FIT_ACCEPTED);
+    assert(pa.k == pb.k);
+    expect_near("shift next u", pa.u, pb.u, 1e-6);
   }
 
   std::printf("test_beat_fit: OK\n");

@@ -133,6 +133,16 @@
 #endif
 
 /**
+ * Compile-time: build the legacy serial (CDC) command-line interface and the
+ * periodic {@code Serial} diagnostic dump. Set to 1 only by the {@code [cli]}
+ * section of platformio.ini (the {@code *_cli} envs); default 0 (plan §5.7).
+ * The CDC interface itself is present in every build.
+ */
+#ifndef TG_SERIAL_CLI
+#define TG_SERIAL_CLI 0
+#endif
+
+/**
  * Compile-time: allow CDC ({@code Serial}) diagnostic dump lines when the
  * runtime print flag is on ({@code diag on} in the CLI). Prints start
  * disabled; counters still accumulate either way.

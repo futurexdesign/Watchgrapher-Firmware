@@ -187,6 +187,68 @@ beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
   return BEAT_FIT_ACCEPTED;
 }
 
+int32_t beat_fit_predict_k(const beat_fit_t *f, double t,
+                           double nominal_half_period, bool *new_grid) {
+  *new_grid = true;
+  if (nominal_half_period <= 0.0 || f->n == 0u ||
+      nominal_half_period != f->nominal) {
+    return 0;
+  }
+  const double steps = (t - f->last_t) / f->nominal;
+  const double whole = floor(steps + 0.5);
+  if (whole > static_cast<double>(BEAT_FIT_MAX_GAP)) {
+    return 0;
+  }
+  const auto grid_err = static_cast<float>(fabs(steps - whole));
+  if (whole < 1.0 || grid_err > BEAT_FIT_MAX_GRID_ERR) {
+    if (f->rejects + 1u >= BEAT_FIT_MAX_REJECTS) {
+      return 0;
+    }
+    /* A reject reports the slot nearest to the last accepted point. */
+    *new_grid = false;
+    return f->last_k + static_cast<int32_t>(whole) + f->k_base;
+  }
+  *new_grid = false;
+  return f->last_k + static_cast<int32_t>(whole) + f->k_base;
+}
+
+void beat_fit_shift_points(beat_fit_t *f, double offset_even,
+                           double offset_odd) {
+  if (f->n == 0u) {
+    return;
+  }
+  auto offset_of = [&](int32_t k_window) {
+    return ((k_window + f->k_base) & 1) != 0 ? offset_odd : offset_even;
+  };
+  const double off0 = offset_of(f->k[f->head]);
+  for (uint32_t i = 0; i < f->n; i++) {
+    const uint32_t j = ring_index(f, i);
+    f->u[j] += static_cast<float>(offset_of(f->k[j]) - off0);
+  }
+  f->origin += off0;
+  f->grid_origin += offset_even;
+  f->last_t += offset_of(f->last_k);
+}
+
+double beat_fit_residual(const beat_fit_t *f, const beat_fit_result_t &r,
+                         double t) {
+  if (f->n == 0u) {
+    return 0.0;
+  }
+  const double whole = floor((t - f->last_t) / f->nominal + 0.5);
+  const auto k = f->last_k + static_cast<int32_t>(whole);
+  const double u = t - (f->origin + static_cast<double>(k) * f->nominal);
+  const double line = static_cast<double>(r.intercept) +
+                      static_cast<double>(r.half_period_delta) * k +
+                      static_cast<double>(r.alt_offset) * parity(k);
+  return u - line;
+}
+
+double beat_fit_span(const beat_fit_t *f) {
+  /* The oldest point is always rebased to sit exactly at origin. */
+  return f->n > 1u ? f->last_t - f->origin : 0.0;
+}
+
 bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
   *out = {};
   if (f->n < BEAT_FIT_MIN_POINTS) {
@@ -199,7 +261,7 @@ bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
 
   /* Residuals of the first fit; intercept from the means. */
   auto residuals = [&](const bool *use, float dd, float cc, float *r,
-                       float *rms) {
+                       float *rms, float *intercept) {
     float kbar = 0.f, sbar = 0.f, ubar = 0.f;
     uint32_t m = 0;
     for (uint32_t i = 0; i < f->n; i++) {
@@ -214,6 +276,7 @@ bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
     }
     const float inv_m = m ? 1.f / static_cast<float>(m) : 0.f;
     const float a = (ubar - dd * kbar - cc * sbar) * inv_m;
+    *intercept = a;
     float ss = 0.f;
     for (uint32_t i = 0; i < f->n; i++) {
       const uint32_t j = ring_index(f, i);
@@ -229,7 +292,8 @@ bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
   static float r[BEAT_FIT_CAP];
   static bool use[BEAT_FIT_CAP];
   float rms = 0.f;
-  residuals(nullptr, d, c, r, &rms);
+  float a = 0.f;
+  residuals(nullptr, d, c, r, &rms, &a);
 
   const float gate = fmaxf(3.5f * rms, 1.f);
   uint32_t kept = 0;
@@ -240,12 +304,13 @@ bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out) {
   uint32_t m = f->n;
   if (kept < f->n && kept >= BEAT_FIT_MIN_POINTS) {
     m = fit(f, use, &d, &c, &alt);
-    residuals(use, d, c, r, &rms);
+    residuals(use, d, c, r, &rms, &a);
   }
 
   out->half_period = f->nominal + static_cast<double>(d);
   out->half_period_delta = d;
   out->alt_offset = c;
+  out->intercept = a;
   out->resid_rms = rms;
   out->points = m;
   out->alt_valid = alt;

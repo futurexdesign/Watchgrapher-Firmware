@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 /** "28,800" style thousands grouping. */
 static inline void ui_format_thousands(uint32_t v, char *out, size_t n) {
@@ -291,9 +292,9 @@ static constexpr size_t kUiStatusMaxChars = 21;
  *
  * | Condition                               | Text                |
  * |-----------------------------------------|---------------------|
- * | not capturing, USB mic mode (no frozen) | "no host stream"    |
+ * | not capturing, USB mic mode (no frozen) | "no stream"         |
  * | not capturing, standalone (no frozen)   | "stopped"           |
- * | capture rate not verified               | "clock check..."    |
+ * | capture rate not verified               | "clock check"       |
  * | verified rate is not 48 kHz             | "unsupported rate"  |
  * | running, no rate yet                    | "acquiring..."      |
  * | motor: no jump, long gate               | "no inhibition"     |
@@ -318,11 +319,11 @@ static constexpr size_t kUiStatusMaxChars = 21;
 ui_quartz_status_text(bool streaming, bool standalone, dsp_quartz_mode_t mode,
                       dsp_quartz_state_t state, dsp_quartz_inhibition_t inhib) {
   if (!streaming && state != DSP_QUARTZ_STATE_DONE) {
-    return standalone ? "stopped" : "no host stream";
+    return standalone ? "stopped" : "no stream";
   }
   switch (state) {
   case DSP_QUARTZ_STATE_WAIT_TIMEBASE:
-    return "clock check...";
+    return "clock check";
   case DSP_QUARTZ_STATE_UNSUPPORTED_RATE:
     return "unsupported rate";
   case DSP_QUARTZ_STATE_MEASURING:
@@ -348,4 +349,119 @@ ui_quartz_status_text(bool streaming, bool standalone, dsp_quartz_mode_t mode,
   default: /* NONE: fewer than three pulses */
     return "acquiring...";
   }
+}
+
+/* ---- Header layout (plan section 5.6) ---------------------------------- */
+
+/** Panel width in pixels (SH1107 128 x 128). */
+static constexpr int kUiPanelW = 128;
+/** Width of one size-1 character cell of the classic 5 x 7 font, in pixels. */
+static constexpr int kUiCharW = 6;
+/** GPS pill width and height in pixels. */
+static constexpr int kUiGpsW = 23;
+/** Bluetooth badge width and height in pixels (square). */
+static constexpr int kUiBleW = 11;
+/** Corner radius of the Bluetooth badge in pixels (plan §5.6). */
+static constexpr int kUiBleRadius = 3;
+/** Text padding on each side of an inverse text badge, in pixels. */
+static constexpr int kUiBadgePad = 3;
+/** Height of an inverse text badge in pixels (same as the GPS pill). */
+static constexpr int kUiBadgeH = 11;
+/** Corner radius of an inverse text badge in pixels. */
+static constexpr int kUiBadgeRadius = 5;
+/** Quartz badge text, full and short form. */
+static constexpr char kUiUncalText[] = "UNCAL";
+static constexpr char kUiUncText[] = "UNC";
+/** Gap after the quartz tag before the full {@code UNCAL} badge, in pixels. */
+static constexpr int kUiUncalGap = 6;
+/** Gap after the quartz tag before the short {@code UNC} badge, in pixels. */
+static constexpr int kUiUncGap = 3;
+/** Width of an inverse text badge with {@code chars} characters, in pixels. */
+[[nodiscard]] static constexpr int ui_badge_w(size_t chars) {
+  return static_cast<int>(chars) * kUiCharW + 2 * kUiBadgePad;
+}
+/** Minimum gap in pixels between two neighbouring header elements. */
+static constexpr int kUiHeaderGap = 2;
+/** Mode tag "SA" width in pixels. */
+static constexpr int kUiTagSaW = 2 * kUiCharW;
+/** Mode tag "USB" width in pixels. */
+static constexpr int kUiTagUsbW = 3 * kUiCharW;
+
+/** Bluetooth rune: 5 columns by 9 rows, MSB = left pixel, 5 bits used. */
+static constexpr uint8_t kUiBleRune[9] = {0x20, 0x30, 0xA8, 0x70, 0x20,
+                                          0x70, 0xA8, 0x30, 0x20};
+/** Rune width in pixels. */
+static constexpr int kUiBleRuneW = 5;
+/** Rune height in pixels. */
+static constexpr int kUiBleRuneH = 9;
+
+/**
+ * Horizontal positions of the right-hand header elements. Elements are laid
+ * out right to left: GPS pill, Bluetooth badge, mode tag. All x values are in
+ * pixels; "end" values are exclusive.
+ */
+struct UiHeaderLayout {
+  int gps_x;   /**< GPS pill left edge, or -1 when not drawn. */
+  int ble_x;   /**< Bluetooth badge left edge, or -1 when not drawn. */
+  int tag_x;   /**< Mode tag left edge. */
+  int tag_end; /**< Mode tag right edge, exclusive. */
+  /** Width the left-hand text (mechanical status or quartz tag + badge)
+   * may use: it must end at or before this x (tag_x minus the gap). */
+  int max_left_px;
+};
+
+/**
+ * Computes the header layout. Pure, so the tests can prove that no
+ * combination overlaps. With {@code ble} false the GPS pill and the tag sit
+ * where they always did.
+ *
+ * @param pps        The GPS pill is drawn (build has PPS).
+ * @param ble        The Bluetooth badge is drawn (BLE built and enabled).
+ * @param standalone Tag is "SA" (else "USB").
+ */
+[[nodiscard]] static constexpr UiHeaderLayout
+ui_header_layout(bool pps, bool ble, bool standalone) {
+  UiHeaderLayout l{};
+  int right = kUiPanelW; /* exclusive right edge of the free area */
+  l.gps_x = -1;
+  l.ble_x = -1;
+  if (pps) {
+    l.gps_x = kUiPanelW - kUiGpsW;
+    right = l.gps_x - kUiHeaderGap;
+  }
+  if (ble) {
+    l.ble_x = (pps ? right : kUiPanelW) - kUiBleW;
+    right = l.ble_x - kUiHeaderGap;
+  }
+  /* Without a badge to its right the tag ends at the panel edge minus 1 px
+   * (historical placement); beside a badge it keeps the 2 px gap. */
+  l.tag_end = (pps || ble) ? right : kUiPanelW - 1;
+  l.tag_x = l.tag_end - (standalone ? kUiTagSaW : kUiTagUsbW);
+  l.max_left_px = l.tag_x - kUiHeaderGap;
+  return l;
+}
+
+/** The quartz "uncalibrated" badge: its left edge and text. */
+struct UiUncalBadge {
+  int x;            /**< Badge left edge in pixels. */
+  const char *text; /**< "UNCAL" or "UNC". */
+};
+
+/**
+ * Places the quartz UNCAL badge after a left-aligned tag. The full badge
+ * ("UNCAL", 6 px gap) is used when it ends at or before {@code max_left_px};
+ * otherwise the short one ("UNC", 3 px gap).
+ *
+ * @param tag         Quartz mode tag text.
+ * @param max_left_px {@link UiHeaderLayout::max_left_px}.
+ */
+[[nodiscard]] static inline UiUncalBadge
+ui_quartz_uncal_badge(const char *tag, int max_left_px) {
+  const int tag_w = static_cast<int>(strlen(tag)) * kUiCharW;
+  const int full_end =
+      tag_w + kUiUncalGap + ui_badge_w(sizeof(kUiUncalText) - 1);
+  if (full_end <= max_left_px) {
+    return {tag_w + kUiUncalGap, kUiUncalText};
+  }
+  return {tag_w + kUiUncGap, kUiUncText};
 }

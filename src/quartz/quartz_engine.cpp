@@ -128,6 +128,8 @@ dsp_quartz_mode_t g_mode = DSP_QUARTZ_MODE_MECHANICAL;
 uint32_t g_source_hz = 0u;
 bool g_timebase_ok = false;
 uint32_t g_sample_loss_restarts = 0u;
+/** False in USB microphone mode: no block is measured (see set_analysis). */
+bool g_analysis = true;
 /** Incremented on every (re)start of a measurement; never reset, so a
  * client never sees an old value reused (see dsp_quartz_t). */
 uint32_t g_measurement_id = 0u;
@@ -567,8 +569,19 @@ void init(const Hooks &hooks) noexcept {
   g_source_hz = 0u;
   g_timebase_ok = false;
   g_sample_loss_restarts = 0u;
+  g_analysis = true;
   restart_measurement();
 }
+
+void set_analysis(bool on) noexcept {
+  if (on == g_analysis) {
+    return;
+  }
+  g_analysis = on;
+  restart_measurement();
+}
+
+bool analysis() noexcept { return g_analysis; }
 
 void reset_stream() noexcept { restart_measurement(); }
 
@@ -599,6 +612,9 @@ void notify_sample_loss() noexcept {
 
 void process(const int32_t *left, const int32_t *right, std::size_t n,
              uint64_t source_index) noexcept {
+  if (!g_analysis) {
+    return;
+  }
   const bool timed = g_hooks.now_us != nullptr && g_hooks.block_timed;
   const uint32_t t0 = timed ? g_hooks.now_us() : 0u;
   run_block(left, right, n, source_index);
@@ -755,6 +771,7 @@ void get(dsp_quartz_t *out) noexcept {
   q.k_sigma = g_params.k_sigma;
   q.sample_loss_restarts = g_sample_loss_restarts;
   q.measurement_id = g_measurement_id;
+  q.analysis = g_analysis;
   if (g_mode == DSP_QUARTZ_MODE_MOTOR) {
     q.motor.no_jump_span_s = static_cast<float>(kNoJumpSpanS);
     q.motor.jump_threshold_us = static_cast<float>(kJumpThresholdUs);
@@ -767,6 +784,12 @@ void get(dsp_quartz_t *out) noexcept {
   q.calibrated = cal.calibrated;
   q.reason = "";
 
+  if (!g_analysis) {
+    q.state = DSP_QUARTZ_STATE_IDLE;
+    q.reason = "USB Audio mode";
+    *out = q;
+    return;
+  }
   if (const auto gs = gated(&q.reason)) {
     q.state = *gs;
     *out = q;

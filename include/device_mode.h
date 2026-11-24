@@ -11,6 +11,12 @@
  *   backends skip the PCM ring and the 24 to 48 kHz repeat, and USB IN
  *   packets carry silence if a host opens the stream anyway.
  *
+ * Timing engines: only STANDALONE runs them. In USB_MIC the host does the
+ * timing, so the rate / beat-error fit, stage B, amplitude and the quartz
+ * engine are off and only tick detection and the A/h lock run
+ * ({@link dsp_graph_set_analysis}); {@link device_mode_init} and
+ * {@link device_mode_set} keep the graph in step.
+ *
  * The mode and the timebase-log delta threshold live in one record in the
  * DEVICE region of {@link flash_store.h}.
  */
@@ -88,7 +94,9 @@ device_mode_t device_mode_get(void);
 /**
  * Switches mode and persists it. Setting the current mode is a no-op that
  * returns OK. Stops capture around the flash write and re-arms afterwards.
- * Entering STANDALONE sets the run latch; entering USB_MIC clears it.
+ * Entering STANDALONE sets the run latch; entering USB_MIC clears it. The
+ * timing engines are switched with the mode (clean start in STANDALONE, state
+ * cleared in USB_MIC), only after the mode has been persisted.
  *
  * @return OK, BUSY while the USB stream is open, FAILED, BAD_PARAM.
  */

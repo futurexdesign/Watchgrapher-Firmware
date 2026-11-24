@@ -65,6 +65,9 @@ jobs:
           - kiwi_pcm1808
           - pico2
           - pico2_synthetic
+          - pico2_pcm1808_cli
+          - pico2w_pcm1808
+          - pico2w_synthetic
     steps:
       - uses: actions/checkout@v4
 

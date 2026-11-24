@@ -77,6 +77,9 @@ typedef struct {
   /** Rolling means of rate (s/d), beat error (ms), amplitude (°) over avg_s. */
   dsp_beat_timing_window_t avg;
   float avg_s; /**< Integration time of {@code avg} (beat param avg_s). */
+  bool ble_built;        /**< Built with {@code TG_BLE}: the badge can exist. */
+  bool ble_enabled;      /**< BLE radio is on (advertising or connected). */
+  bool ble_connected;    /**< A central is connected with notifications on. */
   ui_quartz_t quartz;    /**< Quartz mode and headline values. */
   uint32_t published_ms; /**< millis() on core 0 at publish time. */
 } ui_snapshot_t;

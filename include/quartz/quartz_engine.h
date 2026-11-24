@@ -14,6 +14,8 @@
  *     beat_rate path untouched;
  *   - channels: motor and fork read LEFT (inductive), LCD reads RIGHT
  *     (capacitive), as raw sign-extended 24-bit codes;
+ *   - analysis switch ({@link set_analysis}): off in USB microphone mode, where
+ *     the host does the timing; nothing is measured and the snapshot says so;
  *   - gating: nothing is measured until the capture rate is verified AND is
  *     {@link quartz::engine::kRateHz}; the snapshot says why it waits;
  *   - resets: stream reset, source-rate change, timebase-verified change,
@@ -199,15 +201,32 @@ void set_timebase(bool ok) noexcept;
 void notify_sample_loss() noexcept;
 
 /**
+ * Turns the engine on or off. Off (USB microphone mode): {@link process}
+ * returns at once, {@link get} reports {@code analysis} false with state
+ * {@code IDLE}, and the mode and parameters are kept. A change in either
+ * direction starts a new measurement ({@code measurement_id} increases), so
+ * a result from before the switch is never shown afterwards. Default on.
+ *
+ * @param on {@code false} to stop measuring.
+ * @see dsp_graph_set_analysis
+ */
+void set_analysis(bool on) noexcept;
+
+/** @return {@code true} while the engine measures (default). */
+[[nodiscard]] bool analysis() noexcept;
+
+/**
  * Feeds one capture block. Call once per DMA block, after the USB samples
  * have been queued, with the same absolute index the DSP graph receives.
  *
- * Does nothing in mechanical mode, while gated, or once a motor result is
+ * Does nothing in mechanical mode, while analysis is off
+ * ({@link set_analysis}), while gated, or once a motor result is
  * frozen. After a timed gate is reached no more samples are fed, but the
  * motor fit may still finish a rebuild over the next blocks before the
  * result freezes. A source index that does not follow the previous block
  * restarts the measurement. Reports its wall time through {@link
- * Hooks::block_timed} on every call.
+ * Hooks::block_timed} on every call except the one skipped while analysis is
+ * off.
  *
  * @param left LEFT codes, sign-extended 24-bit (motor, fork); may be null
  *        in LCD mode.

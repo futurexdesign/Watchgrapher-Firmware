@@ -23,7 +23,10 @@ extern "C" {
  */
 bool hid_control_usb_begin(void);
 
-/** Polls RX reassembly, request dispatch, TX fragments, and subscriptions. */
+/**
+ * Runs one pass of the USB HID session: reassembly timeout, request
+ * dispatch, TX fragments and subscription pushes (see control/session.h).
+ */
 void hid_control_task(void);
 
 #ifdef __cplusplus

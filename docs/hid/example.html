@@ -152,7 +152,7 @@
     th, td { text-align: left; padding: 0.28rem 0.35rem; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); font-weight: 500; }
     .scroll { max-height: 12rem; overflow: auto; }
-    #log {
+    #log, #probeOut {
       margin: 0; min-height: 10rem; max-height: 18rem; overflow: auto;
       background: #0a0c10; color: #c5ced9; border: 1px solid var(--border);
       border-radius: 6px; padding: 0.6rem; font-family: var(--mono); font-size: 0.7rem;
@@ -240,6 +240,10 @@
     </div>
     <div class="toolbar">
       <span id="connLabel"><span class="dot" id="connDot"></span>disconnected</span>
+      <select id="transportSel" title="Transport">
+        <option value="hid">USB (WebHID)</option>
+        <option value="ble">Bluetooth (Web Bluetooth)</option>
+      </select>
       <button id="btnConnect" class="primary">Connect</button>
       <button id="btnDisconnect" disabled>Disconnect</button>
       <button id="btnHello" disabled>hello</button>
@@ -259,6 +263,8 @@
           <div><span>vid:pid</span><span id="dVidPid">—</span></div>
           <div><span>uptime</span><span id="dUptime">—</span></div>
           <div><span>caps</span><span id="dCaps">—</span></div>
+          <div><span>link</span><span id="dLink">—</span></div>
+          <div><span>control</span><span id="dControl">—</span></div>
         </div>
       </section>
 
@@ -294,6 +300,7 @@
         <h2>Beat / timing</h2>
         <div class="toolbar" style="margin-bottom:0.45rem">
           <button id="btnBeat" disabled>getBeat</button>
+          <button id="btnLink" disabled title="Link status and BLE counters (getLink), printed to the log">getLink</button>
           <label title="Integration time of the averaged rate / beat error / amplitude (beatRate.avgS); also used by the OLED">average
             <select id="avgS" disabled>
               <option value="1">1 s</option><option value="2">2 s</option>
@@ -415,7 +422,6 @@
           <button type="button" class="active" data-tab="metrics">Metrics</button>
           <button type="button" data-tab="timing">Timing / CPU</button>
           <button type="button" data-tab="spectrum">Spectrum</button>
-          <button type="button" data-tab="matched">Matched</button>
         </div>
         <div id="tab-metrics">
           <div class="toolbar" style="margin-bottom:0.5rem">
@@ -436,12 +442,6 @@
           </div>
           <p class="hint">Heavy on-device FFT — leave off during watch timing unless sniffing interference.</p>
           <div class="scroll"><table><thead><tr><th>#</th><th>Hz</th><th>mag</th></tr></thead><tbody id="spectrumBody"></tbody></table></div>
-        </div>
-        <div id="tab-matched" class="hidden">
-          <div class="toolbar" style="margin-bottom:0.5rem">
-            <button id="btnMatched" disabled>getMatched</button>
-          </div>
-          <div class="kv" id="matchedKv"></div>
         </div>
       </section>
     </div>
@@ -527,6 +527,23 @@
         </div>
       </section>
 
+      <section class="panel" id="probePanel">
+        <h2>BLE probe</h2>
+        <p class="hint">Reports what this browser supports for the Timegrapher BLE link. Connected over Bluetooth, the
+          probe uses that session; otherwise it opens a temporary connection (the device chooser appears).</p>
+        <div class="toolbar" style="margin:0.5rem 0">
+          <label>write mode
+            <select id="bleWriteMode">
+              <option value="withResponse">with response</option>
+              <option value="withoutResponse">without response</option>
+            </select></label>
+          <button id="btnProbe">Run probe</button>
+          <button id="btnThroughput">Run throughput test</button>
+          <button id="btnProbeCopy">Copy</button>
+        </div>
+        <pre id="probeOut">no report yet</pre>
+      </section>
+
       <section class="panel">
         <h2>Log</h2>
         <div class="toolbar" style="margin-bottom:0.5rem">
@@ -542,6 +559,8 @@
 const USAGE_PAGE = 0xffa0, USAGE = 0x0001, REPORT_ID = 0x01;
 /* The device accepts requests of at most 35 fragments = 2030 bytes (replies reach 2047); longer ones are dropped silently. */
 const FLAG_MORE = 0x01, MAX_CHUNK = 58, MAX_JSON = 2030, REPORT_BYTES = 63;
+/* Keepalive: the device keeps control for 10 s after the owner's last request (BLE_TRANSPORT_PLAN.md 4.7). */
+const KEEPALIVE_IDLE_MS = 3000, KEEPALIVE_TIMEOUT_MS = 2000;
 
 const PROCESS_BLOCKS = new Set(['gain', 'limiter', 'filterBank', 'softGate', 'notch', 'agc', 'firBank']);
 const BLOCK_META = {
@@ -566,13 +585,6 @@ const BLOCK_META = {
     ],
   },
   eventLog: { label: 'eventLog', kind: 'analysis', params: [] },
-  matchedFilter: {
-    label: 'matchedFilter', kind: 'analysis',
-    params: [
-      { key: 'threshold', type: 'number', step: 0.05 },
-      { key: 'learn', type: 'number', step: 1, min: 0, max: 1 },
-    ],
-  },
   spectrum: {
     label: 'spectrum', kind: 'analysis',
     params: [{ key: 'stride', type: 'number', step: 1, min: 1 }],
@@ -609,14 +621,32 @@ const BLOCK_META = {
 };
 
 const logEl = document.getElementById('log');
+/**
+ * Appends a timestamped line to the page log.
+ * @param {...*} a values; non-strings are JSON encoded.
+ */
 function log(...a) {
   const t = new Date().toISOString().slice(11, 19);
   logEl.textContent += `[${t}] ` + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n';
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+/* framer:begin (extracted by the Node framing test) */
+/**
+ * Splits JSON messages into control-plane frames and reassembles replies.
+ * Frame layout: flags, msgSeq, fragIndex, fragCount, payloadLen, chunk (HID_CONTROL_PLANE.md 3.2).
+ */
 class HidFramer {
-  constructor() { this._txSeq = 0; this._rx = null; this.onMessage = null; }
+  /**
+   * @param {boolean} [pad=true] true: every frame is a full 63-byte report (WebHID).
+   *   false: the frame is exactly 5 + payloadLen bytes (BLE, one frame per ATT value).
+   */
+  constructor(pad = true) { this._txSeq = 0; this._rx = null; this.onMessage = null; this._pad = pad; }
+  /**
+   * Encodes one request into frames.
+   * @param {object} obj request body.
+   * @returns {Uint8Array[]} frames in send order.
+   */
   encode(obj) {
     const text = new TextEncoder().encode(JSON.stringify(obj));
     if (text.length > MAX_JSON) throw new Error('json too large');
@@ -625,7 +655,7 @@ class HidFramer {
     const reports = [];
     for (let i = 0; i < fragCount; i++) {
       const chunk = text.subarray(i * MAX_CHUNK, Math.min(text.length, (i + 1) * MAX_CHUNK));
-      const buf = new Uint8Array(REPORT_BYTES); /* full 63-byte report, zero padded */
+      const buf = new Uint8Array(this._pad ? REPORT_BYTES : 5 + chunk.length); /* HID: full 63-byte report, zero padded */
       buf[0] = i + 1 < fragCount ? FLAG_MORE : 0;
       buf[1] = seq; buf[2] = i; buf[3] = fragCount; buf[4] = chunk.length;
       buf.set(chunk, 5);
@@ -633,6 +663,10 @@ class HidFramer {
     }
     return reports;
   }
+  /**
+   * Feeds one received frame; calls onMessage when a message completes.
+   * @param {DataView|Uint8Array} data one frame (padding after 5 + payloadLen is ignored).
+   */
   push(data) {
     const u8 = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     if (u8.length < 5) return;
@@ -652,49 +686,483 @@ class HidFramer {
     if (this.onMessage) this.onMessage(obj);
   }
 }
+/* framer:end */
 
-class Client {
+/**
+ * Transport over WebHID: one 63-byte report per frame, report ID 1.
+ */
+class HidTransport {
+  /** @param {HIDDevice} device an opened HID device. */
   constructor(device) {
+    this.kind = 'usbHid';
+    this.padFrames = true;
     this.device = device;
-    this.framer = new HidFramer();
+    this.name = device.productName || String(device.productId);
+    this.onFrame = null;
+    this.onClose = null;
+    this._onInput = (ev) => {
+      if (ev.reportId !== REPORT_ID) return;
+      if (this.onFrame) this.onFrame(ev.data);
+    };
+    this._onDisconnect = () => { this._detach(); if (this.onClose) this.onClose('device disconnected'); };
+    device.addEventListener('inputreport', this._onInput);
+    device.addEventListener('disconnect', this._onDisconnect);
+  }
+  /**
+   * Opens the device chooser and returns an opened transport.
+   * @returns {Promise<HidTransport|null>} null when the user cancels.
+   */
+  static async open() {
+    if (!navigator.hid) throw new Error('WebHID not available (use Chromium on localhost/HTTPS)');
+    const devices = await navigator.hid.requestDevice({ filters: [{ usagePage: USAGE_PAGE, usage: USAGE }] });
+    const device = devices[0];
+    if (!device) return null;
+    if (!device.opened) await device.open();
+    return new HidTransport(device);
+  }
+  /**
+   * Sends one frame.
+   * @param {Uint8Array} frame padded 63-byte report.
+   */
+  async sendFrame(frame) { await this.device.sendReport(REPORT_ID, frame); }
+  /** Removes the device listeners. */
+  _detach() {
+    try { this.device.removeEventListener('inputreport', this._onInput); } catch (_) {}
+    try { this.device.removeEventListener('disconnect', this._onDisconnect); } catch (_) {}
+  }
+  /** Closes the device. Does not call onClose. */
+  async close() {
+    this._detach();
+    if (this.device.opened) await this.device.close();
+  }
+}
+
+/**
+ * Control-plane client: request/reply over a transport, notifications, and the keepalive that
+ * holds the device's control lease while the page is idle.
+ */
+class Client {
+  /** @param {HidTransport|object} transport HidTransport or Ble.Transport. */
+  constructor(transport) {
+    this.transport = transport;
+    this.framer = new HidFramer(transport.padFrames);
     this._pending = new Map();
     this._nextId = 1;
+    this._idleTimer = null;
+    this._owned = true;
+    this._disposed = false;
     this.onNotify = null;
+    this.tap = null;
+    this.onLinkBusy = null;
+    this.onControlReleased = null;
     this.framer.onMessage = (msg) => {
-      if (msg.notify) { if (this.onNotify) this.onNotify(msg); return; }
+      if (msg.notify) {
+        if (msg.op === 'controlReleased') {
+          this._owned = false;
+          this._stopKeepalive();
+          if (this.onControlReleased) this.onControlReleased(msg.data?.to);
+          return;
+        }
+        if (this.tap) this.tap(msg);
+        if (this.onNotify) this.onNotify(msg);
+        return;
+      }
       const p = this._pending.get(msg.id);
       if (!p) return;
       this._pending.delete(msg.id);
-      if (msg.ok) p.resolve(msg.result);
-      else p.reject(Object.assign(new Error(msg.error?.message || 'rpc error'), msg.error || {}));
+      clearTimeout(p.timer);
+      if (msg.ok) {
+        if (p.op === 'claim' || (p.op !== 'hello' && p.op !== 'ping')) this._owned = true;
+        if (p.op === 'hello' && msg.result?.control) {
+          const c = msg.result.control;
+          this._owned = c.owner == null || c.self === true;
+        }
+        p.resolve(msg.result);
+      } else {
+        if (msg.error?.code === 'linkBusy') {
+          this._owned = false;
+          this._stopKeepalive();
+          if (this.onLinkBusy) this.onLinkBusy(msg.error);
+        }
+        p.reject(Object.assign(new Error(msg.error?.message || 'rpc error'), msg.error || {}));
+      }
     };
-    this._onInput = (ev) => {
-      if (ev.reportId !== REPORT_ID) return;
-      this.framer.push(ev.data);
-    };
-    device.addEventListener('inputreport', this._onInput);
+    transport.onFrame = (data) => this.framer.push(data);
   }
+  /**
+   * Sends a request and waits for its reply.
+   * @param {string} op operation name.
+   * @param {object} [extra] request fields besides v, id and op.
+   * @param {number} [timeoutMs=4000] reply timeout.
+   * @returns {Promise<*>} the reply's result.
+   */
   async request(op, extra = {}, timeoutMs = 4000) {
     const id = this._nextId++;
     const body = { v: 1, id, op, ...extra };
     const result = new Promise((resolve, reject) => {
-      this._pending.set(id, { resolve, reject });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this._pending.has(id)) {
           this._pending.delete(id);
           reject(new Error('timeout'));
         }
       }, timeoutMs);
+      this._pending.set(id, { resolve, reject, timer, op });
     });
-    for (const r of this.framer.encode(body)) await this.device.sendReport(REPORT_ID, r);
+    this._armKeepalive();
+    try {
+      for (const f of this.framer.encode(body)) await this.transport.sendFrame(f);
+    } catch (e) {
+      const p = this._pending.get(id);
+      if (p) { clearTimeout(p.timer); this._pending.delete(id); }
+      result.catch(() => {});
+      throw e;
+    }
     return result;
   }
+  /** Restarts the idle timer; after 3 s without a request a ping keeps the control lease alive. */
+  _armKeepalive() {
+    clearTimeout(this._idleTimer);
+    if (this._disposed || !this._owned) return;
+    this._idleTimer = setTimeout(() => {
+      this.request('ping', { t: Math.floor(performance.now()) }, KEEPALIVE_TIMEOUT_MS)
+        .catch((e) => log('keepalive failed', e.message || e));
+    }, KEEPALIVE_IDLE_MS);
+  }
+  /** Stops the keepalive (ownership lost or client disposed). */
+  _stopKeepalive() { clearTimeout(this._idleTimer); this._idleTimer = null; }
+  /** Marks this client as the owner again (after a successful claim) and restarts the keepalive. */
+  markOwned() { this._owned = true; this._armKeepalive(); }
+  /** Stops the keepalive, rejects pending requests and detaches from the transport. */
   dispose() {
-    try { this.device.removeEventListener('inputreport', this._onInput); } catch (_) {}
-    for (const [, p] of this._pending) p.reject(new Error('disconnected'));
+    this._disposed = true;
+    this._stopKeepalive();
+    this.transport.onFrame = null;
+    for (const [, p] of this._pending) { clearTimeout(p.timer); p.reject(new Error('disconnected')); }
     this._pending.clear();
   }
 }
+
+/**
+ * Web Bluetooth transport, probe and throughput test (BLE_TRANSPORT_PLAN.md 4.1-4.4, 6.2).
+ * One frame per GATT value, unpadded (5 + payloadLen bytes); one GATT operation in flight at a time.
+ */
+const Ble = (() => {
+  const SERVICE = 'c137e7c0-92b4-4d9e-87e0-9ba757169016';
+  const RX_UUID = 'c137e7c1-92b4-4d9e-87e0-9ba757169016';
+  const TX_UUID = 'c137e7c2-92b4-4d9e-87e0-9ba757169016';
+  const INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
+  const MIN_MTU = 66, MTU_RETRIES = 3, MTU_WAIT_MS = 300, MAX_VALUE = 63;
+
+  /**
+   * @param {number} ms delay.
+   * @returns {Promise<void>} resolves after ms.
+   */
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * Lists the GATT properties that are set on a characteristic.
+   * @param {BluetoothRemoteGATTCharacteristic} c characteristic.
+   * @returns {string[]} names of the true properties.
+   */
+  function propNames(c) {
+    // The properties are getters on the prototype, so Object.keys() sees none.
+    const names = ['broadcast', 'read', 'writeWithoutResponse', 'write', 'notify', 'indicate',
+      'authenticatedSignedWrites', 'reliableWrite', 'writableAuxiliaries'];
+    return names.filter((k) => c.properties && c.properties[k]);
+  }
+
+  /**
+   * Shows the device chooser (filters of plan 4.2). If the browser rejects the namePrefix filter,
+   * retries with the service filter only (risk R-4).
+   * @param {object} rep probe report; receives requestDeviceFilter.
+   * @returns {Promise<BluetoothDevice|null>} null when the user cancels.
+   */
+  async function requestDevice(rep) {
+    const bt = navigator.bluetooth;
+    try {
+      const d = await bt.requestDevice({
+        filters: [{ services: [SERVICE] }, { namePrefix: 'TG-' }], optionalServices: [SERVICE],
+      });
+      rep.requestDeviceFilter = 'services + namePrefix accepted';
+      return d;
+    } catch (e) {
+      if (e.name === 'NotFoundError') return null;
+      rep.requestDeviceFilter = `namePrefix filter rejected (${e.name}: ${e.message}); retried with services only`;
+      /* requestDevice needs a user gesture; the second call may be refused (SecurityError) if the first
+         consumed the activation. That error is recorded in rep.requestDeviceFilter below. */
+      log('requestDevice with namePrefix failed, retrying without it:', e.message || e);
+    }
+    try {
+      return await bt.requestDevice({ filters: [{ services: [SERVICE] }], optionalServices: [SERVICE] });
+    } catch (e) {
+      if (e.name === 'NotFoundError') return null;
+      rep.requestDeviceFilter += `; retry failed (${e.name}: ${e.message})`;
+      throw new Error(`requestDevice failed: ${rep.requestDeviceFilter}`);
+    }
+  }
+
+  /** Control-plane link over the Timegrapher GATT service. */
+  class Transport {
+    /**
+     * @param {BluetoothDevice} device connected device.
+     * @param {{rx: BluetoothRemoteGATTCharacteristic, tx: BluetoothRemoteGATTCharacteristic}} chars characteristics.
+     * @param {object} info parsed INFO value.
+     * @param {string} writeMode 'withResponse' or 'withoutResponse'.
+     * @param {object} openReport what open() learned about this browser and device (probe input).
+     */
+    constructor(device, chars, info, writeMode, openReport) {
+      this.kind = 'ble';
+      this.padFrames = false;
+      this.device = device;
+      this.name = device.name || 'Timegrapher';
+      this.info = info;
+      this.writeMode = writeMode;
+      this.openReport = openReport;
+      this.onFrame = null;
+      this.onClose = null;
+      this._rx = chars.rx;
+      this._tx = chars.tx;
+      this._chain = Promise.resolve();
+      this._closed = false;
+      this._onValue = (ev) => {
+        const v = ev.target.value;
+        if (!v || v.byteLength > MAX_VALUE) return; /* longer than 63 bytes: invalid, dropped */
+        if (this.onFrame) this.onFrame(new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)));
+      };
+      this._onGattDisconnect = () => {
+        if (this._closed) return;
+        this._closed = true;
+        this._detach();
+        if (this.onClose) this.onClose('Bluetooth disconnected');
+      };
+      this._tx.addEventListener('characteristicvaluechanged', this._onValue);
+      device.addEventListener('gattserverdisconnected', this._onGattDisconnect);
+    }
+
+    /**
+     * Chooses a device, connects, validates INFO and starts notifications on TX.
+     * @param {{writeMode?: string}} [options] write mode, default 'withResponse'.
+     * @returns {Promise<Transport|null>} null when the user cancels the chooser.
+     */
+    static async open(options = {}) {
+      if (!navigator.bluetooth) throw new Error('Web Bluetooth not available in this browser');
+      const rep = {};
+      const device = await requestDevice(rep);
+      if (!device) return null;
+      rep.deviceName = device.name || null;
+      try {
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE);
+        const rx = await service.getCharacteristic(RX_UUID);
+        const tx = await service.getCharacteristic(TX_UUID);
+        const infoChar = await service.getCharacteristic(INFO_UUID);
+        rep.characteristics = { rx: propNames(rx), tx: propNames(tx), info: propNames(infoChar) };
+        rep.writeValueWithResponse = typeof rx.writeValueWithResponse === 'function';
+        rep.writeValueWithoutResponse = typeof rx.writeValueWithoutResponse === 'function';
+        let info = null;
+        for (let i = 0; i <= MTU_RETRIES; i++) {
+          const dv = await infoChar.readValue();
+          rep.infoRaw = new TextDecoder().decode(dv);
+          info = JSON.parse(rep.infoRaw);
+          if (info.seg === 1) throw new Error('BLE segmented mode (INFO seg=1) is not supported by this page');
+          if (info.mtu >= MIN_MTU) break;
+          if (i < MTU_RETRIES) await sleep(MTU_WAIT_MS);
+        }
+        rep.info = info;
+        if (info.mtu < MIN_MTU) {
+          throw new Error(`BLE link MTU ${info.mtu} is below ${MIN_MTU}; this browser/OS cannot run the control plane`);
+        }
+        const t = new Transport(device, { rx, tx }, info, options.writeMode || 'withResponse', rep);
+        try {
+          await tx.startNotifications();
+          rep.startNotifications = 'ok';
+        } catch (e) {
+          rep.startNotifications = `failed: ${e.name}: ${e.message}`;
+          await t.close();
+          throw e;
+        }
+        return t;
+      } catch (e) {
+        try { if (device.gatt.connected) device.gatt.disconnect(); } catch (_) {}
+        throw e;
+      }
+    }
+
+    /**
+     * Writes one frame. Writes are serialised: only one GATT operation is in flight.
+     * @param {Uint8Array} frame unpadded frame, 5..63 bytes.
+     * @returns {Promise<void>} resolves when the write completes.
+     */
+    sendFrame(frame) {
+      if (frame.length > MAX_VALUE) return Promise.reject(new Error('frame longer than 63 bytes'));
+      const run = () => this._write(frame);
+      const p = this._chain.then(run, run);
+      this._chain = p.catch(() => {});
+      return p;
+    }
+
+    /**
+     * Performs one RX write using the selected mode, falling back to what the browser offers.
+     * @param {Uint8Array} frame frame bytes.
+     */
+    async _write(frame) {
+      if (this._closed) throw new Error('disconnected');
+      const rx = this._rx;
+      if (this.writeMode === 'withoutResponse' && typeof rx.writeValueWithoutResponse === 'function') {
+        await rx.writeValueWithoutResponse(frame);
+      } else if (typeof rx.writeValueWithResponse === 'function') {
+        await rx.writeValueWithResponse(frame);
+      } else {
+        await rx.writeValue(frame);
+      }
+    }
+
+    /** Removes the characteristic and device listeners. */
+    _detach() {
+      try { this._tx.removeEventListener('characteristicvaluechanged', this._onValue); } catch (_) {}
+      try { this.device.removeEventListener('gattserverdisconnected', this._onGattDisconnect); } catch (_) {}
+    }
+
+    /** Stops notifications and disconnects. Idempotent; does not call onClose. */
+    async close() {
+      this._closed = true;
+      try { await this._tx.stopNotifications(); } catch (_) {}
+      this._detach();
+      try { if (this.device.gatt.connected) this.device.gatt.disconnect(); } catch (_) {}
+    }
+  }
+
+  /**
+   * Runs fn with a BLE client: the page's own session if it is a BLE one, else a temporary connection.
+   * @param {Client|null} pageClient the page's current client.
+   * @param {string} writeMode write mode for a temporary connection.
+   * @param {function(Client, boolean): Promise<void>} fn work; second argument is true for a temporary session.
+   */
+  async function withSession(pageClient, writeMode, fn) {
+    if (pageClient && pageClient.transport.kind === 'ble') {
+      await fn(pageClient, false);
+      return;
+    }
+    const t = await Transport.open({ writeMode });
+    if (!t) throw new Error('No device selected');
+    const c = new Client(t); /* onLinkBusy stays null: a temporary session never prompts for takeover */
+    let lost = null;
+    t.onClose = (r) => { lost = r; };
+    try {
+      await fn(c, true);
+    } finally {
+      c.dispose();
+      if (!lost) await t.close();
+    }
+  }
+
+  /**
+   * Collects the browser/device capability report.
+   * @param {Client|null} pageClient the page's current client.
+   * @param {string} writeMode write mode for a temporary connection.
+   * @returns {Promise<object>} the report.
+   */
+  async function probe(pageClient, writeMode) {
+    const bt = navigator.bluetooth;
+    const rep = {
+      time: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      bluetoothPresent: !!bt,
+      getAvailability: bt && typeof bt.getAvailability === 'function' ? 'present' : 'missing',
+      gattserverdisconnectedEvent: 'not tested',
+    };
+    if (!bt) return rep;
+    if (rep.getAvailability === 'present') {
+      try { rep.availability = await bt.getAvailability(); } catch (e) { rep.availability = `error: ${e.message}`; }
+    }
+    await withSession(pageClient, writeMode, async (c, temp) => {
+      Object.assign(rep, c.transport.openReport);
+      rep.writeMode = c.transport.writeMode;
+      rep.hello = null;
+      try {
+        const h = await c.request('hello');
+        rep.hello = { link: h.link || null, control: h.control || null, board: h.board || null, caps: { ble: !!h.caps?.ble } };
+      } catch (e) { rep.hello = `error: ${e.message || e}`; }
+      if (temp) {
+        let fired = false;
+        c.transport.device.addEventListener('gattserverdisconnected', () => { fired = true; }, { once: true });
+        await c.transport.close();
+        await sleep(500);
+        rep.gattserverdisconnectedEvent = fired ? 'fired on disconnect' : 'not observed within 500 ms of disconnect()';
+      } else {
+        rep.gattserverdisconnectedEvent = 'listener registered; not tested (session in use)';
+      }
+    });
+    return rep;
+  }
+
+  /**
+   * Measures ping round trips, then the delivered notify rates at the maximum subscription rates.
+   * @param {Client|null} pageClient the page's current client.
+   * @param {string} writeMode write mode for a temporary connection.
+   * @param {function(string): void} status progress callback.
+   * @returns {Promise<object>} the throughput report.
+   */
+  async function throughput(pageClient, writeMode, status) {
+    const out = {};
+    await withSession(pageClient, writeMode, async (c) => {
+      const rtts = [];
+      let failed = 0;
+      for (let i = 0; i < 100; i++) {
+        status(`ping ${i + 1}/100`);
+        const t0 = performance.now();
+        try {
+          await c.request('ping', { t: Math.floor(t0) }, 2000);
+          rtts.push(performance.now() - t0);
+        } catch (_) { failed++; }
+      }
+      rtts.sort((a, b) => a - b);
+      const n = rtts.length;
+      out.ping = {
+        sent: 100, failed,
+        meanMs: n ? +(rtts.reduce((a, b) => a + b, 0) / n).toFixed(2) : null,
+        p95Ms: n ? +rtts[Math.min(n - 1, Math.ceil(0.95 * n) - 1)].toFixed(2) : null,
+        minMs: n ? +rtts[0].toFixed(2) : null,
+        maxMs: n ? +rtts[n - 1].toFixed(2) : null,
+      };
+      const requested = { metrics: 20, beat: 5, timing: 5, quartz: 5 };
+      const counts = {};
+      c.tap = (m) => { counts[m.op] = (counts[m.op] || 0) + 1; };
+      const off = {
+        metricsHz: 0, beatHz: 0, timingHz: 0, quartzHz: 0, events: false, errors: false, quartzPulses: false, beats: false,
+      };
+      try {
+        const t0 = performance.now();
+        try {
+          out.subscribeResult = await c.request('subscribe', { ...off, metricsHz: 20, beatHz: 5, timingHz: 5, quartzHz: 5 });
+        } catch (e) {
+          if (e.code !== 'linkBusy') throw e;
+          out.notifies = {
+            skipped: `linkBusy: ${e.message}`,
+            hint: 'disconnect the USB session or take over',
+          };
+          return;
+        }
+        for (let s = 10; s > 0; s--) { status(`subscribe at max rates, ${s} s left`); await sleep(1000); }
+        const elapsedS = (performance.now() - t0) / 1000;
+        out.subscribeWindowS = +elapsedS.toFixed(2);
+        out.notifies = {};
+        for (const [op, hz] of Object.entries(requested)) {
+          const cnt = counts[op] || 0;
+          out.notifies[op] = { requestedHz: hz, count: cnt, deliveredHz: +(cnt / elapsedS).toFixed(2) };
+        }
+      } finally {
+        c.tap = null;
+        if (out.subscribeResult !== undefined) {
+          try { await c.request('subscribe', off); } catch (e) { out.unsubscribeError = e.message || String(e); }
+        }
+      }
+    });
+    return out;
+  }
+
+  return { Transport, probe, throughput, SERVICE };
+})();
 
 let client = null;
 let state = { bypass: true, blocks: {} };
@@ -703,17 +1171,26 @@ let caps = null;
 const needConn = [
   'btnDisconnect', 'btnHello', 'btnPing', 'btnRefresh', 'btnBypassOn', 'btnBypassOff',
   'btnRefreshState', 'bypassChk', 'presetSafe', 'presetTiming', 'presetOffProcess',
-  'btnMetrics', 'btnTiming', 'btnResetTiming', 'btnBeat', 'btnSpectrum', 'btnMatched',
+  'btnMetrics', 'btnTiming', 'btnResetTiming', 'btnBeat', 'btnLink', 'btnSpectrum',
   'btnSub', 'btnSubOff', 'btnEvents', 'btnErrors', 'btnClearErrors',
   'btnTbRefresh', 'btnTbSave', 'btnTbClear', 'btnTbSet', 'btnCalStart', 'avgS',
   'btnGetDevice', 'modeSel', 'btnSetDevice', 'btnStart', 'btnStop',
   'btnGetBeats', 'btnGetGps', 'btnGetTbLog',
 ];
 
+/**
+ * Enables or disables the connection-dependent controls and updates the status label.
+ * @param {boolean} on true when a session is open.
+ */
 function setConnected(on) {
   document.getElementById('connLabel').innerHTML =
     `<span class="dot${on ? ' on' : ''}" id="connDot"></span>${on ? 'connected' : 'disconnected'}`;
+  if (!on) {
+    document.getElementById('dLink').textContent = '—';
+    document.getElementById('dControl').textContent = '—';
+  }
   document.getElementById('btnConnect').disabled = on;
+  document.getElementById('transportSel').disabled = on;
   for (const id of needConn) {
     const el = document.getElementById(id);
     if (el) el.disabled = !on;
@@ -745,7 +1222,6 @@ function renderMetrics(m) {
     ['postRms', fmt(m.postRms, 5)],
     ['noiseFloor', fmt(m.noiseFloor, 6)],
     ['agcGainDb', fmt(m.agcGainDb, 2)],
-    ['matchScore', fmt(m.matchScore, 3)],
     ['clipCount', fmt(m.clipCount, 0)],
     ['limiterCount', fmt(m.limiterCount, 0)],
   ]);
@@ -826,16 +1302,6 @@ function renderBeat(b) {
   ]);
 }
 
-function renderMatched(m) {
-  if (!m) return;
-  fillKv(document.getElementById('matchedKv'), [
-    ['score', fmt(m.score, 3)],
-    ['learned', m.learned ? 'yes' : 'no', m.learned ? 'good' : 'warn'],
-    ['templateLen', fmt(m.templateLen, 0)],
-    ['templatePeak', fmt(m.templatePeak, 4)],
-  ]);
-}
-
 function renderSpectrum(s) {
   const body = document.getElementById('spectrumBody');
   if (!s || !s.valid) {
@@ -892,9 +1358,7 @@ function renderBlocks() {
           step="${p.step ?? 1}" ${p.min != null ? `min="${p.min}"` : ''} ${p.max != null ? `max="${p.max}"` : ''} /></div>`;
     }).join('');
     const ro = key === 'agc' && blk.params?.gainDb != null
-      ? `<div class="param"><span>gainDb (ro)</span><span>${fmt(blk.params.gainDb, 2)}</span></div>`
-      : (key === 'matchedFilter' && blk.params?.score != null
-        ? `<div class="param"><span>score (ro)</span><span>${fmt(blk.params.score, 3)}</span></div>` : '');
+      ? `<div class="param"><span>gainDb (ro)</span><span>${fmt(blk.params.gainDb, 2)}</span></div>` : '';
     return `<div class="block ${meta.kind} ${blk.enabled ? 'on' : ''}" data-key="${key}">
       <div class="block-head">
         <span class="block-name">${meta.label}</span>
@@ -963,7 +1427,6 @@ async function refreshAll() {
   await refreshQuartz();
   try { renderTimebase(await client.request('getTimebase')); } catch (e) { log('timebase', e.message); }
   if (caps?.deviceMode) await deviceOp('getDevice');
-  try { renderMatched(await client.request('getMatched')); } catch (e) { log('matched', e.message); }
   try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log('spectrum', e.message); }
   try {
     const ev = await client.request('getEvents', { limit: 5 });
@@ -975,6 +1438,10 @@ async function refreshAll() {
   } catch (e) { log('errors', e.message); }
 }
 
+/**
+ * Renders the hello reply into the Device panel.
+ * @param {object} h hello result.
+ */
 function applyHello(h) {
   caps = h.caps || null;
   document.getElementById('dFw').textContent = h.fwVersion || '—';
@@ -989,6 +1456,10 @@ function applyHello(h) {
       ` gps ${caps.gps ? 'yes' : 'no'} pps ${caps.pps ? 'yes' : 'no'}` +
       ` tbLog ${caps.timebaseLog ? `≤${caps.timebaseLogMax}` : 'no'}`
     : '—';
+  document.getElementById('dLink').textContent = h.link
+    ? `${h.link.kind}${h.link.mtu != null ? ` (MTU ${h.link.mtu})` : ''}` : (client ? client.transport.kind : '—');
+  document.getElementById('dControl').textContent = h.control
+    ? `owner ${h.control.owner ?? 'none'}${h.control.self ? ' (this page)' : ''}, lease ${h.control.leaseMs} ms` : '—';
   if (caps?.metricsHzMax != null) document.getElementById('subMetrics').max = caps.metricsHzMax;
   if (caps?.beatHzMax != null) document.getElementById('subBeat').max = caps.beatHzMax;
   if (caps?.timingHzMax != null) document.getElementById('subTiming').max = caps.timingHzMax;
@@ -1001,62 +1472,119 @@ document.querySelectorAll('.tabs button').forEach((btn) => {
     document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     const tab = btn.getAttribute('data-tab');
-    for (const id of ['metrics', 'timing', 'spectrum', 'matched']) {
+    for (const id of ['metrics', 'timing', 'spectrum']) {
       document.getElementById(`tab-${id}`).classList.toggle('hidden', id !== tab);
     }
   };
 });
 
-document.getElementById('btnConnect').onclick = async () => {
-  if (!navigator.hid) {
-    log('WebHID not available (use Chromium on localhost/HTTPS)');
-    return;
-  }
+/**
+ * Tears the session down after the link ended without a user action (unplug, BLE drop, takeover).
+ * @param {string} reason text for the log.
+ */
+function onLinkLost(reason) {
+  log(reason);
+  calStop(reason);
+  if (client) { client.dispose(); client = null; }
+  setConnected(false);
+}
+
+let takeoverPrompting = false;
+/**
+ * Offers to take control when another link owns the device, and sends claim {takeover:true} on yes.
+ * @param {string} message why control is held elsewhere.
+ * @returns {Promise<boolean>} true when this page now owns control.
+ */
+async function offerTakeover(message) {
+  if (!client || takeoverPrompting) return false;
+  takeoverPrompting = true;
+  const c = client;
   try {
-    const devices = await navigator.hid.requestDevice({
-      filters: [{ usagePage: USAGE_PAGE, usage: USAGE }],
-    });
-    const device = devices[0];
-    if (!device) return;
-    if (!device.opened) await device.open();
+    if (!window.confirm(`${message}\n\nTake over control?`)) return false;
+    const r = await c.request('claim', { takeover: true });
+    c.markOwned();
+    log('claim', r);
+    document.getElementById('dControl').textContent = `owner ${r.owner} (this page)`;
+    return true;
+  } catch (e) {
+    log('claim err', e.message || e);
+    return false;
+  } finally {
+    takeoverPrompting = false;
+  }
+}
+
+/**
+ * Handles a notification pushed by the device.
+ * @param {object} m the notification message.
+ */
+function handleNotify(m) {
+  if (m.op === 'beats') log('NOTIFY beats', (m.data?.beats || []).map((b) => `${b.seq}:${b.status}:${fmt(b.uUs, 1)}us`).join(' '));
+  else if (m.op !== 'quartz') log('NOTIFY', m.op); /* quartz at up to 5 Hz would flood the log */
+  if (m.op === 'metrics') renderMetrics(m.data);
+  else if (m.op === 'timing') renderTiming(m.data);
+  else if (m.op === 'beat') renderBeat(m.data);
+  else if (m.op === 'quartz') renderQuartz(m.data);
+  else if (m.op === 'quartzPulse') { if (m.data) mergeQuartzPulses([m.data]); }
+  else if (m.op === 'event') {
+    renderEvents(m.data?.events || []);
+  } else if (m.op === 'error') {
+    const row = m.data;
+    if (row) {
+      const body = document.getElementById('errorsBody');
+      const tr = document.createElement('tr');
+      [row.block, row.reason, row.uptimeMs, row.sampleIndex].forEach((v, i) => {
+        const td = document.createElement('td');
+        td.textContent = String(v); /* device-supplied: textContent only */
+        if (i === 1) td.className = 'bad';
+        tr.appendChild(td);
+      });
+      body.prepend(tr);
+    }
+  }
+}
+
+document.getElementById('btnConnect').onclick = async () => {
+  const kind = document.getElementById('transportSel').value;
+  let transport = null;
+  try {
+    transport = kind === 'ble'
+      ? await Ble.Transport.open({ writeMode: document.getElementById('bleWriteMode').value })
+      : await HidTransport.open();
+    if (!transport) return;
     if (client) client.dispose();
-    client = new Client(device);
-    client.onNotify = (m) => {
-      if (m.op === 'beats') log('NOTIFY beats', (m.data?.beats || []).map((b) => `${b.seq}:${b.status}:${fmt(b.uUs, 1)}us`).join(' '));
-      else if (m.op !== 'quartz') log('NOTIFY', m.op); /* quartz at up to 5 Hz would flood the log */
-      if (m.op === 'metrics') renderMetrics(m.data);
-      else if (m.op === 'timing') renderTiming(m.data);
-      else if (m.op === 'beat') renderBeat(m.data);
-      else if (m.op === 'quartz') renderQuartz(m.data);
-      else if (m.op === 'quartzPulse') { if (m.data) mergeQuartzPulses([m.data]); }
-      else if (m.op === 'event') {
-        renderEvents(m.data?.events || []);
-      } else if (m.op === 'error') {
-        const row = m.data;
-        if (row) {
-          const body = document.getElementById('errorsBody');
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${row.block}</td><td class="bad">${row.reason}</td><td>${row.uptimeMs}</td><td>${row.sampleIndex}</td>`;
-          body.prepend(tr);
-        }
-      }
+    client = new Client(transport);
+    client.onNotify = handleNotify;
+    client.onLinkBusy = (err) => {
+      log('linkBusy:', err.message);
+      offerTakeover(err.message || 'Control is held by another link.');
     };
-    device.addEventListener('disconnect', () => {
-      log('device disconnected');
-      calStop('device disconnected');
-      if (client) { client.dispose(); client = null; }
-      setConnected(false);
-    });
+    client.onControlReleased = (to) => {
+      /* Another link took over: tear down like an unplug. */
+      transport.close().catch(() => {});
+      onLinkLost(`Control taken over by ${to}`);
+    };
+    transport.onClose = onLinkLost;
     setConnected(true);
-    log('connected', device.productName || device.productId);
+    log('connected', transport.name);
     const h = await client.request('hello');
     applyHello(h);
     log('hello', h);
+    if (h.control && h.control.owner && !h.control.self) {
+      const owned = await offerTakeover(`This stand is controlled over ${h.control.owner} by another app.`);
+      if (!owned) {
+        log('control not taken; disconnecting');
+        document.getElementById('btnDisconnect').click();
+        return;
+      }
+    }
     const p = await client.request('ping', { t: Math.floor(performance.now()) });
     document.getElementById('dUptime').textContent = `${p.uptimeMs} ms`;
     await refreshAll();
   } catch (e) {
     log('connect error', e.message || e);
+    if (client) { client.dispose(); client = null; }
+    if (transport) { try { await transport.close(); } catch (_) {} }
     setConnected(false);
   }
 };
@@ -1065,16 +1593,17 @@ document.getElementById('btnDisconnect').onclick = async () => {
   calStop('disconnected');
   try {
     if (client) {
+      client.onLinkBusy = null; /* the unsubscribe below must not raise a takeover prompt */
       try {
         await client.request('subscribe', {
           metricsHz: 0, beatHz: 0, timingHz: 0, quartzHz: 0, events: false, errors: false, quartzPulses: false,
           beats: false,
         });
       } catch (_) {}
-      const d = client.device;
+      const t = client.transport;
       client.dispose();
       client = null;
-      if (d.opened) await d.close();
+      await t.close();
     }
   } catch (e) { log('disconnect', e.message || e); }
   setConnected(false);
@@ -1115,7 +1644,6 @@ document.getElementById('presetSafe').onclick = async () => {
       eventDetect: { enabled: true },
       beatRate: { enabled: true },
       eventLog: { enabled: true },
-      matchedFilter: { enabled: false },
       spectrum: { enabled: false },
       gain: { enabled: false },
       limiter: { enabled: true },
@@ -1134,7 +1662,6 @@ document.getElementById('presetTiming').onclick = async () => {
     bypass: true,
     blocks: {
       spectrum: { enabled: false },
-      matchedFilter: { enabled: false },
       softGate: { enabled: false },
       agc: { enabled: false },
       firBank: { enabled: false },
@@ -1170,14 +1697,14 @@ document.getElementById('avgS').onchange = async (ev) => {
   await patchState({ blocks: { beatRate: { params: { avgS: Number(ev.target.value) } } } });
   ev.target.blur();
 };
+document.getElementById('btnLink').onclick = async () => {
+  try { log('getLink ' + JSON.stringify(await client.request('getLink'), null, 2)); } catch (e) { log(e.message); }
+};
 document.getElementById('btnBeat').onclick = async () => {
   try { renderBeat(await client.request('getBeat')); } catch (e) { log(e.message); }
 };
 document.getElementById('btnSpectrum').onclick = async () => {
   try { renderSpectrum(await client.request('getSpectrum')); } catch (e) { log(e.message); }
-};
-document.getElementById('btnMatched').onclick = async () => {
-  try { renderMatched(await client.request('getMatched')); } catch (e) { log(e.message); }
 };
 document.getElementById('btnEvents').onclick = async () => {
   try {
@@ -1886,11 +2413,60 @@ document.getElementById('btnCalApply').onclick = async () => {
 
 document.getElementById('btnClearLog').onclick = () => { logEl.textContent = ''; };
 
+/** Probe panel wiring. */
+const probeOut = document.getElementById('probeOut');
+const probeButtons = ['btnProbe', 'btnThroughput'].map((id) => document.getElementById(id));
+let lastProbe = {};
+/**
+ * Runs a probe task with the probe buttons disabled and shows the merged report.
+ * @param {string} key report key for the result (null merges the result into the report).
+ * @param {function(function(string): void): Promise<object>} task the work; receives a status callback.
+ */
+async function runProbeTask(key, task) {
+  for (const b of probeButtons) b.disabled = true;
+  const status = (t) => { probeOut.textContent = `${JSON.stringify(lastProbe, null, 2)}
+
+${t}`; };
+  try {
+    status('running...');
+    const r = await task(status);
+    if (key) lastProbe = { ...lastProbe, [key]: r }; else lastProbe = r;
+  } catch (e) {
+    log('probe error', e.message || e);
+    lastProbe = { ...lastProbe, error: String(e.message || e) };
+  } finally {
+    probeOut.textContent = JSON.stringify(lastProbe, null, 2);
+    for (const b of probeButtons) b.disabled = false;
+  }
+}
+document.getElementById('btnProbe').onclick = () => runProbeTask(null,
+  () => Ble.probe(client, document.getElementById('bleWriteMode').value));
+document.getElementById('btnThroughput').onclick = () => runProbeTask('throughput',
+  (status) => Ble.throughput(client, document.getElementById('bleWriteMode').value, status));
+document.getElementById('btnProbeCopy').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(probeOut.textContent);
+    log('probe report copied');
+  } catch (e) {
+    const range = document.createRange();
+    range.selectNodeContents(probeOut);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    log('clipboard unavailable; report selected, press Ctrl/Cmd+C');
+  }
+};
+
+{
+  const sel = document.getElementById('transportSel');
+  if (!navigator.hid && navigator.bluetooth) sel.value = 'ble';
+}
+
 renderBlocks();
 renderQuartzPulses();
 applyQuartzMode('mechanical');
 setConnected(false);
-log('Ready. Connect a Timegrapher (WebHID) device.');
+log('Ready. Choose USB (WebHID) or Bluetooth and connect a Timegrapher.');
   </script>
 </body>
 </html>

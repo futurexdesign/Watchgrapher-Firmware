@@ -41,6 +41,31 @@ void dsp_graph_init(void);
 void dsp_graph_reset_stream(void);
 
 /**
+ * Turns the timing engines on (standalone mode) or off (USB microphone mode).
+ *
+ * Off: only tick detection (stage A) and the A/h lock run. The rate and beat
+ * error fit, the rolling means, stage B (envelope front end, templates, drop
+ * timing, shape windows), amplitude, the no-watch rule, the beat records and
+ * the quartz engine stop, and {@link dsp_graph_get_beat} reports
+ * {@code analysis} false with the lock still live. The process path (filters
+ * for the USB stream), meters, spectrum and the event log are untouched.
+ *
+ * A change in either direction clears the detector, the event log and the
+ * timing state, and the stage B templates are forgotten, so the engine starts
+ * clean in standalone mode and a later session never inherits another
+ * watch's templates. Setting the current value does nothing. The block
+ * parameters ({@code timingLandmark}, {@code liftAngle}, quartz mode) are
+ * kept. Default after {@link dsp_graph_init}: on.
+ *
+ * Call only from the core-0 main loop, between blocks, like every other
+ * graph call; {@code device_mode_set} and {@code device_mode_init} are the
+ * callers.
+ *
+ * @param on {@code true} for standalone analysis, {@code false} in USB mode.
+ */
+void dsp_graph_set_analysis(bool on);
+
+/**
  * Sets the sample rate of samples fed to {@link dsp_graph_process} for timing
  * math (event pre-roll/tail, beat intervals → vph, filter design).
  *
@@ -110,9 +135,6 @@ void dsp_graph_get_beat(dsp_beat_rate_t *out);
 /** Copies last spectrum peak list ({@link DSP_BLOCK_SPECTRUM}). */
 void dsp_graph_get_spectrum(dsp_spectrum_t *out);
 
-/** Copies matched-filter learning / score state. */
-void dsp_graph_get_matched(dsp_matched_t *out);
-
 /**
  * Copies up to {@code max_n} recent events, newest first.
  * @return Number of events written to {@code out}.
@@ -169,7 +191,7 @@ bool dsp_graph_set_block_enabled(dsp_block_id_t id, bool on);
 /**
  * Writes a named parameter on {@code id}.
  * See CLI {@code dsp help <block>} / HID docs for names (gain db, fir preset,
- * matched threshold/learn, spectrum stride, etc.).
+ * spectrum stride, etc.).
  *
  * @return {@code false} if the id/param pair is unknown or out of range.
  */

@@ -3,7 +3,8 @@
  * @brief Counter storage and optional CDC/UART status dumps.
  *
  * Periodic lines stay off until {@link diagnostics_set_print_enabled} /
- * CLI {@code diag on}. Suspend timing always runs.
+ * CLI {@code diag on}, and exist only when {@code TG_SERIAL_CLI=1}
+ * (plan §5.7). Suspend timing always runs.
  */
 
 #include "diagnostics.h"
@@ -21,16 +22,24 @@
 static diag_counters_t g_diag;
 static uint32_t g_suspend_entered_ms;
 static bool g_suspend_timing_active;
+#if TG_SERIAL_CLI
 static bool g_print_enabled;
+#endif
 
 void diagnostics_init(void) {
   memset(&g_diag, 0, sizeof(g_diag));
   g_diag.ring_min_occupancy = UINT32_MAX;
   g_diag.adc_min_code = UINT16_MAX;
   g_diag.adc_max_code = 0;
+#if TG_SERIAL_CLI
   g_print_enabled = false;
+#endif
 
-  /* CDC Serial is shared with the CLI; open early, do not spam a diag banner. */
+  /*
+   * Serial.begin() registers the CDC interface with TinyUSB (it writes
+   * nothing). It stays in every build so the 1200-baud upload reset works
+   * (plan F-18). Open early; no diag banner.
+   */
   Serial.begin(115200);
 
 #if DIAG_UART
@@ -40,9 +49,11 @@ void diagnostics_init(void) {
 #endif
 }
 
+#if TG_SERIAL_CLI
 void diagnostics_set_print_enabled(bool on) { g_print_enabled = on; }
 
 bool diagnostics_print_enabled(void) { return g_print_enabled; }
+#endif
 
 diag_counters_t *diagnostics_get(void) { return &g_diag; }
 
@@ -76,7 +87,7 @@ void diagnostics_reset_adc_stats(void) {
   g_diag.adc_pcm_peak_abs = 0;
 }
 
-#if DIAG_UART || DIAG_CDC
+#if TG_SERIAL_CLI && (DIAG_UART || DIAG_CDC)
 static void diagnostics_print_line(Stream &out) {
   uint32_t mean = 0;
   if (g_diag.adc_mean_code_count > 0) {
@@ -189,6 +200,7 @@ void diagnostics_poll(void) {
     g_suspend_timing_active = false;
   }
 
+#if TG_SERIAL_CLI
   if (!g_print_enabled) {
     return;
   }
@@ -212,4 +224,5 @@ void diagnostics_poll(void) {
   diagnostics_print_line(Serial);
 #endif
 #endif
+#endif /* TG_SERIAL_CLI */
 }

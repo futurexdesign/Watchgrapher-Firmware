@@ -93,9 +93,6 @@ void control_api_get_beat_rate(dsp_beat_rate_t *out);
 /** Copies last spectrum peak list. */
 void control_api_get_spectrum(dsp_spectrum_t *out);
 
-/** Copies matched-filter state. */
-void control_api_get_matched(dsp_matched_t *out);
-
 /**
  * Copies up to {@code max_n} recent analysis events (newest first).
  * @return Number copied.

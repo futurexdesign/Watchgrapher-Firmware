@@ -329,3 +329,37 @@ for (;;) {
 - Keep subscription rates modest (`metricsHz ≤ 20`) so UAC2 streaming stays healthy.
 - Audio recording still goes through the normal Web Audio / `getUserMedia` mic path (UAC2), not WebHID.
 - Until H1 firmware ships, `requestDevice` will not find a matching Usage Page `0xFFA0` interface.
+
+---
+
+## 8. Control ownership and BLE (H7)
+
+The same client works over Web Bluetooth: the BLE link uses the same frames and ops ([`../BLE_CONTROL_PLANE.md`](../BLE_CONTROL_PLANE.md)). Only one link owns control at a time ([`../HID_CONTROL_PLANE.md`](../HID_CONTROL_PLANE.md) §4.6). A host should read `hello.control` after connecting and handle the two ownership events:
+
+```js
+async function connectAndCheckOwner(client) {
+  const hello = await client.request('hello');
+  const control = hello.control;
+  if (control && control.owner && !control.self) {
+    // Another link (USB HID or BLE) owns control. Ask the user before taking over.
+    return { owner: control.owner, canTakeOver: true };
+  }
+  return { owner: null, canTakeOver: false };
+}
+
+async function takeOver(client) {
+  // Result: { owner, previous }. Sends the same request as a takeover claim.
+  return client.request('claim', { takeover: true });
+}
+
+client.onNotify = (msg) => {
+  if (msg.op === 'controlReleased') {
+    // Another link took control. Stop the subscriptions and show the new owner.
+    showControlMoved(msg.data.to);
+  }
+};
+```
+
+- A request refused with `linkBusy` (`error.code === 'linkBusy'`) was not run. Show that another link holds control and offer a takeover.
+- Send `ping` at least every 3 s while the page owns control but sends nothing else. The lease expires after 10 s without a request from the owner, and then another link can take control.
+- `client.request` is the helper of §3 (`request(op, body)`); `showControlMoved` is the host's own UI function.

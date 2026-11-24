@@ -2,6 +2,18 @@
 
 A 128×128 **SH1107** I²C OLED module shows the timing readout. It is driven entirely from **core 1**. Core 0 keeps everything time-critical (TinyUSB, capture, DSP, CLI, HID). A 2 KB frame takes about 55 ms to send at 400 kHz, which would wreck the ~4 ms USB audio slack on core 0. On core 1 it cannot affect the stream.
 
+## Screen gallery
+
+![Every OLED screen state](images/oled/contact_sheet.png)
+
+Every header status, the Bluetooth and GPS badge combinations, the mechanical readout with its trend, the USB Audio section, and each quartz status are in `docs/images/oled/`, one PNG per state. They are rendered from the real `src/display_ui.cpp` and the pinned Adafruit GFX library on the host, so they are pixel-exact apart from the panel itself. Screens drawn at the idle contrast (`0x04`) are shown dimmed. To regenerate them after a layout change, run:
+
+```
+scripts/oled_render/render.sh
+```
+
+It needs a C++17 compiler, Python 3 with Pillow, and the library checkout under `.pio/libdeps` (any `pio run` creates it). The states are the scenario list in `scripts/oled_render/render_main.cpp`; add one there when a new state appears.
+
 ## Readout
 
 ```
@@ -17,20 +29,33 @@ TREND 2 min                       ±20 s/d
   ‾‾‾‾‾‾‾‾‾‾\__..........__/‾‾‾‾‾‾          ← averaged rate, 1 px per second
 ```
 
+- **USB Audio main section.** The readout above is the **standalone** (`SA`) screen. In **USB microphone mode** the header is drawn exactly as in standalone (nominal rate when locked, otherwise the status text, then the `USB` tag and the Bluetooth and GPS badges), and everything below the header rule is replaced by:
+
+```
+28,800 bph                  USB  (BT) (GPS)   ← header, unchanged
+──────────────────────────────────────────
+                 USB                          ← size 3, centred
+                AUDIO                         ← size 3, centred
+            timing on host                    ← size 1
+             analysis off
+```
+
+  "USB" over "AUDIO" is the largest text that fits: "USB AUDIO" on one line is 162 px at size 3, and 108 px at size 2. The same section replaces the quartz readouts in USB mode; the quartz header (mode tag, `UNCAL`, badges) stays. Timing is analysed only in standalone mode: in USB mode the host does the measuring, and the device runs only tick detection and the beat-rate lock, which is what the header shows (nominal rate when locked, otherwise the status text). The rate and beat-error fit, amplitude, the beat records and the quartz engine are off (`getBeat.analysis` and `getQuartz.analysis` read `"off"`; see [HID_CONTROL_PLANE.md §5.4](HID_CONTROL_PLANE.md)). The trend history keeps its samples, so switching back to standalone shows the trend as it was. Idle dimming and contrast are unchanged. Screens: `usb_01_locked`, `usb_02_listening`, `usb_03_quartz_motor`.
 - **Rate, amplitude and beat error** are rolling means over the configured integration time, **10 s** by default (`avgLong` in HID `getBeat`, `avg<N>s` in `dsp beat`). Change it with `dsp set beat avg_s <1-60>`, the HID `beatRate.avgS` param, or the *average* selector in the WebHID page; the caption follows it. They show `---` / `-.-` until timing is locked.
 - **Beat lock** is shown by the header switching from a status message to the nominal rate.
-- **Mode tag** (`SA` or `USB`, right-aligned at the right end of the header, left of the GPS badge when there is one; also on the quartz screens): `SA` means the device is in **standalone** mode (it measures on its own, started at boot), `USB` means **USB microphone** mode (capture follows the host's audio stream, or a `run start`). The two modalities are described in [HID_CONTROL_PLANE.md §5.4](HID_CONTROL_PLANE.md). The tag is not shown until core 0 has published (`starting...`). The mechanical header text is at most 14 characters, so the tag never collides with it.
+- **Mode tag** (`SA` or `USB`, right-aligned at the right end of the header, left of the GPS badge when there is one; also on the quartz screens): `SA` means the device is in **standalone** mode (it measures on its own, started at boot) and shows the readout, `USB` means **USB microphone** mode (capture follows the host's audio stream, or a `run start`) and shows the USB Audio section. The two modalities are described in [HID_CONTROL_PLANE.md §5.4](HID_CONTROL_PLANE.md). The tag is not shown until core 0 has published (`starting...`). The header text is at most 11 characters (66 px), so the tag never collides with it, even beside the Bluetooth and GPS badges.
 - **GPS badge** (top right, only in builds with `-DPPS_GPIO=N`): solid, inverse `GPS` while the timebase is disciplined by GPS 1 PPS; outlined while PPS is not locked (no fix, no signal, or still averaging), in which case the stored calibration is in use. Without a PPS build there is no badge.
+- **Bluetooth badge** (only in builds with BLE, `TG_BLE=1`; see [BLE_CONTROL_PLANE.md](BLE_CONTROL_PLANE.md)): an 11 × 11 px rounded square with a 5 × 9 px Bluetooth rune, the same height as the GPS pill, placed right to left after it: GPS pill (x 105, when PPS is built), then the badge 2 px to its left (x 92, or x 117 without PPS), then the mode tag 2 px left of the leftmost badge. It is **outlined** while BLE is on and advertising with no central connected. It is **filled** (rune cut out) while a central is connected with notifications on. It is not drawn on builds without BLE, or while BLE is off (`ble off` in CLI builds). The layout is the pure function `ui_header_layout()` in `include/ui_format.h` (host test `UIH-*`); with the badge absent the GPS pill and the tag sit where they always did. Core 0 publishes `ble_built`, `ble_enabled` and `ble_connected` in the UI snapshot; core 1 never calls BLE code.
 - **Lift angle** is shown in the amplitude label (`AMP LA 52°`), so you can see which λ the amplitude was computed with. Set it with `dsp set beat lift_angle <deg>` or the HID `liftAngle` parameter.
 - **Header** shows the nominal rate (`18,000`, `28,800`, …) when locked, and otherwise what the device is waiting for:
 
 | Text | Meaning |
 |---|---|
 | `starting...` | Core 0 has not published yet (first moments after boot) |
-| `no host stream` | **USB microphone mode**, and nothing is running: no audio stream open and no `run start`. Capture and DSP run only while the host records (or after `run start`). Was `waiting for host` |
+| `no stream` | **USB microphone mode**, and nothing is running: no audio stream open and no `run start`. Capture and DSP run only while the host records (or after `run start`). Was `no host stream` and, before that, `waiting for host` |
 | `stopped` | **Standalone mode** with the run stopped (`run stop` / `stop`). It stays stopped until `run start` or the next boot |
-| `clock check...` | PCM1808 frame rate not verified yet (about 1 s after capture starts). Was `checking clock...` |
-| `listening...` | No ticks detected yet |
+| `clock check` | PCM1808 frame rate not verified yet (about 1 s after capture starts). Was `clock check...` |
+| `listening` | No ticks detected yet. Was `listening...` |
 | `locking...` | Ticks seen, beat rate not locked yet |
 
 - **Trend graph.**
@@ -42,12 +67,12 @@ The display redraws at 2 Hz, but a frame is only sent over I²C when it differs 
 
 ## Quartz screens
 
-When a quartz mode is selected (`quartz mode motor|lcd|fork`), a quartz layout replaces the mechanical one; `quartz mode mechanical` brings the mechanical readout back unchanged. The rows never move between states: a value that is not known yet shows `--` / `---`.
+In standalone mode, when a quartz mode is selected (`quartz mode motor|lcd|fork`), a quartz layout replaces the mechanical one (in USB mode the USB Audio section is shown instead, below the quartz header); `quartz mode mechanical` brings the mechanical readout back unchanged. The rows never move between states: a value that is not known yet shows `--` / `---`.
 
 **Stepper motor** (inductive pickup, LEFT):
 
 ```
-MOTOR [UNCAL]                  SA    (GPS)   ← quartz mode, UNCAL badge, device-mode tag, GPS badge
+MOTOR [UNCAL]               SA  (BT) (GPS)   ← quartz mode, UNCAL badge, device-mode tag, Bluetooth and GPS badges
 ──────────────────────────────────────────
 corrected                                    ← status line (see below)
        +0.273 s/d                            ← headline rate (large)
@@ -66,8 +91,8 @@ gate                              23/60s     ← elapsed / gate, "done" when fro
 
 | Text | Meaning |
 |---|---|
-| `no host stream` / `stopped` | Nothing is running (no audio stream, no run latch): `no host stream` in USB microphone mode, `stopped` in standalone mode. A finished, frozen result stays on screen. Same wording as the mechanical header |
-| `clock check...` | Capture rate not verified yet (same wording as the mechanical header) |
+| `no stream` / `stopped` | Nothing is running (no audio stream, no run latch): `no stream` in USB microphone mode, `stopped` in standalone mode. A finished, frozen result stays on screen. Same wording as the mechanical header |
+| `clock check` | Capture rate not verified yet (same wording as the mechanical header) |
 | `unsupported rate` | Verified capture rate is not 48 kHz |
 | `acquiring...` | Running, fewer than three pulses / no rate yet |
 | `no inhibition` | No jump in a gate ≥ 2 × the longest expected period: the rate is final |
@@ -77,7 +102,7 @@ gate                              23/60s     ← elapsed / gate, "done" when fro
 | `corrected` | Two or more jumps: headline is the rate with inhibition |
 
 - **Jump:** `@8192` is dropped when the value is too long to fit beside the label (jumps of 1000 µs and more).
-- **UNCAL:** shown when no timebase calibration is applied. The board clock alone can be off by about ±1.7 s/d, which matters at quartz accuracy. See `docs/TIMEBASE_CALIBRATION.md`.
+- **UNCAL:** shown when no timebase calibration is applied. When the full badge would not fit left of the mode tag (only in a BLE build with PPS: always for the `QUARTZ` tag, and for `MOTOR` beside the `USB` tag), it reads `UNC` and sits 3 px after the tag. The board clock alone can be off by about ±1.7 s/d, which matters at quartz accuracy. See `docs/TIMEBASE_CALIBRATION.md`.
 - **Hints** (handoff §8): `CLIP: open JP1` when the LEFT pickup hit the ADC rail (timing is fine, pulse-shape estimates are not), `WEAK: reposition` when the pulses are below about 30 µV. Both can show at once.
 
 **LCD** (capacitive pickup, RIGHT) and **tuning fork** (LEFT):
@@ -136,7 +161,7 @@ The mechanical trend graph keeps sampling (as gaps) while a quartz mode is activ
 - **Why Kiwi uses GP6/GP7:** GP4 is PCM1808 DOUT on Kiwi.
 - **Pull-ups:** most modules already have SDA/SCL pull-ups. If yours doesn't, add 4.7 kΩ to 3V3.
 - **Address:** the default is `0x3D`, which is this project's module. The firmware also tries `0x3C` automatically if `0x3D` doesn't answer, so either strapping works without a rebuild. `-DDISPLAY_I2C_ADDR=…` changes which one is tried first.
-- **Orientation:** if the image is rotated for your mounting, set `-DDISPLAY_ROTATION=1`, `2` or `3` (quarter turns).
+- **Orientation:** the default is `DISPLAY_ROTATION=3` (Adafruit GFX `setRotation(3)`, 90° counter-clockwise), which matches the way the module is installed in the case. If your mounting differs, set `-DDISPLAY_ROTATION=0` (no rotation), `1` (90° clockwise), `2` or `3` (quarter turns). The layout is 128 × 128 px, so every rotation uses the same coordinates. The screen images in this document are rendered with rotation 0, i.e. as seen upright in the case.
 - **Hot-plug:** the module may be connected or removed while running. Core 1 probes for it every 2 s and re-checks every 5 s.
 
 **Other pins.** Set `DISPLAY_SDA_GPIO` / `DISPLAY_SCL_GPIO` in the board section of `platformio.ini`. They must be an SDA/SCL pair of one I²C block: for GPIO *n* the block is (*n* / 2) % 2, and SDA is the even pin. A compile-time check rejects invalid pairs.

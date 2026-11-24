@@ -1,6 +1,6 @@
 # HID control plane (WebHID / JS-first)
 
-**Status:** Implemented (H1–H6 in firmware; H4 example page). CDC CLI remains available alongside HID. This document is normative for hosts and firmware. Where this document and the code differ, the code (`src/hid_control.cpp`, `src/hid_json.cpp`) wins; please report the difference.
+**Status:** Implemented (H1–H6 in firmware; H4 example page). The serial CLI is only in `TG_SERIAL_CLI` builds; the CDC port (upload auto-reset) is in every build. H7 (BLE transport and control ownership, §4.6) is in progress: see [`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md). This document is normative for hosts and firmware. Where this document and the code differ, the code (`src/hid_control.cpp`, `src/hid_json.cpp`) wins; please report the difference.
 
 **Goal:** Expose the same DSP surface as [`control_api`](../include/control_api.h) to a browser via [WebHID](https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API), without parsing CLI text or C enums. Audio stays on UAC2; HID carries control JSON only.
 
@@ -12,7 +12,7 @@
 
 | Choice | Decision |
 |---|---|
-| USB composite | Keep UAC2 mic + CDC CLI; **add** vendor HID (`CFG_TUD_HID=1`) |
+| USB composite | Keep UAC2 mic + CDC port; **add** vendor HID (`CFG_TUD_HID=1`). The CLI on the CDC port is only in `TG_SERIAL_CLI` builds (H7) |
 | Wire body | **JSON UTF-8**, camelCase keys, string block names |
 | Transport | Host OUTPUT report ↔ device INPUT report (no Feature reports for API) |
 | Correlation | Request `id` echoed on replies; unsolicited pushes use `"notify": true` |
@@ -24,6 +24,8 @@ Browser (WebHID)
   sendReport(OUTPUT) ──► hid_control (framer + JSON) ──► control_api ──► dsp_graph
   inputreport ◄──────── hid_control (rsp / notify) ◄──── control_api ◄── dsp_graph
 ```
+
+**Transports.** The framing (§3) and the JSON (§4 onward) do not depend on the link. USB HID is one link. BLE is a second link, specified in [`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md) (Pico 2 W only), which uses the same frames and the same ops. Each link has its own reassembly buffer and its own `msgSeq` counter. Only one link owns the control plane at a time (§4.6).
 
 ---
 
@@ -107,7 +109,7 @@ Firmware descriptors still include report ID `0x01` as the first byte of the on-
 
 ### 3.4 Reassembly corner cases (device receiver, `hid_control.cpp`)
 
-The device keeps **one** reassembly buffer. What it does with unusual input:
+The device keeps **one** reassembly buffer per link. What it does with unusual input:
 
 | Input | Device behaviour |
 |---|---|
@@ -121,7 +123,7 @@ The device keeps **one** reassembly buffer. What it does with unusual input:
 
 **No `tooLarge` for an oversized request.** The device cannot reply to a message it never reassembled: when the first fragment declares an impossible `fragCount` (or is otherwise dropped) no reply of any kind is sent, so a host that sends such a request, or loses a first fragment, may never see a `tooLarge` error. Hosts must rely on their own request timeout (the reference page uses 2-4 s) and must not send requests above 2030 bytes. The error code `tooLarge` is only sent when a **reply** would exceed 2048 bytes (§4.5).
 
-The same rules are a good model for the host's receiver: key by `msgSeq`, restart on a new `msgSeq`, ignore duplicate `fragIndex`, and discard on timeout. Device replies and notifies share the one device-side `msgSeq` counter, and a notify is only started while no other transfer is in flight, so messages never interleave.
+The same rules are a good model for the host's receiver: key by `msgSeq`, restart on a new `msgSeq`, ignore duplicate `fragIndex`, and discard on timeout. Device replies and notifies share the one device-side `msgSeq` counter of their link, and a notify is only started while no other transfer is in flight, so messages never interleave.
 
 ---
 
@@ -129,7 +131,7 @@ The same rules are a good model for the host's receiver: key by `msgSeq`, restar
 
 Protocol version field: `"v": 1`. Bump only on breaking changes. Unknown `op` → `error.code = "unknownOp"`.
 
-Additive changes (new ops, new keys in a result, new `subscribe` fields, new notifies) keep `v` and `protocolVersion` at 1; hosts must ignore keys they do not know. Feature presence is advertised in `hello.caps` instead (e.g. `caps.quartz`). The quartz additions (§5.3, §8.5, §8.6) and the H6 additions (§5.4 to §5.9, §8.7) are such changes.
+Additive changes (new ops, new keys in a result, new `subscribe` fields, new notifies) keep `v` and `protocolVersion` at 1; hosts must ignore keys they do not know. Feature presence is advertised in `hello.caps` instead (e.g. `caps.quartz`). The quartz additions (§5.3, §8.5, §8.6), the H6 additions (§5.4 to §5.9, §8.7) and the H7 additions (§4.5, §4.6, §5.1, §5.10, §7.2) are such changes.
 
 ### 4.1 Request (host → device)
 
@@ -188,6 +190,7 @@ Notifications **omit** `id`. Do not treat them as replies to in-flight requests.
 | `tooLarge` | A **reply** would exceed 2048 bytes (`"response exceeds buffer"`). Oversized *requests* are dropped silently (§3.4) |
 | `busy` | A flash write was refused because the USB audio stream is open: `saveTimebase`, `setTimebase` with a changed `logDeltaPpm`, `clearTimebaseLog`, `setDevice` |
 | `flashError` | The flash write or read-back failed (`"flash write failed"`) |
+| `linkBusy` | H7. The request came from a link that does not own control while another link holds it (§4.6). The request was **not** run. `message` names the owner: `control held by usbHid` or `control held by ble` |
 | `internal` | Reserved; the current firmware does not send it |
 
 Exact `message` strings of the error replies the firmware emits (a host may show them, never parse them):
@@ -212,13 +215,39 @@ Exact `message` strings of the error replies the firmware emits (a host may show
 | `busy` | `close the audio stream before changing mode` | `setDevice` while a USB stream is open |
 | `busy` | `close the audio stream before saving` | `saveTimebase`, `setTimebase.logDeltaPpm`, `clearTimebaseLog` while a USB stream is open |
 | `flashError` | `flash write failed` | `setDevice`, `saveTimebase`, `setTimebase.logDeltaPpm`, `clearTimebaseLog` |
+| `linkBusy` | `control held by usbHid` / `control held by ble` | §4.6: a non-owner link sent an op (other than `hello`, `ping`, `claim`) while another link holds control |
 | `tooLarge` | `response exceeds buffer` | Any reply of 2048 bytes or more (the buffer holds 2047 characters). Most results are far below that; none of the list ops is an exception any more: `getEvents` and `getBeats` drop what does not fit (§5, §8.3) |
+
+### 4.6 Control ownership
+
+H7. With two links (USB HID and BLE, [`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md)), at most one link **owns** the control plane. The owner's requests reach the device's handler and its subscriptions; the other link gets only the answers that do not change state. A build with only USB HID (`TG_BLE` off) behaves as before: its one link is always the owner.
+
+**Rule:** at most one link **owns** the control plane. State is `owner ∈ {none, usbHid, ble}`, plus `lease_deadline`. `kLeaseMs = 10000`.
+
+| Request arriving on link L | Behaviour |
+|---|---|
+| `hello`, `ping` | Always answered. Never claims, never refreshes another link's lease. A `ping` **from the owner** refreshes its lease. `hello.control` reports the state. |
+| `claim` with no `takeover` (or `false`) | If owner is none, L, or the lease has expired: L becomes owner and the lease is refreshed. Otherwise: `linkBusy`. |
+| `claim` with `takeover: true` | L becomes owner unconditionally. If the previous owner P ≠ L: `ControlHandler::reset()` (P's subscriptions stop), and P gets `controlReleased` if its link is still connected. |
+| Any other op | If owner is none, L, or the lease has expired: **auto-claim** (L becomes owner, lease refreshed), then dispatch to `ControlHandler`. If ownership moved from another link P by expiry, the handler is reset first (and P gets `controlReleased`). Otherwise: reply `linkBusy` and don't dispatch. |
+
+| Event | Behaviour |
+|---|---|
+| Owner link goes down (BLE disconnect or CCCD off; USB unmount) | owner = none; `ControlHandler::reset()`. |
+| Lease expires (no request from the owner for 10 s) | Nothing happens by itself: subscriptions keep running. The **next** claim or auto-claim by the other link takes over (as above). |
+| Pushes | `ControlHandler::poll()` output goes **only** to the owner's session. |
+
+Notes:
+
+- Auto-claim keeps old hosts (`example.html`, older web app builds, scripts) working unchanged when they are the only client, and a non-W build (only `usbHid`) behaves exactly as today.
+- Hosts that stay connected without sending requests (the web app on a passive view) must keep the lease alive: the web transports send `ping` after 3 s without any request. WebHID gives the device no close signal, so without the lease a closed desktop tab would block BLE forever.
+- `hello.control` tells a host who owns control before it sends anything else (§5.1). A host that finds another owner should ask the user before it claims with `takeover: true`.
 
 ---
 
 ## 5. Operations
 
-All ops map through `control_api`. CLI string commands (`dsp set …`) are **not** exposed on HID.
+Most ops map through `control_api`. CLI string commands (`dsp set …`) are **not** exposed on HID. The link and ownership ops (`claim`, `getLink`, `getDiag`) are described in §5.10.
 
 | `op` | Body fields | `result` |
 |---|---|---|
@@ -231,7 +260,6 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
 | `resetTiming` | — | `{ "cleared": true }` |
 | `getBeat` | — | `DspBeatRate` |
 | `getSpectrum` | — | `{ "valid", "fftN", "sourceHz", "nPeaks", "peaks": [{ "hz", "mag" }] }` (`DspSpectrum`): spectral peaks of the analysis source (`spectrum` block) |
-| `getMatched` | — | `{ "score", "templatePeak", "templateLen", "learned" }` (`DspMatched`): matched-filter score and template state (`matchedFilter` block) |
 | `getEvents` | optional `limit` (clamped to 1..32, default 8) | `{ "events": DspEvent[] }` newest first. An event is 216 to 345 bytes, so the reply holds as many of the requested events as fit one 2048-byte message, always the **newest** ones (a prefix of the newest-first list): with large values it may carry fewer than `limit` (at least 5 even at the worst case), never more, and never `tooLarge`. There is no offset parameter; events beyond the reply are reachable through the `event` notify |
 | `getErrors` | — | `{ "errors": DspError[] }` newest first |
 | `clearErrors` | — | `{ "cleared": true }` |
@@ -248,10 +276,13 @@ All ops map through `control_api`. CLI string commands (`dsp set …`) are **not
 | `setDevice` | `mode`: `"usbMic"` \| `"standalone"` | `DeviceStatus`; persists the mode to flash. `badParam`; `busy` while a USB stream is open |
 | `start` | — | `DeviceStatus` after setting the run latch (§5.4). `badRequest` if the backend is unhealthy |
 | `stop` | — | `DeviceStatus` after clearing the run latch. Never fails |
-| `getBeats` | optional `max` (1..`caps.beatsMax` = 8, default 8) | `{ "beats": DspBeat[] }` (§8.7), newest first |
+| `getBeats` | optional `max` (1..`caps.beatsMax` = 8, default 8), optional `packed` (boolean) | `{ "beats": DspBeat[] }` (§8.7), newest first; with `packed: true` `{ "p": "<base64>" }` (§5.6.1), `max` up to 32 |
 | `getGps` | — | `GpsInfo` (§5.7). `badRequest` without GPS |
 | `getTimebaseLog` | optional `offset` (integer, default 0; negative is 0; past the end gives an empty page) | `TimebaseLog` page (§5.8) |
 | `clearTimebaseLog` | — | `TimebaseLog` (empty, offset 0); writes flash. `busy` while streaming |
+| `claim` | optional `takeover` (boolean, default false) | `{ "owner", "previous" }` (§5.10). Takes control for the requesting link. Without `takeover`, `linkBusy` while another link holds a live lease. H7 |
+| `getLink` | — | `{ "usbHid": { "mounted" }, "ble"?: { … }, "control": { … } }` (§5.10). Owner-only under §4.6: a non-owner gets `linkBusy` while another link holds a live lease; otherwise the request auto-claims control. Read `hello.control` to see the owner without claiming. H7 |
+| `getDiag` | — | The diagnostic counters, camelCase (§5.10). Same ownership rule as `getLink` (§4.6): `linkBusy` for a non-owner while another link holds a live lease, otherwise auto-claim. H7 |
 
 Quartz settings (mode, gate, fork frequency, timestamp method, threshold) are part of `getState` / `patchState` (§6), not separate ops. Device mode and run control (`getDevice`, `setDevice`, `start`, `stop`) are described in §5.4 and §5.5.
 
@@ -277,6 +308,7 @@ Quartz settings (mode, gate, fork frequency, timestamp method, threshold) are pa
     "deviceMode": true,
     "beats": true,
     "beatsMax": 8,
+    "beatsPacked": 1,
     "gps": false,
     "pps": true,
     "timebaseLog": true,
@@ -284,7 +316,7 @@ Quartz settings (mode, gate, fork frequency, timestamp method, threshold) are pa
     "blocks": [
       "levelMeter", "gain", "limiter", "filterBank",
       "eventDetect", "beatRate", "noiseFloor", "eventLog",
-      "softGate", "notch", "agc", "matchedFilter", "firBank", "spectrum"
+      "softGate", "notch", "agc", "firBank", "spectrum"
     ],
     "pipeline": [
       { "key": "input", "group": "source", "order": 0, "inputs": [] },
@@ -297,7 +329,7 @@ Quartz settings (mode, gate, fork frequency, timestamp method, threshold) are pa
 
 The `pipeline` array is abbreviated here; the full node list is in the table below.
 
-`board` is `"Pico2"`, `"KiwiBoard"` or `"RP2350"`; `source` is `"PCM1808"`, `"ADC"` or `"SYNTHETIC"`; `fwVersion` is the build's `FW_VERSION`. `caps.timing` is always `true`. The example above is the `pico2_pcm1808` build. Build-dependent caps: `caps.pps` is `true` only when the build sets `PPS_GPIO` (`pico2_pcm1808` does, with `-DPPS_GPIO=3`); `caps.gps` is `true` only with `GPS_UART_RX` (no shipped env sets it, so it is `false`); `caps.quartz` and the `quartz` pipeline node need the PCM1808 source; `board`, `source`, `vid`/`pid` and `fwVersion` follow the build.
+`board` is `"Pico2"`, `"Pico2W"` (W builds, `TG_BOARD_NAME`), `"KiwiBoard"` or `"RP2350"`; `source` is `"PCM1808"`, `"ADC"` or `"SYNTHETIC"`; `fwVersion` is the build's `FW_VERSION`. `caps.timing` is always `true`. The example above is the `pico2_pcm1808` build. Build-dependent caps: `caps.pps` is `true` only when the build sets `PPS_GPIO` (`pico2_pcm1808` does, with `-DPPS_GPIO=3`); `caps.gps` is `true` only with `GPS_UART_RX` (no shipped env sets it, so it is `false`); `caps.quartz` and the `quartz` pipeline node need the PCM1808 source; `board`, `source`, `vid`/`pid` and `fwVersion` follow the build.
 
 `caps.blocks` lists JSON camelCase keys available in `getState` / `patchState`. `caps.timing` / `timingHzMax` advertise CPU headroom telemetry (`getTiming` / `subscribe.timingHz`).
 
@@ -308,16 +340,34 @@ Capability keys added by H6 (additive; an **absent key means the feature is abse
 | `deviceMode` | bool | `getDevice` / `setDevice` / `start` / `stop` exist (§5.4, §5.5). Current firmware always sends `true` |
 | `beats` | bool | `getBeats` and `subscribe.beats` / the `beats` notify exist (§5.6). Current firmware sends `true` |
 | `beatsMax` | number | Largest `getBeats.max`: **8** (the notify also carries at most 8 beats) |
+| `beatsPacked` | number | Version of the packed beats format (§5.6.1): `1`. Absent = `subscribe.beatsPacked` and `getBeats.packed` do not exist |
 | `gps` | bool | `getGps` exists **and** the build has `GPS_UART_RX`. When `false`, `getGps` replies `badRequest` `GPS not built in` |
 | `pps` | bool | The build has `PPS_GPIO` (`Timebase.pps.enabled`, the OLED GPS badge) |
 | `timebaseLog` | bool | `getTimebaseLog` / `clearTimebaseLog` exist (§5.8). Current firmware sends `true` |
 | `timebaseLogMax` | number | Timebase-log ring size: **24** |
 | `pipeline` | `PipelineNode[]` | The DSP data-flow graph (below) |
 
+Capability keys added by H7 (same rule: absent means `false`):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `ble` | bool | The firmware is built with BLE (`TG_BLE=1`, Pico 2 W). The `getLink.ble` object exists (§5.10) |
+| `cli` | bool | The serial CLI is built (`TG_SERIAL_CLI=1`, see [`build_and_flash.md`](build_and_flash.md)). Without it the CDC port carries no CLI |
+
+**`hello.link` and `hello.control` (H7).** `hello` also reports the link the request arrived on and who owns control. Both are absent on older firmware.
+
+```json
+"link": { "kind": "ble", "mtu": 185, "frameMax": 63 },
+"control": { "owner": "ble", "self": true, "leaseMs": 10000 }
+```
+
+- `link.kind`: `"usbHid"` or `"ble"`, the link this request arrived on. `link.mtu` is present only for `ble`. `link.frameMax` is the device-to-host frame size in bytes for messages after this reply: 63, or the size a BLE host chose with `hello {"frameMax": N}` ([`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md) §4.3a). USB HID always reports 63.
+- `control.owner`: `"usbHid"`, `"ble"` or `null` (no owner). `control.self` is `true` when the owner is the link this request arrived on. `control.leaseMs` is the lease length (10000). Rules: §4.6.
+
 **`caps.pipeline`.** Describes how data flows through the DSP so that a UI can draw it from the device instead of hard-coding it. Each node is
 
 ```json
-{ "key": "eventDetect", "group": "analysis", "order": 4, "inputs": ["input", "noiseFloor", "matchedFilter"] }
+{ "key": "eventDetect", "group": "analysis", "order": 4, "inputs": ["input", "noiseFloor"] }
 ```
 
 - `key`: a block key from `caps.blocks`, or one of the pseudo-nodes `input`, `pcm24`, `usb`, `quartz`. `bypass` is not a node (it gates the whole process chain).
@@ -331,10 +381,9 @@ As built (from `src/dsp_blocks.cpp`, derived from `dsp_graph_process`):
 |---|---|---:|---|
 | `input` | source | 0 | none |
 | `levelMeter` | analysis | 0 | `input`, `limiter` (measures pre on `input` and post at the end of the chain; the post tap only reads) |
-| `matchedFilter` | analysis | 1 | `input` |
 | `spectrum` | analysis | 2 | `input` |
 | `noiseFloor` | analysis | 3 | `input` |
-| `eventDetect` | analysis | 4 | `input`, `noiseFloor`, `matchedFilter` |
+| `eventDetect` | analysis | 4 | `input`, `noiseFloor` |
 | `eventLog` | analysis | 5 | `eventDetect` |
 | `beatRate` | analysis | 6 | `eventDetect` (a sibling of `eventLog`: `beatRate` does **not** read `eventLog`) |
 | `notch` | process | 1 | `input` |
@@ -348,7 +397,7 @@ As built (from `src/dsp_blocks.cpp`, derived from `dsp_graph_process`):
 | `usb` | sink | 9 | `pcm24` |
 | `quartz` | quartz | 0 | `input` |
 
-The `quartz` node (and any input that names it) is **omitted when `caps.quartz` is `false`**. The process chain is skipped while master `bypass` is on; analysis blocks run only when enabled (`getState`). In standalone mode the `usb` sink carries silence (§5.4). The `matchedFilter` also learns from closed events (one event late); that state feedback is not sample flow and is not drawn.
+The `quartz` node (and any input that names it) is **omitted when `caps.quartz` is `false`**. The process chain is skipped while master `bypass` is on; analysis blocks run only when enabled (`getState`). In standalone mode the `usb` sink carries silence (§5.4).
 
 `caps.quartz` is `true` on builds that run the quartz engine (PCM1808 source) and `false` elsewhere (ADC, SYNTHETIC), where only mechanical mode exists: `getState` then has no `quartz` object, `patchState` accepts only `{"quartz":{"mode":"mechanical"}}`, `getQuartz` reports mode `mechanical` / state `idle` with a reason, `getQuartzPulses` is empty, and `subscribe` forces `quartzHz` to 0 and `quartzPulses` to `false`. `quartzHzMax` caps `subscribe.quartzHz`; `quartzPulsesMax` caps `getQuartzPulses.max`.
 
@@ -390,7 +439,7 @@ Typical flow:
 3. `subscribe` `{"quartzHz":1,"quartzPulses":true}` → `quartz` notifies (the `getQuartz` snapshot) and one `quartzPulse` notify per motor pulse.
 4. When `state` is `done` (motor gate reached), the result is frozen; `quartzRestart` measures again.
 
-`state` values: `idle` (mechanical mode, or no engine), `waitTimebase` (capture rate not verified yet), `unsupportedRate` (verified rate is not 48 kHz), `acquiring` (running, no rate yet; `reason` says what it waits for), `measuring` (a rate exists and is refined), `done` (motor gate reached; result frozen). `reason` is human-readable display text, never parse it.
+`state` values: `idle` (mechanical mode, or no engine), `waitTimebase` (capture rate not verified yet), `unsupportedRate` (verified rate is not 48 kHz), `acquiring` (running, no rate yet; `reason` says what it waits for), `measuring` (a rate exists and is refined), `done` (motor gate reached; result frozen). `reason` is human-readable display text, never parse it. In `usbMic` mode the engine is off (§5.4): `analysis` is `"off"`, `state` is `idle` and `reason` is `"USB Audio mode"`, whatever `mode` is; the mode setting is kept and measuring starts again, from scratch, when `standalone` is selected.
 
 Motor gate (`gateS`): `0` = run until two inhibition events have been seen, otherwise 3..960 s (10 and 60 are the usual choices). A 10 s gate on a watch that inhibits every 60 s reports the raw rate, so always show the inhibition status (`motor.inhibition`, §8.5).
 
@@ -400,16 +449,30 @@ The stand works in one of two modalities. The mode is a persisted setting; the *
 
 | `mode` | What it is | Capture + analysis run |
 |---|---|---|
-| `usbMic` (default) | **USB microphone.** A PC timegrapher program records the audio over UAC2 and does the analysis, or the browser reads the device's own analysis over HID. | While the host has the audio stream open (`usbStreaming`), **or** while the run latch is set. |
+| `usbMic` (default) | **USB microphone.** A PC timegrapher program records the audio over UAC2 and does the analysis; the device's own timing engines are off and only the beat rate is detected (see "Timing in each mode" below). | While the host has the audio stream open (`usbStreaming`), **or** while the run latch is set. |
 | `standalone` | **Standalone timegrapher.** The device is the timegrapher: it captures and analyses by itself and shows the result on its OLED, CLI and HID. | The run latch is set **at boot and whenever this mode is selected**; no host stream is needed. |
 
 Capture runs while `usbStreaming || runRequested`.
 
 **The run latch (`runRequested`).** A RAM flag, not persisted.
 - `start` sets it (a no-op if already set). `stop` clears it. `setDevice` to `standalone` sets it; `setDevice` to `usbMic` clears it. At boot it is set when the persisted mode is `standalone`.
-- With the latch set and no USB stream, the device warms up the preamp (if any), starts capture and runs the whole DSP and quartz pipeline exactly as for a stream, so `getBeat`, `getBeats`, `getQuartz` and the OLED all work with no host audio.
+- With the latch set and no USB stream, the device warms up the preamp (if any), starts capture and runs the DSP pipeline exactly as for a stream, so the meters, spectrum, events and the beat-rate lock work with no host audio. In `standalone` mode the timing engines run as well (`getBeat`, `getBeats`, `getQuartz`); in `usbMic` mode they stay off (below).
 - If the capture backend is unhealthy (`streamState` `error`), `start` replies `badRequest` and a latch found set by the firmware is dropped again.
 - When the host opens the audio stream in `usbMic` mode the stream takes over the pipeline from a latch-run (a fresh stream: the DSP state, the beat `seq` and any quartz measurement restart). If the USB bus is suspended while the latch is set, the latch keeps the device measuring.
+
+**Timing in each mode.** Only `standalone` runs the timing engines. In `usbMic` the host does the timing (from the audio stream), so the device turns its own off and keeps what a status display needs:
+
+| | `standalone` | `usbMic` |
+|---|---|---|
+| Tick detection, A/h lock (`locked`, `vphNearest`, `vphRaw`, `confidence`, `intervalSamples`) | runs | runs |
+| Rate and beat-error fit, rolling means, amplitude, beat error windows, drop timing (`timingLandmark`), no-watch rule | runs | **off** |
+| Per-beat records (`getBeats`, `beats` notify) | produced | **none** (they need the fit) |
+| Quartz engine (`getQuartz`, `quartz` notify) | runs (when `quartz.mode` is not `mechanical`) | **off**; the `quartz.mode` setting is kept |
+| `getBeat.analysis`, `getQuartz.analysis` | `"on"` | `"off"` |
+| `getBeat.state` | listening, locking, locked, noWatch | `listening`, `locking` (ticks seen, no lock) or `locked` (lock held); never `noWatch` |
+| Audio path (filters, gain for the USB stream) | unchanged | unchanged |
+
+A host that sees `analysis: "off"` should say that timing runs on the host instead of showing the rate, beat error and amplitude (they are invalid). Switching the mode in either direction restarts the engines from a clean state: the lock, the fit and its templates, the beat `seq` and any quartz measurement are cleared, so nothing measured in one mode appears in the other. The block parameters (`liftAngle`, `timingLandmark`, ...) and the quartz settings are kept.
 
 **`start` / `stop` per mode.**
 
@@ -456,7 +519,7 @@ Requests:
 
 ### 5.6 `getBeats` and the `beats` stream
 
-`getBeats { "max": 8 }` returns the newest beats, **newest first**: `{ "beats": DspBeat[] }` (§8.7). `max` is clamped to 1..`caps.beatsMax` (8). The device keeps the last **64** beats in a ring (`dsp_beat_t`, `DSP_BEAT_LOG_CAP`). A beat object is up to 288 bytes, so the reply holds as many of the requested beats as fit one 2048-byte message: with extreme values it may carry fewer than `max`, never more. One beat record exists per tick handed to the beat fit once the A/h lock is established; none while unlocked.
+`getBeats { "max": 8 }` returns the newest beats, **newest first**: `{ "beats": DspBeat[] }` (§8.7). `max` is clamped to 1..`caps.beatsMax` (8). The device keeps the last **64** beats in a ring (`dsp_beat_t`, `DSP_BEAT_LOG_CAP`). A beat object is up to 288 bytes, so the reply holds as many of the requested beats as fit one 2048-byte message: with extreme values it may carry fewer than `max`, never more. One beat record exists per tick handed to the beat fit once the A/h lock is established; none while unlocked, and none in `usbMic` mode (`getBeat.analysis` `"off"`, §5.4).
 
 `subscribe { "beats": true }` pushes `beats` notifies:
 
@@ -469,7 +532,48 @@ Push order and baseline rules (firmware: `push_notify_beats`):
 - The cursor is the beat `seq`. **`subscribe` seeds it** with the sequence the next beat will receive, so subscribing never replays history; only beats that arrive after the subscribe are pushed (a `getBeats` call gives the history).
 - If the 64-entry ring wrapped past the cursor (the host stalled for more than 64 beats) the lost beats are skipped, never repeated.
 - **Stream reset:** on a stream reset (capture restart, `setDevice`, a flash commit, a USB stream open or close) the numbering restarts at 0 and the ring is cleared. The device detects this when the beat `seq` is **below** its cursor and then **re-seeds the cursor to 0**, so every beat since the reset is pushed, starting with `seq` 0. Hosts must treat a `seq` that goes backwards, or a `beats` notify whose first `seq` is 0, as the start of a new stream: drop the old plot. (If so many beats arrive between two polls that `seq` overtakes the old cursor, the reset cannot be seen from `seq` alone; also watch `gridId` and `sampleIndex`, which restart.)
-- Competing pushes are sent one at a time in the order metrics, beat, timing, quartz, quartzPulse, **beats**, event, error (§7.1).
+- Competing pushes are sent one at a time in the order metrics, beat, timing, quartz, quartzPulse, **beats** (or `beatsPacked`), event, error (§7.1).
+
+#### 5.6.1 Packed beats (`beatsPacked`)
+
+A `DspBeat` object costs about 200 bytes of JSON; at 36,000 bph that is more than a BLE link carries. The packed format sends the same beats as a little-endian binary block, base64 encoded (RFC 4648 §4, `=` padded), under one key. The envelope stays JSON.
+
+- **Subscribe.** `subscribe { "beatsPacked": true }` pushes `beatsPacked` notifies (`data: { "p": "..." }`). It replaces the `beats` stream: when both flags are set only `beatsPacked` is sent, and `false` restores `beats` if that is still set. The cursor, baseline and stream-reset rules are those of `beats` (§5.6); the batch holds up to 32 beats.
+- **History.** `getBeats { "max": n, "packed": true }` returns `{ "p": "..." }` with `max` clamped to 1..32. The beats are in seq order, newest **last**. If a batch break (below) or the message size splits the requested beats, the reply holds the newest batch only.
+- **Capability.** `hello.caps.beatsPacked` is the format version (`1`); absent means not supported.
+- **`sourceHz`** for `tS` comes from `getBeat.sourceHz`.
+
+Header (format 1; `i` signed, `u` unsigned):
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `fmt` | 1 |
+| 1 | u8 | `n` | Beats in the batch, 1..32 |
+| 2 | u32 | `seq0` | `seq` of the first beat |
+| 6 | u32 | `gridId` | Grid of every beat in the batch |
+| 10 | f32 | `nominalUs` | Nominal half-period, µs |
+| 14 | u64 | `sample0` | `sampleIndex` of the first beat |
+| 22 | i32 | `k0` | `k` of the first beat |
+| 26 | n × 17 B | beats | Below |
+
+Per beat (17 bytes):
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `dSeq` | `seq` minus the previous `seq` (0 for the first beat) |
+| 1 | u8 | `flags` | Bit 0 parity, bit 1 `amplitudeValid`, bits 2-3 status (0 accepted, 1 started, 2 rejected) |
+| 2 | u32 | `dSample` | `sampleIndex` minus the previous one (0 for the first) |
+| 6 | u8 | `frac` | Fractional unlock sample × 256: `tS = (sampleIndex + frac / 256) / sourceHz` |
+| 7 | i16 | `dK` | `k` minus the previous `k` (0 for the first) |
+| 9 | i32 | `u` | Residual `uUs`, 0.1 µs units |
+| 13 | u16 | `amp` | `amplitudeDeg`, 0.01° units (0 when invalid) |
+| 15 | u16 | `lift` | Lift time, µs (`liftMs` × 1000; saturates at 65,535) |
+
+Quantisation errors: `u` ±0.05 µs, `amp` ±0.005°, `lift` ±0.5 µs, `frac` ±1/256 sample. The reconstructed `liftMs` is `lift / 1000`.
+
+**Batch breaks.** A batch ends, and the next notify starts a new header with the breaking beat, when the grid or the nominal period changes, when a delta does not fit its field (`dSeq` above 255 or not increasing, `dSample` of 2³² or more, `dK` outside i16), after 32 beats, or when the base64 would not fit the 2048-byte message. A decoder needs no grid-change logic inside a batch.
+
+**Size.** 8 beats are 26 + 8 × 17 = 162 bytes, 216 base64 characters, about 280 bytes with the envelope.
 
 ### 5.7 `getGps`
 
@@ -537,6 +641,52 @@ Entry: `dateUnix` (UTC seconds the calibration is dated), `ppm`, `source` (`"man
 - `logDeltaPpm` is **persisted to flash** (DEVICE region), so it is refused with `busy` while the USB audio stream is open (and can fail with `flashError`). A request with only `ppm` is RAM only and **never** replies `busy`, also while audio streams. The write is **skipped when the value equals the current one**, so a client that always sends it neither wears flash nor gets `busy`. If the flash write is refused, nothing else of the request is applied.
 - The reply is `Timebase` with the new `logDeltaPpm`.
 
+### 5.10 Link and ownership ops (H7)
+
+**`claim`.** Takes control for the requesting link (§4.6). Request `{ "takeover"?: boolean }`, default `false`.
+
+```json
+{ "v": 1, "id": 12, "op": "claim", "takeover": true }
+```
+
+Result `{ "owner": "ble", "previous": "usbHid" }`. `owner` is the requesting link. `previous` is the owner before the request, or `null` when nobody owned control. Without `takeover`, a refused claim replies `linkBusy` (`control held by usbHid` / `control held by ble`) and changes nothing. A `takeover` claim always succeeds.
+
+**`getLink`.** Link status and control ownership. The `ble` object exists only on `TG_BLE` builds.
+
+```json
+{
+  "usbHid": { "mounted": true },
+  "ble": {
+    "enabled": true, "name": "TG-1A2B", "address": "…", "advertising": false, "connected": true,
+    "mtu": 185, "connIntervalUs": 15000, "connParamStep": 1, "connParamRejects": 0, "rxFrames": 412, "txFrames": 410, "rxDropped": 0,
+    "rxInvalid": 0, "txRetries": 3, "disconnects": 1, "lastDisconnectReason": 19,
+    "core": 1, "core1StackFree": 5120
+  },
+  "control": { "owner": "ble", "self": true, "leaseMs": 10000 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `usbHid.mounted` | The USB device is enumerated and the HID interface is mounted |
+| `ble.enabled` | BLE is on (the CLI `ble off` turns it off, `TG_SERIAL_CLI` builds) |
+| `ble.name`, `ble.address` | Advertised name `TG-XXXX` and the Bluetooth address, as text |
+| `ble.advertising`, `ble.connected` | Advertising now; a central is connected with notifications on |
+| `ble.mtu`, `ble.connIntervalUs` | Negotiated ATT MTU and current connection interval (µs) |
+| `ble.connParamStep`, `ble.connParamRejects` | The device asks the central for a 15 ms interval 1 s after connect. Step: `0` not asked yet, `1` asked for 15 ms, `2` asked for 15 to 30 ms after a rejection, `3` gave up after a second rejection. `connParamRejects` counts rejections. A central may accept and still choose another interval; `connIntervalUs` shows the result |
+| `ble.rxFrames`, `ble.txFrames` | Frames received on RX and sent on TX |
+| `ble.rxDropped` | RX frames dropped because the RX ring was full |
+| `ble.rxInvalid` | RX writes rejected (longer than 63 bytes, or a bad length) |
+| `ble.txRetries` | TX sends held back by backpressure |
+| `ble.disconnects`, `ble.lastDisconnectReason` | Links lost since boot; the HCI reason code of the last loss (0 = none) |
+| `ble.core` | Core that runs the radio: `0` or `1` (`TG_BLE_CORE`) |
+| `ble.core1StackFree` | Free bytes of core 1's stack (high-water mark). Present only when `ble.core` is `1` |
+| `control` | Same shape as `hello.control` |
+
+`getLink` follows the ownership rules of §4.6, like the other owner-only ops: a non-owner gets `linkBusy` while another link holds a live lease (10 s without a request from the owner); otherwise the request auto-claims control for the requesting link. To read who owns control without claiming, use `hello.control` (§5.1).
+
+**`getDiag`.** The diagnostic counters of the firmware, with camelCase names: the fields of `diag_counters_t` in [`include/diagnostics.h`](../include/diagnostics.h), converted from `snake_case` (`dma_overrun_count` → `dmaOverrunCount`, `pcm1808_dma_block_overruns` → `pcm1808DmaBlockOverruns`). Most fields only increase. The ADC and ring `min` / `max` / `mean` fields and the PCM peak fields are extrema of the current diagnostic window. `getDiag` follows the same ownership rule as `getLink` (§4.6). The full field list is `HidDiag` in [`hid/timegrapher_hid.d.ts`](hid/timegrapher_hid.d.ts). It replaces the CLI `diag` command for hardware tests.
+
 ---
 
 ## 6. `getState` / `patchState`
@@ -555,7 +705,7 @@ Entry: `dateUnix` (UTC seconds the calibration is dated), `ppm`, `source` (`"man
       "enabled": true,
       "params": { "threshold": 6, "prerollMs": 25, "tailMs": 25 }
     },
-    "beatRate": { "enabled": true, "params": { "liftAngle": 51, "vph": 0, "calPpm": 0, "windowS": 6, "avgS": 10 } },
+    "beatRate": { "enabled": true, "params": { "liftAngle": 51, "vph": 0, "calPpm": 0, "windowS": 6, "avgS": 10, "timingLandmark": 0, "settleS": 0 } },
     "noiseFloor": { "enabled": true, "params": {} },
     "eventLog": { "enabled": false, "params": {} },
     "softGate": {
@@ -567,7 +717,6 @@ Entry: `dateUnix` (UTC seconds the calibration is dated), `ppm`, `source` (`"man
       "enabled": false,
       "params": { "target": 0.35, "tauS": 1.5, "gainDb": 0 }
     },
-    "matchedFilter": { "enabled": true, "params": { "threshold": 0.35, "learn": 1, "score": 0 } },
     "firBank": { "enabled": false, "params": { "preset": 0 } },
     "spectrum": { "enabled": false, "params": { "stride": 1 } }
   },
@@ -577,7 +726,7 @@ Entry: `dateUnix` (UTC seconds the calibration is dated), `ppm`, `source` (`"man
 
 Notes:
 
-- `blocks` always holds all 14 blocks of `caps.blocks`, in that order; `bypass` (the master gate) is the top-level key, not a block. A param that the device cannot read is omitted from `params`.
+- `blocks` always holds all 13 blocks of `caps.blocks`, in that order; `bypass` (the master gate) is the top-level key, not a block. A param that the device cannot read is omitted from `params`.
 - `bypass` is the master process-path gate (analysis may still run when `true`).
 - `agc.params.gainDb` is **read-only** telemetry of the live AGC gain; `patchState` ignores writes to it.
 - Enabling a process block clears bypass (same rule as CLI / `control_api_set_block_enabled`).
@@ -666,13 +815,14 @@ The authoritative block / parameter name table is `src/dsp_blocks.cpp`
 | `target` | `target` |
 | `tauS` | `tau_s` |
 | `gainDb` | `gain_db` (get only) |
-| `learn` | `learn` (`matchedFilter`; `0` / `1`, any value ≥ 0.5 is on) |
-| `score` | `score` (`matchedFilter`, get only) |
 | `stride` | `stride` (`spectrum`) |
 | `liftAngle` | `liftAngle` / `lift_angle` |
 | `vph` | `vph` (`0` = auto nearest A/h) |
 | `calPpm` | `calPpm` / `cal_ppm` (get only over HID) |
 | `windowS` | `windowS` / `window_s` |
+| `avgS` | `avgS` / `avg_s` |
+| `timingLandmark` | `timingLandmark` / `timing_landmark` |
+| `settleS` | `settleS` / `settle_s` |
 
 Quartz settings (`patchState.quartz`, §6.1) map to `control_api_set_quartz_mode` / `control_api_set_quartz_param` (CLI `quartz …`):
 
@@ -685,7 +835,7 @@ Quartz settings (`patchState.quartz`, §6.1) map to `control_api_set_quartz_mode
 | `quartz.kSigma` | `kSigma` / `k_sigma` |
 
 `filterBank.preset` and `firBank.preset`: `0`=bypass/off, `1`=wide, `2`=medium, `3`=narrow (writing a preset also sets the block's `enabled` to `preset != 0`).  
-`matchedFilter.threshold`: 0..2; `matchedFilter.learn`: `0` / `1`; `matchedFilter.score` is read-only. `spectrum.stride`: integer 1..16 (analyse every n-th block).  
+`spectrum.stride`: integer 1..16 (analyse every n-th block).  
 `beatRate.vph`: `0` (auto) or 3600..72000.  
 `agc.target`: above 0 up to 1; `agc.tauS`: 0.05..30.  
 `notch.hz`: `50` or `60` only.  
@@ -695,6 +845,10 @@ value while PPS is locked). Read-only here: `patchState` ignores it, so echoing 
 back cannot overwrite a stored NTP calibration. Change it with `setTimebase`.
 `beatRate.windowS`: rate/beat-error fit window in seconds, 2..30 (default 6).  
 `beatRate.avgS`: integration time of the reported long average (`avgLong`, and the OLED readout) in seconds, 1..60 (default 10). Changing it keeps the sample history, so a longer window fills in as ticks arrive. Not persisted.  
+`beatRate.timingLandmark`: which landmark of each beat is timed for the rate fit: `0` = the unlock (default), `1` = the drop. The drop is timed by a beat template (the shape of the whole beat, learned per side from the first 16 beats and then updated slowly) and not by a single peak, so it does not jump between the unlock and the drop when their loudness changes; on the ten recorded test clips the fit jitter fell on nine (by 1.5 to 8 times) and rose on one clipped recording. With `1` the readings start as early as with `0`: until both sides' templates hold 16 beats (about 5 s at 21,600 A/h) the fit runs on unlock times (`timingSource` `"unlock"`), and its readings are published and averaged like any other. Then comes the handover: each stored point of the fit is shifted by its side's running mean of (drop - unlock), and later beats use drop times (`timingSource` `"drop"`, `handovers` +1). The handover is not a cut and does not restart the fit or the stretch, so the fit's rate is continuous.
+
+The rate and beat-error samples of the rolling means (`avg1s`, `avgLong`) taken while the stretch was provisional (under 10 s, partly unlock-timed) are dropped when `settled` becomes `true`: on a noisy recording a 5 s rate is off by tens of s/d and would otherwise stay in a long average. The averages therefore restart at that moment (invalid for about the next 0.3 s, then refilled from settled readings). Amplitude samples are kept. After the handover beat error comes from drop times, so it includes any difference in lift between the two sides; it can read higher than the unlock-based value on a watch whose two sides lift differently. A beat the template cannot time (correlation below 0.4, or too old for the 82 ms envelope ring) keeps its unlock time plus that side's mean lift; `dropFallbacks` counts them. Changing the value restarts the fit and clears the averages. Not persisted.  
+`beatRate.settleS`: seconds, 0..60 (default 0). After a cut (§8.2) the first `settleS` s of the new stretch do not enter the rolling means (`avg1s`, `avgLong`), for rate, beat error and amplitude alike. The instant values are not affected. Not persisted.  
 `gain.db`: -40..40 (writing it also enables `gain` and clears bypass). `eventDetect.threshold`: 1..100 (× noise floor);
 `prerollMs`: 0..100; `tailMs`: 1..200. `softGate.floorDb`: -60..0;
 `attackMs`: 0.1..50; `releaseMs`: 1..500. Non-finite values are rejected.
@@ -721,7 +875,8 @@ Default after connect: **no pushes** (quiet).
   "events": true,
   "errors": true,
   "quartzPulses": true,
-  "beats": true
+  "beats": true,
+  "beatsPacked": true
 }
 ```
 
@@ -735,8 +890,9 @@ Default after connect: **no pushes** (quiet).
 | `quartzHz` | Periodic `notify` / `op: "quartz"` | `0` = off; max **5** (`caps.quartzHzMax`); forced to 0 when `caps.quartz` is false |
 | `quartzPulses` | Push each new motor pulse (`op: "quartzPulse"`) | boolean; forced to `false` when `caps.quartz` is false |
 | `beats` | Push new per-beat records (`op: "beats"`, §5.6) | boolean; batch ≤ 8 per notify |
+| `beatsPacked` | Push new per-beat records in the packed format (`op: "beatsPacked"`, §5.6.1); replaces `beats` when both are set | boolean; batch ≤ 32 per notify; needs `caps.beatsPacked` |
 
-Omitted subscribe fields leave the previous value unchanged; a rate is read as an integer (fractions truncated), a negative rate is 0 and a rate above its cap is clamped to the cap (never an error). A field of the wrong type is ignored. Response `result` echoes the full active subscription object (`metricsHz`, `beatHz`, `timingHz`, `quartzHz`, `events`, `errors`, `quartzPulses`, `beats`).
+Omitted subscribe fields leave the previous value unchanged; a rate is read as an integer (fractions truncated), a negative rate is 0 and a rate above its cap is clamped to the cap (never an error). A field of the wrong type is ignored. Response `result` echoes the full active subscription object (`metricsHz`, `beatHz`, `timingHz`, `quartzHz`, `events`, `errors`, `quartzPulses`, `beats`, `beatsPacked`).
 
 Every `subscribe` re-seeds the event, error, quartz-pulse and beats baselines, so a subscribe never replays history: only events, faults, pulses and beats that land after it are pushed. It also restarts the four periodic timers, so the first periodic push of every active stream comes one full period after the `subscribe` reply.
 
@@ -770,6 +926,12 @@ Only one message is in flight at a time. When pushes compete, the order each pol
 { "v": 1, "notify": true, "op": "beats", "data": { "beats": [ /* DspBeat */ ] } }
 ```
 
+**beatsPacked** — the same beats in the packed binary format, **oldest first**, at most 32 per notify (§5.6.1). Sent instead of `beats` when `subscribe.beatsPacked` is set.
+
+```json
+{ "v": 1, "notify": true, "op": "beatsPacked", "data": { "p": "AQgrCAAA…" } }
+```
+
 **event** — one or more new events, **oldest first** (like `beats` and `quartzPulse`; earlier firmware sent newest first, at most 8). A notify carries as many unsent events as fit one message (at least 5, usually 8 or more); the rest follow in the next polls, so none is lost while the event ring (32) has not lapped. The cursor is the `peakSample` of the last event sent (events carry no seq; their windows close in order so `peakSample` increases along the log): events with a larger `peakSample` are new. If more than 32 events land between two pushes, the evicted ones are gone and the push resumes at the oldest event still held; if the newest held event is older than the cursor (sample clock restart) the cursor resets and every held event is sent:
 
 ```json
@@ -799,6 +961,12 @@ Only one message is in flight at a time. When pushes compete, the order each pol
 
 `reason` strings: `none` | `underrun` | `usbStall` | `overload`.
 
+**controlReleased** (H7) — sent to the **previous owner** when another link takes control (`claim` with `takeover`, or an auto-claim after the lease expired), if its link is still connected (§4.6). `to` is the new owner. The previous owner's subscriptions have stopped when this arrives; show that control moved and do not resend subscriptions unless the user takes control again:
+
+```json
+{ "v": 1, "notify": true, "op": "controlReleased", "data": { "to": "ble" } }
+```
+
 ---
 
 ## 8. Data types (JS conventions)
@@ -821,7 +989,6 @@ Only one message is in flight at a time. When pushes compete, the order each pol
   "postRms": 0.02,
   "noiseFloor": 0.0001,
   "agcGainDb": 0,
-  "matchScore": 0,
   "clipCount": 0,
   "limiterCount": 0
 }
@@ -830,17 +997,31 @@ Only one message is in flight at a time. When pushes compete, the order each pol
 ### 8.2 `DspBeatRate`
 
 Unlock-based Witschi-style timing (rate s/d, beat error ms, amplitude °).  
-`beatRate.params` `liftAngle`, `vph` (`0` = auto), `windowS` and `avgS` are set via `patchState`; `calPpm` is reported there but set with `setTimebase`.
+`beatRate.params` `liftAngle`, `vph` (`0` = auto), `windowS`, `avgS`, `timingLandmark` (`0` unlock, `1` drop) and `settleS` are set via `patchState`; `calPpm` is reported there but set with `setTimebase`.
 
 Rate and beat error come from a least-squares fit of sub-sample unlock times over the last `windowS` seconds, not from single intervals. Each tick refines the fit, so the instant values are already smoothed over that window. Fields that describe the fit and the timebase:
 
 | Key | Meaning |
 |---|---|
+| `state` | `"listening"`: no tick since the stream reset, or the capture rate is unverified. `"locking"`: ticks seen, but there is no lock on a nominal rate or the current stretch spans less than 5 s. `"locked"`: locked and the stretch spans at least 5 s (a rate can be reported; see `settled`). `"noWatch"`: the no-watch rule fired (below) and no lock has held a stretch of 2 s since. `locked` may turn `true` again while `state` is still `"noWatch"`; that lock carries no rate |
+| `analysis` | `"on"` or `"off"`. `"off"` in `usbMic` mode (§5.4): the timing engine does not run, so `rateValid`, `beatErrorValid`, `amplitudeValid` and all `*Valid` flags are `false`, `stretchS` is `0`, no beats are recorded, and the rate, beat-error and amplitude values are `0`. `locked`, `vphNearest`, `vphRaw`, `confidence`, `intervalSamples` and `state` stay live: `state` is then `"listening"`, `"locking"` or `"locked"` and follows the lock alone |
+| `settled` | `true` once the current stretch spans at least 10 s: rate and beat error are then final. Before that (5 to 10 s of stretch) they are provisional and a host may grey them out |
+| `cuts` | Cuts since the stream reset (below); the reset itself is not counted |
+| `lastCut` | Reason of the latest cut: `"none"`, `"reset"` (after a stream reset), `"gap"`, `"jump"`, `"rate"`, `"clock"`, `"lockLost"` or `"noWatch"` |
+| `stretchS` | Span of the current stretch in seconds (first to latest accepted beat since the last cut, on the corrected clock); `0` when none is open |
 | `sourceHz` | Analysis sample rate used for all timing math |
 | `sourceHzMeasured` | Measured capture frame rate (PCM1808), `0` where the rate is fixed by design |
 | `timebaseOk` | `false` while the capture rate is unverified or unsupported. In that case `locked` stays `false` and no timing is reported |
 | `ratePoints` | Ticks used in the fit (0 = no fit yet; at least 8 needed) |
-| `jitterUs` | RMS scatter of unlock times about the fit (µs). This is a signal-quality indicator |
+| `jitterUs` | RMS scatter of the timed landmark (unlock, or drop with `timingLandmark` = 1) about the fit (µs). This is a signal-quality indicator |
+| `timingSource` | `"unlock"` while the fit runs on unlock times, `"drop"` once it runs on drop times. With `timingLandmark` = 1 it starts as `"unlock"` (so rate and beat error are published as early as with the unlock landmark) and changes to `"drop"` at the handover (below). Always `"unlock"` with `timingLandmark` = 0 |
+| `handovers` | Handovers from unlock to drop times since the stream reset |
+| `dropTimedBeats` | Beats timed at the drop by the beat template since the last stream reset; `0` with `timingLandmark` = 0 |
+| `dropFallbacks` | Beats that should have been timed at the drop but were not (template still learning, correlation below 0.4, or the beat outside the envelope ring) since the last stream reset |
+| `beatErrorSignedMs` | Signed beat error (ms): positive when the Tick comes late. Tick is the side that came late over the first seconds of the watch (decided when the stretch first reads, within 0.1 ms of zero the side of the stretch's first beat) and keeps that label until the nominal rate changes, so the value starts positive and can turn negative. Valid with `beatErrorValid`; `beatErrorMs` is its magnitude. With `timingLandmark` = 0 it equals `beatErrorMs` |
+| `beatErrorSource` | `"unlock"` or `"drop"`. `"unlock"`: the unlock landmark (the unlock-timed fit, or, with the drop landmark, the median over 2 s shape windows of the drop beat error corrected by each side's unlock-to-drop time). `"drop"`: the drop-timed fit, used while fewer than 3 windows exist or the windows disagree in sign beyond their spread |
+| `amplitudeTickDeg` / `amplitudeTockDeg` | Amplitude of the Tick and the Tock side (degrees): median over the 2 s shape windows of the averaging span. `null` unless `timingLandmark` = 1 and the stretch has a window with that side valid. The Tick side is the one `beatErrorSignedMs` calls late |
+| `amplitudeWindows` | `{ "used", "total" }`: shape windows of the averaging span that gave an amplitude on both sides, and all windows of the span that held a beat. The window median is the `avgLong.amplitudeDeg` reading |
 | `calPpm` / `calSource` | Sample-clock correction applied to all timing, and where it came from (`none` / `manual` / `ntp` / `pps`) |
 
 Top-level `rateSDay` / `beatErrorMs` / `amplitudeDeg` are the **instant** view (latest fit). Nested windows:
@@ -852,6 +1033,25 @@ Top-level `rateSDay` / `beatErrorMs` / `amplitudeDeg` are the **instant** view (
 | `avgS` | Integration time of `avgLong` in seconds (the `beatRate.avgS` param) |
 | `avgLong` | Arithmetic mean of instant samples over the last `avgS` seconds. Replaces the fixed-10 s `avg10s` of earlier firmware |
 
+**Shape windows (`timingLandmark` = 1, opentimegrapher M4 / M5 / M6).** The beats stage B timed at the drop are averaged per side (Tick / Tock) in 2 s windows laid end to end from the start of the stretch (a side needs at least 3 beats; plain mean of the aligned envelopes, where OTG uses a per-sample trimmed mean). On each averaged shape the drop is the half-height crossing of its rising edge, the unlock the half-height crossing of the first steady rise, and their distance the lift time of that side. `avgLong.amplitudeDeg` is then the median over the windows of the averaging span (`avgS`) of the mean of the two sides' amplitudes, and `amplitudeTickDeg` / `amplitudeTockDeg` the per-side medians. The window beat error is `BE_drop - lift_tick + lift_tock`; `beatErrorMs` and `avgLong.beatErrorMs` are the median over the windows. `instant.amplitudeDeg` and the per-beat `amplitudeDeg` of `getBeats` stay single-beat values. Before the first window closes, and with `timingLandmark` = 0, the previous per-tick figures apply. Nothing spans a cut, and `settleS` applies to windows too.
+
+Beat-error angle (opentimegrapher M5): `beatErrorAngleDeg` = `amplitudeDeg` × π × `vphNearest` / 7200 × `beatErrorMs` / 1000, in degrees. It puts beat errors of different amplitudes on one scale. Valid (`beatErrorAngleValid`) when `beatErrorValid`, `amplitudeValid` and a lock all hold. Each window carries it too: a rolling value is the mean of the per-tick angles in the window, with at least 2 contributing ticks.
+
+**Cuts.** A stretch is a run of accepted beats with no cut in it. A cut ends the stretch: the next one starts with an empty fit, empty rolling means and an empty amplitude history, and nothing is fitted or averaged across the cut. When the nominal rate changes the beat templates (`timingLandmark` = 1) are forgotten too. A cut is counted (`cuts`, `lastCut`) only if it ended a stretch that had beats. Reasons:
+
+| `lastCut` | Cut when |
+|---|---|
+| `gap` | More than 2 s passed without an accepted beat |
+| `jump` | Four consecutive beats were off the current grid by more than 0.3 of a half-period (the fit restarted) |
+| `rate` | The nominal A/h changed (another watch or another rate) |
+| `clock` | The timebase correction changed by more than 0.5 ppm since the last beat, or the capture rate became unverified or verified |
+| `lockLost` | The lock on a nominal rate was lost |
+| `noWatch` | The no-watch rule fired |
+
+**Short stretch.** `rateValid` and `beatErrorValid` (instant and rolling) stay `false` until the current stretch spans at least 5 s (`stretchS` ≥ 5). From then on they are provisional (a rate from a few seconds of beats can be several s/d out) until the stretch spans 10 s, when `settled` becomes `true`. Amplitude is not held back.
+
+**No watch.** Over the last 10 s of the stretch (once it spans 5 s), the rule fires if fewer than half the expected beats were accepted, or if the RMS scatter of the beat times about the fit is at least 2 % of the nominal half-period (3.3 ms at 21,600 A/h). Rejected detections count in the scatter at their distance from the fit, and the worst 1 in 8 events are left out, so one knock, a short dropout or the stray detections of a real recording do not fire it. When it fires, `locked` becomes `false`, `vphNearest` `0`, the stretch is cut (`lastCut` = `"noWatch"`) and `state` reads `"noWatch"`. Lock can return through the normal path (four fresh intervals within 4 % of a standard rate); `state` leaves `"noWatch"` once a lock has held a stretch of 2 s.
+
 Rolling windows need ≥2 contributing samples per metric before `*Valid` is true. `samples` is the contributing tick count (max of the three metric counts).
 
 ```json
@@ -860,6 +1060,11 @@ Rolling windows need ≥2 contributing samples per metric before `*Valid` is tru
   "vphNearest": 18000,
   "confidence": 0.95,
   "locked": true,
+  "state": "locked",
+  "analysis": "on",
+  "cuts": 0,
+  "lastCut": "reset",
+  "stretchS": 21.4,
   "intervalSamples": 4800,
   "eventsSeen": 12,
   "intervalsHeld": 8,
@@ -868,6 +1073,13 @@ Rolling windows need ≥2 contributing samples per metric before `*Valid` is tru
   "timebaseOk": true,
   "ratePoints": 47,
   "jitterUs": 18.5,
+  "dropTimedBeats": 0,
+  "dropFallbacks": 0,
+  "beatErrorSignedMs": 0.35,
+  "beatErrorSource": "unlock",
+  "amplitudeTickDeg": null,
+  "amplitudeTockDeg": null,
+  "amplitudeWindows": { "used": 0, "total": 0 },
   "calPpm": -23.412,
   "calSource": "ntp",
   "rateSDay": 4.2,
@@ -875,36 +1087,44 @@ Rolling windows need ≥2 contributing samples per metric before `*Valid` is tru
   "amplitudeDeg": 288.0,
   "liftAngleDeg": 51,
   "liftTimeMs": 3.8,
+  "beatErrorAngleDeg": 0.79,
   "rateValid": true,
   "beatErrorValid": true,
   "amplitudeValid": true,
+  "beatErrorAngleValid": true,
   "instant": {
     "rateSDay": 4.2,
     "beatErrorMs": 0.35,
     "amplitudeDeg": 288.0,
+    "beatErrorAngleDeg": 0.79,
     "samples": 1,
     "rateValid": true,
     "beatErrorValid": true,
-    "amplitudeValid": true
+    "amplitudeValid": true,
+    "beatErrorAngleValid": true
   },
   "avg1s": {
     "rateSDay": 3.9,
     "beatErrorMs": 0.32,
     "amplitudeDeg": 286.5,
+    "beatErrorAngleDeg": 0.72,
     "samples": 8,
     "rateValid": true,
     "beatErrorValid": true,
-    "amplitudeValid": true
+    "amplitudeValid": true,
+    "beatErrorAngleValid": true
   },
   "avgS": 10,
   "avgLong": {
     "rateSDay": 3.7,
     "beatErrorMs": 0.30,
     "amplitudeDeg": 285.0,
+    "beatErrorAngleDeg": 0.67,
     "samples": 72,
     "rateValid": true,
     "beatErrorValid": true,
-    "amplitudeValid": true
+    "amplitudeValid": true,
+    "beatErrorAngleValid": true
   }
 }
 ```
@@ -958,6 +1178,7 @@ Top level:
 |---|---|---|
 | `mode` | string | Active mode (§5.3) |
 | `state` | string | `idle` \| `waitTimebase` \| `unsupportedRate` \| `acquiring` \| `measuring` \| `done` (§5.3) |
+| `analysis` | string | `"on"` or `"off"`. `"off"` in `usbMic` mode (§5.4): nothing is measured, `state` is `idle`, `reason` is `"USB Audio mode"`, `rateValid` is `false` and `motor` / `lcd` / `fork` are empty (`valid: false`, zeros). `mode` still shows the selected setting |
 | `measurementId` | uint32 | Identifies the current measurement. Increases by one on every (re)start (mode change, `quartzRestart`, a setting change that restarts the active mode, stream reset, source-rate or timebase change, sample loss, index gap); never repeats while the firmware runs (wraps after 2^32). A change means a new measurement: drop plots and pulse lists tied to the old one. Re-reading the same measurement, including a frozen `done` one, never changes it |
 | `reason` | string | Why the state is what it is (e.g. `"waiting for 3 pulses"`, `"two inhibition events seen"`); `""` when nothing to add. Display only |
 | `sourceHz` | Hz | Analysis sample rate (must be 48000 to measure) |
@@ -1050,7 +1271,7 @@ Example (motor, `ind_inhibition_60s`-like, gate "until 2 events"):
 
 ```json
 {
-  "mode": "motor", "state": "done", "measurementId": 7, "reason": "two inhibition events seen",
+  "mode": "motor", "state": "done", "analysis": "on", "measurementId": 7, "reason": "two inhibition events seen",
   "sourceHz": 48000, "timebaseOk": true, "elapsedS": 121.5,
   "gateS": 0, "forkHz": 360, "tsMethod": "threshold", "kSigma": 8, "sampleLossRestarts": 0,
   "rateSDay": 0.2059, "rateValid": true, "calPpm": -1.25, "calSource": "pps", "calibrated": true,
@@ -1104,8 +1325,8 @@ One tick as seen by the beat-timing fit (`getBeats`, `beats` notify): the raw ma
 |---|---|---|
 | `seq` | uint32 | Per-stream counter, **0 at a stream reset**; the next beat has `seq + 1` (§5.6) |
 | `gridId` | uint32 | Bumps on every `started` (the first grid is 1). A new `gridId` means a new grid origin: start a new trace |
-| `sampleIndex` | decimal string | Integer part of the unlock sample time |
-| `tS` | s | Unlock time in seconds of signal (`sampleIndex` plus the sub-sample part, over the source rate), 7 decimals |
+| `sampleIndex` | decimal string | Integer part of the sample time of the timed landmark (the unlock, or the drop with `beatRate.timingLandmark` = 1) |
+| `tS` | s | Time of that landmark in seconds of signal (`sampleIndex` plus the sub-sample part, over the source rate), 7 decimals |
 | `k` | int32 | Half-beat grid index since the grid origin (the `started` tick is `k = 0`). The fit window sliding never renumbers it |
 | `parity` | `0` \| `1` | `k & 1`: even `k` = "tick", odd `k` = "tock" (arbitrary but stable within a grid) |
 | `uUs` | µs | Residual **arrival time minus nominal-grid time**, `u = T − k · nominal` (see below) |
@@ -1115,7 +1336,7 @@ One tick as seen by the beat-timing fit (`getBeats`, `beats` notify): the raw ma
 | `liftMs` | ms | Unlock-to-drop lift time; `0` if unavailable |
 | `status` | string | `accepted` (joined the grid / fit), `started` (first point, or the grid restarted here), `rejected` (off-grid or non-increasing; **not** in the fit) |
 
-**What `uUs` is.** `T` is the tick's unlock time since the grid origin **with the sample-clock (timebase) correction applied**: scaled by `1 / (1 + ppm·1e-6)`, the same `Timebase.ppm` correction that the rate uses. So `uUs` is already calibrated. It is measured against the **nominal** grid, not against the fitted line; the origin tick has `uUs = 0`.
+**What `uUs` is.** `T` is the tick's landmark time (as `tS`) since the grid origin **with the sample-clock (timebase) correction applied**: scaled by `1 / (1 + ppm·1e-6)`, the same `Timebase.ppm` correction that the rate uses. So `uUs` is already calibrated. It is measured against the **nominal** grid, not against the fitted line; the origin tick has `uUs = 0`.
 
 **Sign.** A watch that **gains** (positive s/d) has its ticks arrive **early**, so `u` **decreases** with time. The rate is the negative slope of `u`:
 
@@ -1140,16 +1361,28 @@ Equivalently the slope per beat is `-rate_s_day / 86400 * nominal`. A watch that
 
 | Module | Role |
 |---|---|
-| [`hid_control.cpp`](../src/hid_control.cpp) / [`hid_control.h`](../include/hid_control.h) | Framer, JSON encode/decode, op dispatch → `control_api_*` |
+| [`hid_control.cpp`](../src/hid_control.cpp) / [`hid_control.h`](../include/hid_control.h) | USB HID adapter: report descriptor, the `UsbHidLink`, the USB `Session` (framing, dispatch and encoders are in `control::`, below) |
 | [`hid_json.cpp`](../src/hid_json.cpp) / [`hid_json.h`](../include/hid_json.h) | Host-testable encoders: bounded `appendf`, string sanitising, `hello` (caps and pipeline), `DeviceStatus`, beats, `GpsInfo`, `TimebaseLog` pages, quartz payloads (`tests/test_hid_json.cpp`) |
 | [`device_mode.cpp`](../src/device_mode.cpp), [`flash_store.cpp`](../src/flash_store.cpp), [`timebase.cpp`](../src/timebase.cpp) | Device mode / run latch, the single owner of the flash sector, timebase log policy and deferred write (see [AS_BUILT_ARCHITECTURE.md](AS_BUILT_ARCHITECTURE.md)) |
 | `Adafruit_USBD_HID` in `hid_control_usb_begin()` | Vendor report descriptor (Usage Page `0xFFA0`), Input+Output EP |
 | [`usb_audio_init`](../src/usb_audio.cpp) | Calls `hid_control_usb_begin()` before re-enumeration |
 | [`TimegrapherStand_main`](../src/TimegrapherStand_main.cpp) | `hid_control_task()` each loop |
 
-JSON on device: fixed-schema decoder for known keys; encoder via `snprintf`. One inbound reassembly buffer; TX fragments pumped when `hid.ready()`.
+JSON on device: fixed-schema decoder for known keys; encoder via `snprintf`. One inbound reassembly buffer per link; TX fragments pumped when `hid.ready()`.
 
-CDC CLI remains fully supported and shares `control_api`. Enable with `-DCFG_TUD_HID=1` ([`platformio.ini`](../platformio.ini)).
+H7 module split ([plan §5.1](plans/BLE_TRANSPORT_PLAN.md)). `hid_control.cpp` is only the USB HID adapter; the protocol logic lives in `control::`:
+
+| Module | Role |
+|---|---|
+| `control/frame` (`include/control/frame.h`) | Framer: reassembler and fragmenter, pure and host-tested (§3) |
+| `control/link`, `control/handler`, `control/session` | Abstract `Link` (one transport endpoint), `Handler` / `Reply` (protocol brain and its reply sink), and one `Session` per link (reassembly, fragmentation, one request at a time, link-down detection) |
+| `control/arbiter` | `Arbiter`: ownership state machine of §4.6 (none / usbHid / ble, lease, takeover). `ArbiterPort`: the per-link handler a session talks to. It answers `claim` and `linkBusy`, queues `controlReleased`, and forwards everything else to the control handler |
+| `control/control_handler`, `control/arbiter_port` | The one op dispatch, encoders and subscription engine (moved from `hid_control.cpp`), and the firmware singletons: the arbiter, the control handler and one port per link |
+| `control/json_scan` | Request scanners (`find_key`, `get_*`, `extract_object`, `parse_i64`), shared by the handler, the port and the tests |
+| `ble_control` (`include/ble_control.h`, `src/ble_control.cpp`) | BLE link: GATT service, rings, advertising, `getLink` status. Built only with `TG_BLE=1` ([`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md)) |
+| `ble_core` (`include/ble_core.h`, `src/ble_core.cpp`) | Radio bring-up on the core chosen by `TG_BLE_CORE` (Pico 2 W) |
+
+The serial CLI shares `control_api` and is built only with `TG_SERIAL_CLI=1` (H7). Without it the CDC port stays for upload auto-reset and carries no CLI. Enable USB HID with `-DCFG_TUD_HID=1` ([`platformio.ini`](../platformio.ini)).
 
 ---
 
@@ -1164,6 +1397,7 @@ CDC CLI remains fully supported and shares `control_api`. Enable with `-DCFG_TUD
 | **H4** | Browser smoke page [`hid/example.html`](hid/example.html) | done (host A/B soak still manual) |
 | **H5** | Quartz timing: `getState.quartz`, `getQuartz`, `getQuartzPulses`, `quartzRestart`, `quartz` / `quartzPulse` notifies, example page panel | done (additive; `v` stays 1) |
 | **H6** | Device mode, beats, pipeline, GPS detail, timebase log: `getDevice` / `setDevice` / `start` / `stop`, `getBeats` + `subscribe.beats`, `caps.pipeline`, `getGps`, `getTimebaseLog` / `clearTimebaseLog`, `setTimebase.logDeltaPpm`, new `hello.caps` keys, example page panel | done (additive; `v` stays 1) |
+| **H7** | BLE transport on Pico 2 W ([`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md)), control ownership (§4.6: `claim`, `getLink`, `getDiag`, `linkBusy`, `controlReleased`, `hello.link` / `hello.control`), serial CLI retired behind `TG_SERIAL_CLI` (CDC port kept) | in progress (additive; `v` stays 1) |
 
 ---
 
@@ -1186,3 +1420,44 @@ CDC CLI remains fully supported and shares `control_api`. Enable with `-DCFG_TUD
 | [`hid/timegrapher_hid.d.ts`](hid/timegrapher_hid.d.ts) | TypeScript contracts for web apps |
 | [`hid/webhid_example.md`](hid/webhid_example.md) | Connect / framer / getState / patchState sketch, device mode, beats, GPS, timebase log |
 | [`hid/example.html`](hid/example.html) | Smoke-test page for every op |
+| [`BLE_CONTROL_PLANE.md`](BLE_CONTROL_PLANE.md) | BLE transport: GATT layout, frames on BLE, host checklist (uses the frames of this document) |
+
+## Appendix A. CLI → HID parity (H7)
+
+The serial CLI is built only with `TG_SERIAL_CLI=1` (the `*_cli` envs, see [`build_and_flash.md`](build_and_flash.md)). Shipped builds have no CLI, so every CLI function a user may still need must have an HID (or BLE) equivalent, or a stated reason why it does not. The CDC port itself stays in every build (upload auto-reset), and it needs no op.
+
+| CLI command | Function | HID / BLE equivalent |
+|---|---|---|
+| `help` | Command list | Dropped: CLI-only; the op table is §5 |
+| `version` | Firmware, board, source | `hello` (§5.1: `fw`, `board`, `source`, `caps`) |
+| `status` | USB, stream and DSP summary | `getDevice` (§5.5), `getMetrics`, `getState` (§6); link state in `getLink` (§5.10) |
+| `time` | Device µs timer (calibration probe) | `getTime` |
+| `timebase` (show) | Calibration, PPS, GPS summary | `getTimebase` (§5.2) |
+| `timebase set <ppm> [src] [date] [dur]` | Apply a calibration (RAM) | `setTimebase` |
+| `timebase save` / `clear` | Write or clear the calibration | `saveTimebase` / `clearTimebase` |
+| `timebase gps` | NMEA / GPS status | `getGps` (§5.7) |
+| `timebase log [clear]` | Calibration history | `getTimebaseLog` / `clearTimebaseLog` (§5.8) |
+| `timebase logdelta [ppm]` | Log threshold | `setTimebase` with `logDeltaPpm` (§5.9); read in `getTimebaseLog` |
+| `device [mode usbmic\|standalone]` | Operating mode | `getDevice` / `setDevice` (§5.5) |
+| `run [start\|stop\|status]` | Run latch | `start` / `stop` / `getDevice` (§5.5) |
+| `display` (status, I²C bus scan) | OLED health report | Dropped: bench wiring check. Use a `*_cli` build. Not a user function |
+| `display contrast <1-255>` | OLED contrast (runtime, not persisted) | Dropped: cosmetic, resets at boot; the default is the build-time `DISPLAY_CONTRAST`. Reported to the manager as a gap decision |
+| `display period <ms>` | OLED refresh period (runtime, not persisted) | Dropped: same reason (`g_period_req` in `display_ui.cpp`) |
+| `diag [on\|off]` | Periodic counter dump | `getDiag` (§5.10, A2): the counters are always available on demand; the periodic print is `TG_SERIAL_CLI` only |
+| `dsp list` / `status` / `bypass` / `on` / `off` | Graph and block state | `getState` / `patchState` (§6) |
+| `dsp get` / `set` | Block parameters | `getState` / `patchState` (§6.3 alias table) |
+| `dsp events` / `errors` | Event and error history | `getEvents` / `getErrors` / `clearErrors`, `event` notify (§7) |
+| `dsp beat` / `beats` | Beat rate, per-beat list | `getBeat` / `getBeats` (§5.6) |
+| `dsp graph` | Block list print | Dropped: debug print; the graph is in `getState` |
+| `dsp metrics` | Level and gain metrics | `getMetrics` |
+| `dsp timing` | CPU headroom | `getTiming` / `resetTiming` |
+| `dsp spectrum` | Spectrum | `getSpectrum` |
+| `quartz status` | Quartz snapshot | `getQuartz` (§5.3, §8.5) |
+| `quartz mode` / `gate` / `fork` / `ts` / `ksigma` | Quartz settings | `patchState` (§6) |
+| `quartz restart` | New measurement | `quartzRestart` |
+| `quartz pulses` | Pulse list | `getQuartzPulses` (§8.6) |
+| `quartz inhibition` / `jumpers` | Static help text (inhibition, jumper settings) | Dropped: documentation, not a function |
+| `ble` (A3, `TG_BLE` + `TG_SERIAL_CLI`) | BLE status, on/off | `getLink` (§5.10); `ble off` has no op (CLI-only maintenance switch) |
+| (upload reset, 1200 baud) | Reboot into BOOTSEL | None needed: handled by the CDC driver in every build (F-18) |
+
+Gaps closed by H7: `getDiag` and `getLink` (A2). Open decision for the manager: the three OLED rows marked dropped.

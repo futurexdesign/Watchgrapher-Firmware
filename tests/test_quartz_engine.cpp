@@ -314,6 +314,50 @@ void test_gating() {
   check(snap().motor.pulses == 0u, "stream reset restarts");
 }
 
+/**
+ * Analysis off (USB microphone mode, TIMING_ENGINE_PLAN.md section 8): nothing
+ * is measured or timed, the snapshot says so, the mode setting is kept, and
+ * switching back starts a new measurement.
+ */
+void test_analysis_off() {
+  std::printf("-- analysis off\n");
+  fresh_engine();
+  check(qe::analysis() && snap().analysis, "analysis defaults to on");
+  check(qe::set_mode(DSP_QUARTZ_MODE_MOTOR), "set motor");
+  feed("ind_pulses_1mV.wav");
+  check(snap().motor.pulses == 3u && snap().analysis, "measuring while on");
+
+  const uint32_t id = snap().measurement_id;
+  qe::set_analysis(false);
+  auto q = snap();
+  check(!qe::analysis() && !q.analysis, "analysis off");
+  check(q.state == DSP_QUARTZ_STATE_IDLE && !q.rate_valid &&
+            q.motor.pulses == 0u && std::strlen(q.reason) > 0u,
+        "off: idle, nothing reported, with a reason");
+  check(q.mode == DSP_QUARTZ_MODE_MOTOR && qe::mode() == DSP_QUARTZ_MODE_MOTOR,
+        "off: the mode setting is kept");
+  check(q.measurement_id != id, "off: new measurement id");
+
+  const uint32_t calls = g_timed_calls;
+  feed("ind_pulses_1mV.wav");
+  q = snap();
+  check(g_timed_calls == calls, "off: no block is processed or timed");
+  check(q.state == DSP_QUARTZ_STATE_IDLE && q.motor.pulses == 0u,
+        "off: fed blocks measure nothing");
+  qe::set_analysis(false); // same value: no-op
+  check(snap().measurement_id == q.measurement_id, "off again is a no-op");
+
+  const uint32_t id_off = snap().measurement_id;
+  qe::set_analysis(true);
+  q = snap();
+  check(q.analysis && q.measurement_id != id_off, "on: new measurement id");
+  check(q.state == DSP_QUARTZ_STATE_ACQUIRING && q.motor.pulses == 0u,
+        "on: acquiring from scratch");
+  feed("ind_pulses_1mV.wav");
+  check(snap().motor.pulses == 3u && g_timed_calls > calls,
+        "on again: measures");
+}
+
 /** LEFT / RIGHT routing and index-gap / sample-loss restarts. */
 void test_routing_and_restarts() {
   std::printf("-- routing and restarts\n");
@@ -726,6 +770,7 @@ int main(int argc, char **argv) {
   g_dir = argc > 1 ? argv[1] : "docs/handoff/vectors";
   test_names_and_params();
   test_gating();
+  test_analysis_off();
   test_routing_and_restarts();
   test_hints_and_pulses();
   test_motor();

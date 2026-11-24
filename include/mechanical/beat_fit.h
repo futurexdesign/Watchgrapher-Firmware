@@ -33,8 +33,13 @@
 #define BEAT_FIT_CAP          256u
 /** Fewest ticks for a rate solution. */
 #define BEAT_FIT_MIN_POINTS   8u
-/** A gap longer than this many half-beats restarts the fit. */
-#define BEAT_FIT_MAX_GAP      8
+/**
+ * A gap longer than this many half-beats restarts the fit. 32 half-beats is
+ * 2 s at the fastest rate in the lock table (57,600 A/h), the gap beyond which
+ * {@code beat_analysis} cuts the stretch itself; at slower rates the analysis
+ * cut comes first.
+ */
+#define BEAT_FIT_MAX_GAP      32
 /** Ticks further than this fraction of a half-beat off-grid are rejected. */
 #define BEAT_FIT_MAX_GRID_ERR 0.3f
 /** This many consecutive off-grid rejects restarts the fit at the new tick. */
@@ -76,6 +81,7 @@ typedef struct {
   double half_period;      /**< Fitted half-period P (samples). */
   float half_period_delta; /**< P minus the nominal half-period (samples). */
   float alt_offset;        /**< TIC/TAC offset c (samples); BE = 2|c|. */
+  float intercept;         /**< Intercept a (samples, at the window origin). */
   float resid_rms;         /**< RMS residual of inliers (samples). */
   uint32_t points;         /**< Inliers used in the final solve. */
   bool alt_valid;          /**< False when the window holds only one parity. */
@@ -101,9 +107,69 @@ beat_fit_push_result_t beat_fit_push(beat_fit_t *f, double t,
                                      beat_fit_point_t *pt = nullptr);
 
 /**
+ * Predicts the grid slot {@link beat_fit_push} would report for a tick at
+ * {@code t}, without changing the fit. Callers that need the half-beat parity
+ * of a tick before choosing the timestamp to push (the drop-timing stage keeps
+ * one template per parity) use it; it applies the same gap, grid-error and
+ * reject rules as the push.
+ *
+ * @param t Absolute tick time in samples.
+ * @param nominal_half_period Nominal half-period in samples.
+ * @param new_grid Receives {@code true} when the push would start a new grid
+ *        (empty fit, new nominal period, long gap, or the reject limit); the
+ *        returned index is then 0. Must not be {@code nullptr}.
+ * @return Grid-absolute half-beat index, as {@link beat_fit_point_t#k}.
+ */
+int32_t beat_fit_predict_k(const beat_fit_t *f, double t,
+                           double nominal_half_period, bool *new_grid);
+
+/**
  * Solves the current window. Two passes: a full fit, then a refit without
  * points more than 3.5 sigma (and more than 1 sample) from the first line.
  *
  * @return {@code false} if fewer than {@link BEAT_FIT_MIN_POINTS} points.
  */
 bool beat_fit_solve(const beat_fit_t *f, beat_fit_result_t *out);
+
+/**
+ * Moves every stored point onto another time base by adding a per-side
+ * offset to its time. The drop-timing stage uses it at the handover from
+ * unlock times to drop times: each side's running mean of (drop - unlock) is
+ * added, so the fit continues without restarting and the rate stays
+ * continuous.
+ *
+ * The side of a point is the parity of its grid-absolute slot
+ * ({@code k + k_base}, as {@link beat_fit_point_t#k} reports it), not of the
+ * window index, which changes parity whenever the window slides by an odd
+ * number of points. The oldest point stays at {@code origin} with u = 0
+ * (origin moves by its own offset), {@code grid_origin} moves by the even
+ * side's offset so that slot 0 keeps its place, and the newest time moves by
+ * its side's offset. Does nothing for an empty window.
+ *
+ * @param offset_even Samples added to points on even grid-absolute slots.
+ * @param offset_odd Samples added to points on odd grid-absolute slots.
+ */
+void beat_fit_shift_points(beat_fit_t *f, double offset_even,
+                           double offset_odd);
+
+/**
+ * Residual of a tick time against the solved line, whatever the tick's
+ * outcome in {@link beat_fit_push}. The tick is placed on the grid slot
+ * nearest to the newest accepted point (the slot a reject reports) and the
+ * line's value there is subtracted.
+ *
+ * @param r Result of {@link beat_fit_solve} on {@code f}, taken after the
+ *        push of {@code t} (accepted points are then inside the line).
+ * @param t Absolute tick time in samples.
+ * @return Signed residual in samples (+ = later than the line); 0 for an
+ *         empty window.
+ */
+double beat_fit_residual(const beat_fit_t *f, const beat_fit_result_t &r,
+                         double t);
+
+/**
+ * Time the current window covers: newest minus oldest point.
+ *
+ * @return Span in samples; 0 for an empty or one-point window.
+ */
+double beat_fit_span(const beat_fit_t *f);

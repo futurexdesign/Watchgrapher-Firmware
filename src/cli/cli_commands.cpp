@@ -8,6 +8,9 @@
 
 #include "audio_source.h"
 #include "board_config.h"
+#if TG_BLE
+#include "ble_control.h"
+#endif
 #include "cli/cli_core.h"
 #include "cli/device_format.h"
 #include "control_api.h"
@@ -83,6 +86,82 @@ void helpDiag(void) {
   Serial.println(F("    diag off"));
 }
 
+/** Extended help for {@code ble}. */
+void helpBle(void) {
+  Serial.println(F("  BLE control-plane link: status and runtime switch."));
+  Serial.println(F("  ble          status (name, address, link, counters)"));
+  Serial.println(
+      F("  ble off      stop advertising and disconnect (not saved)"));
+  Serial.println(F("  ble on       advertise again"));
+  Serial.println(F("  ble reset    clear the link counters"));
+}
+
+void cmdBle(int argc, char **argv) {
+#if TG_BLE
+  if (argc >= 2) {
+    if (equalsIgnoreCase(argv[1], "help") || equalsIgnoreCase(argv[1], "?")) {
+      printHelp("ble");
+    } else if (equalsIgnoreCase(argv[1], "off")) {
+      ble_control_set_enabled(false);
+      Serial.println(F("CLI: ble off requested"));
+    } else if (equalsIgnoreCase(argv[1], "on")) {
+      ble_control_set_enabled(true);
+      Serial.println(F("CLI: ble on requested"));
+    } else if (equalsIgnoreCase(argv[1], "reset")) {
+      ble_control_reset_counters();
+      Serial.println(F("CLI: ble counters reset requested"));
+    } else {
+      Serial.println(F("CLI: usage: ble [off|on|reset|help]"));
+    }
+    return;
+  }
+  ble_status_t st;
+  ble_control_status(&st);
+  if (!st.started) {
+    Serial.println(F("CLI: ble not started"));
+    return;
+  }
+  Serial.print(F("CLI: ble name="));
+  Serial.print(st.name);
+  Serial.print(F(" addr="));
+  Serial.print(st.address);
+  Serial.print(F(" core="));
+  Serial.print(st.core);
+  Serial.print(F(" enabled="));
+  Serial.print(st.enabled ? 1 : 0);
+  Serial.print(F(" adv="));
+  Serial.println(st.advertising ? 1 : 0);
+  Serial.print(F("CLI: ble connected="));
+  Serial.print(st.connected ? 1 : 0);
+  Serial.print(F(" cccd="));
+  Serial.print(st.cccd ? 1 : 0);
+  Serial.print(F(" mtu="));
+  Serial.print(st.mtu);
+  Serial.print(F(" interval_us="));
+  Serial.print(st.conn_interval_us);
+  Serial.print(F(" disconnects="));
+  Serial.print(st.disconnects);
+  Serial.print(F(" last_reason=0x"));
+  Serial.println(st.last_disconnect_reason, HEX);
+  Serial.print(F("CLI: ble rx="));
+  Serial.print(st.rx_frames);
+  Serial.print(F(" rx_dropped="));
+  Serial.print(st.rx_dropped);
+  Serial.print(F(" rx_invalid="));
+  Serial.print(st.rx_invalid);
+  Serial.print(F(" tx="));
+  Serial.print(st.tx_frames);
+  Serial.print(F(" tx_retries="));
+  Serial.print(st.tx_retries);
+  Serial.print(F(" tx_oversize="));
+  Serial.println(st.tx_oversize);
+#else
+  (void)argc;
+  (void)argv;
+  Serial.println(F("CLI: ble not built (TG_BLE=0)"));
+#endif
+}
+
 void cmdDiag(int argc, char **argv) {
   if (argc >= 2 &&
       (equalsIgnoreCase(argv[1], "help") || equalsIgnoreCase(argv[1], "?"))) {
@@ -121,7 +200,7 @@ void helpDsp(void) {
   Serial.println(F("    status | bypass [on|off]  Master process bypass (bare=on)"));
   Serial.println(F("    on|off|enable|disable <block>"));
   Serial.println(F("    get|set <block> <param> [value]"));
-  Serial.println(F("    events | beat|rate | metrics | timing|cpu | match | spectrum"));
+  Serial.println(F("    events | beat|rate | metrics | timing|cpu | spectrum"));
   Serial.println(
       F("    beats [n]            Per-beat records (n 1..16, default 8)"));
   Serial.println(F("    graph                Pipeline: process chain, analysis "
@@ -129,7 +208,7 @@ void helpDsp(void) {
   Serial.println(F("    errors [clear] | help [sub|block]"));
   Serial.println(F("  Shortcuts:"));
   Serial.println(F("    dsp set gain 12 | dsp on fir | dsp set fir preset 1"));
-  Serial.println(F("  Try: dsp help fir_bank | dsp help matched_filter | dsp help spectrum"));
+  Serial.println(F("  Try: dsp help fir_bank | dsp help spectrum"));
   Serial.println(F("  Try: dsp help beats | dsp help graph"));
 }
 
@@ -182,6 +261,10 @@ bool helpDspBlock(const char *name) {
     Serial.println(F("  Params: lift_angle (10..90, default 51), vph (0=auto),"));
     Serial.println(F("    window_s (2..30 fit window, default 6),"));
     Serial.println(F("    avg_s (1..60 reported average / display, default 10),"));
+    Serial.println(
+        F("    timing_landmark (0 unlock, 1 drop timed by beat template),"));
+    Serial.println(
+        F("    settle_s (0..60 s after a cut before the averages),"));
     Serial.println(F("    cal_ppm (-1000..1000 clock error; same as 'timebase set')"));
     Serial.println(F("  Alias: beat, rate, vph. Usage: dsp beat  |  dsp set beat lift_angle 52"));
     break;
@@ -210,11 +293,6 @@ bool helpDspBlock(const char *name) {
     Serial.println(F("  Params: target (0..1 FS), tau_s, gain_db (read-only)"));
     Serial.println(F("  Usage: dsp on agc  |  dsp set agc target 0.35  |  dsp set agc tau_s 1.5"));
     break;
-  case DSP_BLOCK_MATCHED_FILTER:
-    Serial.println(F("  Analysis: learns a 64-sample tick template; correlates each block."));
-    Serial.println(F("  When learned, gates event opens on match score. Does not change PCM."));
-    Serial.println(F("  Params: threshold (default 0.35), learn (0|1), score (read-only)"));
-    Serial.println(F("  Alias: match. Usage: dsp on match  |  dsp match  |  dsp set match threshold 0.4"));
     break;
   case DSP_BLOCK_FIR_BANK:
     Serial.println(F("  Process: 64-tap Hamming FIR bandpass (linear phase)."));
@@ -265,7 +343,8 @@ void helpDspSub(const char *sub) {
     Serial.println(F("CLI: dsp on|enable <block>     — enable (process clears bypass)"));
     Serial.println(F("CLI: dsp off|disable <block>   — disable"));
     Serial.println(F("  Process: notch filter fir soft_gate gain agc limiter"));
-    Serial.println(F("  Analysis: level_meter event_detect beat_rate noise match spectrum"));
+    Serial.println(
+        F("  Analysis: level_meter event_detect beat_rate noise spectrum"));
     return;
   }
   if (equalsIgnoreCase(sub, "get") || equalsIgnoreCase(sub, "set")) {
@@ -278,7 +357,6 @@ void helpDspSub(const char *sub) {
     Serial.println(F("  notch: hz|freq (50|60)"));
     Serial.println(F("  agc: target, tau_s  (gain_db read-only)"));
     Serial.println(F("  soft_gate: floor_db, attack_ms, release_ms"));
-    Serial.println(F("  matched_filter: threshold, learn"));
     Serial.println(F("  spectrum: stride"));
     Serial.println(F("  Per-block detail: dsp help <block>"));
     return;
@@ -337,7 +415,8 @@ void helpDspSub(const char *sub) {
     return;
   }
   if (equalsIgnoreCase(sub, "metrics")) {
-    Serial.println(F("CLI: dsp metrics — pre/post peak & RMS, noise, agc_db, match, clip, lim"));
+    Serial.println(
+        F("CLI: dsp metrics — pre/post peak & RMS, noise, agc_db, clip, lim"));
     return;
   }
   if (equalsIgnoreCase(sub, "timing") || equalsIgnoreCase(sub, "cpu")) {
@@ -347,10 +426,8 @@ void helpDspSub(const char *sub) {
     Serial.println(F("  Also snapshots underrun/short-write/ring. PCM1808 path feeds DSP."));
     return;
   }
-  if (equalsIgnoreCase(sub, "spectrum") || equalsIgnoreCase(sub, "fft") ||
-      equalsIgnoreCase(sub, "match")) {
+  if (equalsIgnoreCase(sub, "spectrum") || equalsIgnoreCase(sub, "fft")) {
     Serial.println(F("CLI: dsp spectrum — top FFT peaks (enable spectrum first)"));
-    Serial.println(F("CLI: dsp match    — matched-filter score / learned flag"));
     return;
   }
   if (equalsIgnoreCase(sub, "errors")) {
@@ -791,8 +868,6 @@ void cmdDsp(int argc, char **argv) {
     Serial.print(m.noise_floor, 6);
     Serial.print(F(" agc_db="));
     Serial.print(m.agc_gain_db, 2);
-    Serial.print(F(" match="));
-    Serial.print(m.match_score, 3);
     Serial.print(F(" clip="));
     Serial.print(m.clip_count);
     Serial.print(F(" lim="));
@@ -888,23 +963,6 @@ void cmdDsp(int argc, char **argv) {
     }
     if (!control_api_block_enabled(DSP_BLOCK_SPECTRUM)) {
       Serial.println(F("CLI: tip: dsp on spectrum"));
-    }
-    return;
-  }
-
-  if (equalsIgnoreCase(argv[1], "match") || equalsIgnoreCase(argv[1], "matched")) {
-    dsp_matched_t m{};
-    control_api_get_matched(&m);
-    Serial.print(F("CLI: match score="));
-    Serial.print(m.score, 3);
-    Serial.print(F(" learned="));
-    Serial.print(m.learned ? F("1") : F("0"));
-    Serial.print(F(" tmpl_len="));
-    Serial.print(m.template_len);
-    Serial.print(F(" tmpl_peak="));
-    Serial.println(m.template_peak, 4);
-    if (!control_api_block_enabled(DSP_BLOCK_MATCHED_FILTER)) {
-      Serial.println(F("CLI: tip: dsp on match"));
     }
     return;
   }
@@ -2576,10 +2634,12 @@ static const CliCommand kCommands[] = {
      F("display [contrast <1-255>|period <ms>]"), helpDisplay},
     {"diag", nullptr, cmdDiag, F("Periodic diagnostic dump on|off"),
      F("diag [on|off]"), helpDiag},
+    {"ble", nullptr, cmdBle, F("BLE link status, on|off, counter reset"),
+     F("ble [off|on|reset|help]"), helpBle},
     {"dsp", nullptr, cmdDsp, F("DSP control plane"),
      F("dsp "
        "list|bypass|on|off|get|set|events|beat|beats|graph|metrics|timing|"
-       "match|spectrum|errors|help"),
+       "spectrum|errors|help"),
      helpDsp},
     {"quartz", "qz", cmdQuartz, F("Quartz watch timing: motor / LCD / fork"),
      F("quartz [status|mode|gate|fork|ts|ksigma|restart|pulses|help] [arg]"),

@@ -28,7 +28,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
+#include <vector>
 
 /* --- control_api name helpers -------------------------------------------
  * The real control_api.cpp pulls in dsp_graph and other firmware-only code,
@@ -254,6 +256,7 @@ dsp_quartz_t worst_case(dsp_quartz_mode_t mode) {
   dsp_quartz_t q{};
   q.mode = mode;
   q.state = DSP_QUARTZ_STATE_UNSUPPORTED_RATE;
+  q.analysis = false; /* "off" is the longer literal */
   q.reason = kLongReason.c_str();
   q.source_hz = kU;
   q.timebase_ok = false;
@@ -389,6 +392,7 @@ dsp_quartz_t realistic_motor() {
   m.jump_threshold_us = 20.f;
   m.rebuilding = true;
   q.measurement_id = 7;
+  q.analysis = true;
   return q;
 }
 
@@ -1066,9 +1070,10 @@ void test_pipeline_and_hello() {
   std::printf("hello worst case (quartz + gps + pps): %d bytes with envelope"
               "\n",
               len);
-  check(has(msg, "\"deviceMode\":true,\"beats\":true,\"beatsMax\":8,"
-                 "\"gps\":true,\"pps\":true,\"timebaseLog\":true,"
-                 "\"timebaseLogMax\":24,"),
+  check(has(msg,
+            "\"deviceMode\":true,\"beats\":true,\"beatsMax\":8,"
+            "\"beatsPacked\":1,\"gps\":true,\"pps\":true,\"timebaseLog\":true,"
+            "\"timebaseLogMax\":24,"),
         "hello caps");
   check(has(msg, "\"pipeline\":[{\"key\":\"input\""), "hello pipeline");
   check(has(msg, "\"key\":\"quartz\""), "hello keeps the quartz node");
@@ -1089,6 +1094,358 @@ void test_pipeline_and_hello() {
         "hello blocks");
 }
 
+/** Parameters of the longest {@code hello} the firmware can send. */
+hid_json::HelloParams worst_hello_params() {
+  hid_json::HelloParams p{};
+  p.fw_version = "1.2.3-123-gabcdef0-dirty_______"; /* 31 chars */
+  p.board = "uberkiwi_rp2350_____";
+  p.source = "pcm1808___";
+  p.vid = 65535;
+  p.pid = 65535;
+  p.max_json = 2048;
+  p.metrics_hz_max = 20;
+  p.beat_hz_max = 5;
+  p.timing_hz_max = 5;
+  p.quartz_hz_max = 5;
+  p.quartz_pulses_max = 8;
+  p.quartz = true;
+  p.gps = true;
+  p.pps = true;
+  return p;
+}
+
+/** HJ-01..04: {@code hello.link}, {@code hello.control}, {@code caps.ble},
+ * {@code caps.cli}. */
+void test_hello_link_control() {
+  std::array<char, kMaxJson> msg{};
+  auto p = worst_hello_params();
+  auto hello = [&](char *d, std::size_t l, int off) {
+    return hid_json::encode_hello(d, l, off, p);
+  };
+
+  /* Without link_kind the shape is the one before H7. */
+  int len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && !has(msg, "\"link\"") && !has(msg, "\"control\"") &&
+            !has(msg, "\"ble\"") && !has(msg, "\"cli\""),
+        "hello without link / ble / cli keeps the old shape");
+
+  /* HJ-01 */
+  p.link_kind = "usbHid";
+  p.control_owner = nullptr;
+  p.lease_ms = 10000;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-01 hello json");
+  check(has(msg, ",\"link\":{\"kind\":\"usbHid\"},\"control\":"),
+        "HJ-01 link kind usbHid, no mtu key");
+  check(!has(msg, "\"mtu\""), "HJ-01 no mtu for usbHid");
+  check(has(msg, "\"control\":{\"owner\":null,\"self\":false,"
+                 "\"leaseMs\":10000}}}"),
+        "HJ-04 owner none gives null; control closes the result");
+
+  /* HJ-02 */
+  p.link_kind = "ble";
+  p.link_mtu = 185;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && is_json(msg.data()) &&
+            has(msg, "\"link\":{\"kind\":\"ble\",\"mtu\":185}"),
+        "HJ-02 link kind ble with mtu 185");
+  p.link_frame_max = 255;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && is_json(msg.data()) &&
+            has(msg, "\"link\":{\"kind\":\"ble\",\"mtu\":185,"
+                     "\"frameMax\":255}"),
+        "LF-02 hello.link.frameMax follows mtu");
+  p.link_frame_max = 0;
+
+  /* HJ-04 */
+  p.control_owner = "ble";
+  p.control_self = false;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && is_json(msg.data()) &&
+            has(msg, "\"control\":{\"owner\":\"ble\",\"self\":false,"
+                     "\"leaseMs\":10000}"),
+        "HJ-04 owner ble, self false");
+  p.control_owner = "usbHid";
+  p.control_self = true;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && has(msg, "\"control\":{\"owner\":\"usbHid\",\"self\":true,"),
+        "HJ-04 owner usbHid, self true");
+
+  /* HJ-03: caps keys only when built; the longest hello still fits. */
+  check(!has(msg, "\"ble\":true") && !has(msg, "\"cli\":true"),
+        "HJ-03 caps.ble / caps.cli absent when not built");
+  p.ble = true;
+  p.cli = true;
+  p.link_mtu = 517;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-03 hello with ble and cli is json");
+  check(
+      has(msg, "\"timebaseLogMax\":24,\"ble\":true,\"cli\":true,\"blocks\":["),
+      "HJ-03 caps.ble and caps.cli are true when built");
+  check(len > 0 && static_cast<std::size_t>(len) < kMaxJson,
+        "HJ-03 the longest hello (ble, cli, link, control) fits 2048");
+  std::printf("hello worst case with link + control + ble + cli: %d bytes\n",
+              len);
+  p.ble = false;
+  len = enveloped(kResponseHead, hello, msg);
+  check(len > 0 && !has(msg, "\"ble\":true") && has(msg, "\"cli\":true"),
+        "HJ-03 caps.cli alone");
+}
+
+/** Reads the member names of {@code export interface name { ... }} from
+ * the TypeScript contract; empty when the file is not found. */
+std::vector<std::string> ts_interface_keys(const char *name) {
+  std::vector<std::string> keys;
+  /* Relative to this source file, so the test runs from any directory. */
+  std::string path = __FILE__;
+  path = path.substr(0, path.find_last_of('/') + 1) +
+         "../docs/hid/timegrapher_hid.d.ts";
+  std::ifstream in(path);
+  std::string line;
+  const std::string head = std::string("export interface ") + name + " ";
+  bool inside = false;
+  while (std::getline(in, line)) {
+    if (!inside) {
+      inside = line.rfind(head, 0) == 0;
+      continue;
+    }
+    if (line == "}") {
+      break;
+    }
+    if (line.rfind("  ", 0) == 0 && line.rfind("   ", 0) != 0 &&
+        line.rfind("  /", 0) != 0) {
+      std::size_t end = 2;
+      while (end < line.size() &&
+             (std::isalnum(static_cast<unsigned char>(line[end])) != 0)) {
+        end++;
+      }
+      if (end > 2 && (line[end] == ':' || line[end] == '?')) {
+        keys.push_back(line.substr(2, end - 2));
+      }
+    }
+  }
+  return keys;
+}
+
+/** A fully populated BLE status with the longest text values. */
+hid_json::BleLinkParams worst_ble() {
+  hid_json::BleLinkParams b;
+  b.enabled = true;
+  b.name = "TG-FFFF";
+  b.address = "FF:FF:FF:FF:FF:FF";
+  b.advertising = true;
+  b.connected = true;
+  b.mtu = UINT32_MAX;
+  b.conn_interval_us = UINT32_MAX;
+  b.conn_param_step = 3;
+  b.conn_param_rejects = UINT32_MAX;
+  b.rx_frames = UINT32_MAX;
+  b.tx_frames = UINT32_MAX;
+  b.rx_dropped = UINT32_MAX;
+  b.rx_invalid = UINT32_MAX;
+  b.tx_retries = UINT32_MAX;
+  b.disconnects = UINT32_MAX;
+  b.last_disconnect_reason = 255;
+  b.core = 1;
+  b.core1_stack_free = 8192;
+  return b;
+}
+
+/** HJ-05: the {@code getLink} result. */
+void test_link_status() {
+  std::array<char, kMaxJson> msg{};
+  hid_json::LinkStatusParams s;
+  s.usb_mounted = true;
+  s.control = {"usbHid", true, 10000};
+  auto enc = [&](char *d, std::size_t l, int off) {
+    return hid_json::encode_link_status(d, l, off, s);
+  };
+  int len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-05 getLink without ble is json");
+  check(has(msg, "\"result\":{\"usbHid\":{\"mounted\":true},\"control\":"
+                 "{\"owner\":\"usbHid\",\"self\":true,\"leaseMs\":10000}}}"),
+        "HJ-05 usbHid and control present; no ble object");
+  check(!has(msg, "\"ble\""), "HJ-05 no ble key without BLE");
+
+  auto ble = worst_ble();
+  s.ble = &ble;
+  s.usb_mounted = false;
+  s.control = {nullptr, false, 10000};
+  len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-05 getLink with ble is json");
+  check(len > 0 && static_cast<std::size_t>(len) < kMaxJson,
+        "HJ-05 the longest getLink fits 2048 with the envelope");
+  std::printf("getLink worst case: %d bytes with envelope\n", len);
+  check(has(msg, "\"usbHid\":{\"mounted\":false}") &&
+            has(msg, "\"owner\":null,\"self\":false"),
+        "HJ-05 mounted false, owner null");
+  const char *keys[] = {"enabled",
+                        "name",
+                        "address",
+                        "advertising",
+                        "connected",
+                        "mtu",
+                        "connIntervalUs",
+                        "connParamStep",
+                        "connParamRejects",
+                        "rxFrames",
+                        "txFrames",
+                        "rxDropped",
+                        "rxInvalid",
+                        "txRetries",
+                        "disconnects",
+                        "lastDisconnectReason",
+                        "core",
+                        "core1StackFree"};
+  bool all = true;
+  for (const char *k : keys) {
+    const std::string pat = std::string("\"") + k + "\":";
+    all = all && std::strstr(msg.data(), pat.c_str()) != nullptr;
+  }
+  check(all, "HJ-05 every key of HidBleLinkStatus is present");
+  check(has(msg, "\"name\":\"TG-FFFF\",\"address\":\"FF:FF:FF:FF:FF:FF\"") &&
+            has(msg, "\"rxFrames\":4294967295") &&
+            has(msg, "\"core\":1,\"core1StackFree\":8192}"),
+        "HJ-05 values and the core 1 stack key");
+  const auto ts_keys = ts_interface_keys("HidBleLinkStatus");
+  if (ts_keys.empty()) {
+    std::printf("note: docs/hid/timegrapher_hid.d.ts not found; skipped the "
+                "HidBleLinkStatus key cross-check\n");
+  } else {
+    bool match = ts_keys.size() == sizeof(keys) / sizeof(keys[0]);
+    for (const auto &k : ts_keys) {
+      const std::string pat = std::string("\"") + k + "\":";
+      match = match && std::strstr(msg.data(), pat.c_str()) != nullptr;
+    }
+    check(match, "HJ-05 the keys equal the HidBleLinkStatus interface");
+  }
+  ble.core = 0;
+  len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && has(msg, "\"core\":0}") && !has(msg, "core1StackFree"),
+        "HJ-05 no core1StackFree on core 0");
+  ble.core = 1;
+  ble.core1_stack_free = -1;
+  len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && !has(msg, "core1StackFree"),
+        "HJ-05 no core1StackFree when unknown");
+}
+
+/** X-macro of every {@code diag_counters_t} field and its camelCase key, in
+ * struct order. */
+#define DIAG_FIELDS(X)                                                         \
+  X(usb_enumeration_count, "usbEnumerationCount")                              \
+  X(usb_audio_stream_open_count, "usbAudioStreamOpenCount")                    \
+  X(usb_audio_stream_close_count, "usbAudioStreamCloseCount")                  \
+  X(usb_suspend_count, "usbSuspendCount")                                      \
+  X(usb_resume_count, "usbResumeCount")                                        \
+  X(boost_on_count, "boostOnCount")                                            \
+  X(boost_off_count, "boostOffCount")                                          \
+  X(preamp_settle_start_count, "preampSettleStartCount")                       \
+  X(preamp_settle_done_count, "preampSettleDoneCount")                         \
+  X(preamp_start_aborted_count, "preampStartAbortedCount")                     \
+  X(usb_suspend_duration_ms, "usbSuspendDurationMs")                           \
+  X(adc_total_sample_count, "adcTotalSampleCount")                             \
+  X(adc_conversion_error_count, "adcConversionErrorCount")                     \
+  X(dma_complete_count, "dmaCompleteCount")                                    \
+  X(dma_overrun_count, "dmaOverrunCount")                                      \
+  X(pcm_ring_underrun_count, "pcmRingUnderrunCount")                           \
+  X(pcm_ring_overrun_count, "pcmRingOverrunCount")                             \
+  X(usb_in_packet_count, "usbInPacketCount")                                   \
+  X(usb_in_sample_count, "usbInSampleCount")                                   \
+  X(usb_short_write_count, "usbShortWriteCount")                               \
+  X(ring_min_occupancy, "ringMinOccupancy")                                    \
+  X(ring_max_occupancy, "ringMaxOccupancy")                                    \
+  X(adc_min_code, "adcMinCode")                                                \
+  X(adc_max_code, "adcMaxCode")                                                \
+  X(adc_mean_code_accum, "adcMeanCodeAccum")                                   \
+  X(adc_mean_code_count, "adcMeanCodeCount")                                   \
+  X(adc_dc_counts, "adcDcCounts")                                              \
+  X(adc_ac_peak_counts, "adcAcPeakCounts")                                     \
+  X(adc_pcm_peak_abs, "adcPcmPeakAbs")                                         \
+  X(pcm1808_clock_config_ok, "pcm1808ClockConfigOk")                           \
+  X(pcm1808_clk_sys_hz, "pcm1808ClkSysHz")                                     \
+  X(pcm1808_clk_usb_hz, "pcm1808ClkUsbHz")                                     \
+  X(pcm1808_mclk_nominal_hz, "pcm1808MclkNominalHz")                           \
+  X(pcm1808_startup_wait_count, "pcm1808StartupWaitCount")                     \
+  X(pcm1808_dma_blocks, "pcm1808DmaBlocks")                                    \
+  X(pcm1808_stereo_frames_received, "pcm1808StereoFramesReceived")             \
+  X(pcm1808_mono_samples_emitted, "pcm1808MonoSamplesEmitted")                 \
+  X(pcm1808_dma_block_overruns, "pcm1808DmaBlockOverruns")                     \
+  X(pcm1808_pio_fifo_stall_or_overflow, "pcm1808PioFifoStallOrOverflow")       \
+  X(pcm1808_sample_peak_abs, "pcm1808SamplePeakAbs")                           \
+  X(pcm1808_saturated_count, "pcm1808SaturatedCount")                          \
+  X(pcm1808_raw_left_peak_abs, "pcm1808RawLeftPeakAbs")                        \
+  X(pcm1808_raw_right_peak_abs, "pcm1808RawRightPeakAbs")                      \
+  X(pcm1808_frame_rate_mhz, "pcm1808FrameRateMhz")                             \
+  X(pcm1808_rate_status, "pcm1808RateStatus")                                  \
+  X(pcm1808_mclk_ratio, "pcm1808MclkRatio")                                    \
+  X(pcm1808_upsample, "pcm1808Upsample")                                       \
+  X(pcm1808_blocks_lost, "pcm1808BlocksLost")
+
+#define X(field, key) +1
+/** Number of fields in {@link DIAG_FIELDS}. */
+constexpr int kDiagFieldCount = 0 DIAG_FIELDS(X);
+#undef X
+
+/** HJ-06: the {@code getDiag} result. */
+void test_diag() {
+  std::array<char, kMaxJson> msg{};
+  /* Distinct values: a swapped or missing field shows up as a mismatch. */
+  diag_counters_t d{};
+  std::uint32_t seed = 1000;
+#define X(field, key) d.field = static_cast<decltype(d.field)>(seed++);
+  DIAG_FIELDS(X)
+#undef X
+  auto enc = [&](char *dst, std::size_t l, int off) {
+    return hid_json::encode_diag(dst, l, off, d);
+  };
+  int len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-06 getDiag is json");
+  bool all = true;
+  int fields = 0;
+  seed = 1000;
+#define X(field, key)                                                          \
+  {                                                                            \
+    const std::string pat = std::string("\"") + key + "\":" +                  \
+                            std::to_string(static_cast<unsigned long>(         \
+                                static_cast<decltype(d.field)>(seed++))) +     \
+                            (fields == kDiagFieldCount - 1 ? "}" : ",");       \
+    all = all && std::strstr(msg.data(), pat.c_str()) != nullptr;              \
+    fields++;                                                                  \
+  }
+  DIAG_FIELDS(X)
+#undef X
+  check(all, "HJ-06 every field present under its camelCase key and value");
+  check(fields == kDiagFieldCount, "HJ-06 the field list is complete");
+  /* All members are 32-bit except the adjacent adc_min_code / adc_max_code
+   * pair of 16-bit values (4 bytes together): a member missing from the table
+   * changes the size. */
+  check(sizeof(diag_counters_t) ==
+            static_cast<std::size_t>(kDiagFieldCount) * 4u - 4u,
+        "HJ-06 the table covers every member of diag_counters_t");
+
+  const auto ts_keys = ts_interface_keys("HidDiag");
+  if (ts_keys.empty()) {
+    std::printf("note: docs/hid/timegrapher_hid.d.ts not found; skipped the "
+                "HidDiag key cross-check\n");
+  } else {
+    bool match = static_cast<int>(ts_keys.size()) == fields;
+    for (const auto &k : ts_keys) {
+      const std::string pat = std::string("\"") + k + "\":";
+      match = match && std::strstr(msg.data(), pat.c_str()) != nullptr;
+    }
+    check(match, "HJ-06 the keys equal the HidDiag interface");
+  }
+
+  /* The maxima must fit. */
+  std::memset(&d, 0xFF, sizeof(d));
+  len = enveloped(kResponseHead, enc, msg);
+  check(len > 0 && is_json(msg.data()), "HJ-06 the maxima encode");
+  check(len > 0 && static_cast<std::size_t>(len) < kMaxJson,
+        "HJ-06 the maxima fit 2048 with the envelope");
+  std::printf("getDiag worst case: %d bytes with envelope\n", len);
+}
+
 int main() {
   test_device_status();
   test_beats();
@@ -1097,6 +1454,9 @@ int main() {
   test_gps();
   test_timebase_log();
   test_pipeline_and_hello();
+  test_hello_link_control();
+  test_link_status();
+  test_diag();
 
   /* Every mode at its longest. */
   std::size_t worst = 0;
@@ -1130,6 +1490,24 @@ int main() {
               std::strstr(buf, "\"jumpThresholdUs\":20,") != nullptr,
           "motor constants encoded");
     std::printf("getQuartz realistic motor: %d bytes\n%s\n", n, buf);
+  }
+
+  /* USB microphone mode: analysis is reported off (TIMING_ENGINE_PLAN.md
+   * section 8); a snapshot with the engine on says "on". */
+  {
+    char buf[kMaxJson];
+    auto q = realistic_motor();
+    int n = hid_json::encode_quartz(buf, sizeof(buf), 0, q);
+    check(n > 0 && std::strstr(buf, "\"analysis\":\"on\",") != nullptr,
+          "analysis on encoded");
+    q.analysis = false;
+    q.state = DSP_QUARTZ_STATE_IDLE;
+    q.reason = "USB Audio mode";
+    n = hid_json::encode_quartz(buf, sizeof(buf), 0, q);
+    check(n > 0 && is_json(buf) &&
+              std::strstr(buf, "\"state\":\"idle\",\"analysis\":\"off\",") !=
+                  nullptr,
+          "analysis off encoded");
   }
 
   /* A null reason / cal source must still give valid JSON. */

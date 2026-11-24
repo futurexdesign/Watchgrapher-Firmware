@@ -203,7 +203,7 @@ int main() {
     const auto M = DSP_QUARTZ_MODE_MOTOR;
     const auto MEAS = DSP_QUARTZ_STATE_MEASURING;
     eq(ui_quartz_status_text(false, false, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
-       "no host stream");
+       "no stream");
     eq(ui_quartz_status_text(false, true, M, MEAS, DSP_QUARTZ_INHIB_CORRECTED),
        "stopped");
     eq(ui_quartz_status_text(false, false, M, DSP_QUARTZ_STATE_DONE,
@@ -211,7 +211,7 @@ int main() {
        "corrected");
     eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_WAIT_TIMEBASE,
                              DSP_QUARTZ_INHIB_NONE),
-       "clock check...");
+       "clock check");
     eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_UNSUPPORTED_RATE,
                              DSP_QUARTZ_INHIB_NONE),
        "unsupported rate");
@@ -249,6 +249,110 @@ int main() {
             assert(t != nullptr && std::strlen(t) <= kUiStatusMaxChars);
           }
         }
+      }
+    }
+  }
+
+  /* ---- Header layout (UIH-01..08) ---- */
+  {
+    struct Span {
+      int x0, x1; /* [x0, x1) */
+    };
+    for (int c = 0; c < 8; c++) {
+      const bool pps = (c & 1) != 0, ble = (c & 2) != 0, sa = (c & 4) != 0;
+      const UiHeaderLayout l = ui_header_layout(pps, ble, sa);
+      Span sp[3];
+      int n = 0;
+      sp[n++] = {l.tag_x, l.tag_end};
+      if (l.ble_x >= 0) {
+        sp[n++] = {l.ble_x, l.ble_x + kUiBleW};
+      }
+      if (l.gps_x >= 0) {
+        sp[n++] = {l.gps_x, l.gps_x + kUiGpsW};
+      }
+      for (int i = 0; i < n; i++) { /* UIH-01 */
+        assert(sp[i].x0 >= 0 && sp[i].x1 <= kUiPanelW);
+        for (int j = i + 1; j < n; j++) {
+          const bool disjoint = sp[i].x1 + kUiHeaderGap <= sp[j].x0 ||
+                                sp[j].x1 + kUiHeaderGap <= sp[i].x0;
+          assert(disjoint);
+        }
+      }
+      assert(l.max_left_px == l.tag_x - kUiHeaderGap);
+      assert((l.gps_x >= 0) == pps && (l.ble_x >= 0) == ble);
+      if (!ble) { /* UIH-02 */
+        assert(l.gps_x == (pps ? 105 : -1));
+        assert(l.tag_end == (pps ? 103 : 127));
+      }
+    }
+    /* UIH-03 */
+    assert(ui_header_layout(true, true, false).ble_x == 92);
+    assert(ui_header_layout(false, true, false).ble_x == 117);
+    /* UIH-04 */
+    assert(ui_header_layout(true, true, false).max_left_px == 70);
+
+    /* UIH-05: every mechanical header string, worst-case layout. */
+    const int worst = ui_header_layout(true, true, false).max_left_px;
+    const char *mech[] = {"starting...", "no stream", "stopped",
+                          "clock check", "listening", "locking..."};
+    for (const char *s : mech) {
+      assert(static_cast<int>(std::strlen(s)) * kUiCharW <= worst);
+    }
+    for (uint32_t vph = 0; vph <= 432000u; vph += 3600u) {
+      ui_format_thousands(vph, buf, sizeof(buf));
+      assert((static_cast<int>(std::strlen(buf)) + 4) * kUiCharW <= worst);
+    }
+    ui_format_thousands(432000u, buf, sizeof(buf));
+    eq(buf, "432,000");
+
+    /* UIH-06 */
+    {
+      const auto M = DSP_QUARTZ_MODE_MOTOR;
+      eq(ui_quartz_status_text(false, false, M, DSP_QUARTZ_STATE_MEASURING,
+                               DSP_QUARTZ_INHIB_NONE),
+         "no stream");
+      eq(ui_quartz_status_text(true, false, M, DSP_QUARTZ_STATE_WAIT_TIMEBASE,
+                               DSP_QUARTZ_INHIB_NONE),
+         "clock check");
+    }
+
+    /* UIH-07 */
+    for (int m = 0; m < 4; m++) {
+      const char *tag = m == 0   ? "MOTOR"
+                        : m == 1 ? "LCD"
+                        : m == 2 ? "FORK"
+                                 : "QUARTZ";
+      if (m < 3) {
+        eq(ui_quartz_mode_tag(static_cast<dsp_quartz_mode_t>(
+               m == 0 ? DSP_QUARTZ_MODE_MOTOR
+                      : (m == 1 ? DSP_QUARTZ_MODE_LCD : DSP_QUARTZ_MODE_FORK))),
+           tag);
+      }
+      const int tag_w = static_cast<int>(std::strlen(tag)) * kUiCharW;
+      for (int c = 0; c < 8; c++) {
+        const UiHeaderLayout l =
+            ui_header_layout((c & 1) != 0, (c & 2) != 0, (c & 4) != 0);
+        const UiUncalBadge b = ui_quartz_uncal_badge(tag, l.max_left_px);
+        const int w = static_cast<int>(std::strlen(b.text)) * kUiCharW + 6;
+        assert(b.x + w <= l.max_left_px);
+        assert(b.x >= tag_w + 3);
+        const bool full_fits = tag_w + 6 + 5 * kUiCharW + 6 <= l.max_left_px;
+        assert((std::strcmp(b.text, "UNC") == 0) == !full_fits);
+        if (l.ble_x < 0) {
+          assert(full_fits); /* non-BLE layouts keep UNCAL */
+        }
+      }
+    }
+
+    /* UIH-08 */
+    const char *rows[9] = {"..X..", "..XX.", "X.X.X", ".XXX.", "..X..",
+                           ".XXX.", "X.X.X", "..XX.", "..X.."};
+    static_assert(sizeof(kUiBleRune) == 9, "rune has 9 rows");
+    for (int r = 0; r < 9; r++) {
+      assert((kUiBleRune[r] & 0x07) == 0); /* only the top 5 bits */
+      for (int col = 0; col < 5; col++) {
+        const bool on = (kUiBleRune[r] & (0x80 >> col)) != 0;
+        assert(on == (rows[r][col] == 'X'));
       }
     }
   }

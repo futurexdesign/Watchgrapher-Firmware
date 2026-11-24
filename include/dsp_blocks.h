@@ -108,5 +108,22 @@ const char *dsp_block_name(dsp_block_id_t id);
 /** @return WebHID JSON name for {@code id}, or {@code "unknown"}. */
 const char *dsp_block_json_name(dsp_block_id_t id);
 
+/**
+ * @return WebHID JSON name of a beat-analysis state: {@code "listening"},
+ *         {@code "locking"}, {@code "locked"} or {@code "noWatch"}.
+ */
+const char *dsp_beat_state_name(dsp_beat_state_t s);
+
+/**
+ * @return WebHID JSON name of a cut reason: {@code "none"}, {@code "reset"},
+ *         {@code "gap"}, {@code "jump"}, {@code "rate"}, {@code "clock"},
+ *         {@code "lockLost"} or {@code "noWatch"}.
+ */
+const char *dsp_cut_reason_name(dsp_cut_reason_t r);
+
+/** @return WebHID JSON name of a beat-error source: {@code "unlock"} or {@code
+ * "drop"}. */
+const char *dsp_be_source_name(dsp_be_source_t s);
+
 /** @return {@code true} if {@code id} mutates PCM (process path). */
 bool dsp_block_is_process(dsp_block_id_t id);

@@ -133,8 +133,10 @@ void usb_audio_task(void) {
   if (g_feed_primed && now == g_feed_ms) {
     return;
   }
-  /* Catch up at most a few frames if the loop stalled briefly. */
-  constexpr uint32_t kMaxCatchUpFrames = 5u;
+  /* Catch up after a stalled loop. 12 frames covers the ~8 ms the 16-packet
+   * IN FIFO (CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ) absorbs, with margin; a
+   * longer stall loses time rather than bursting into a full FIFO. */
+  constexpr uint32_t kMaxCatchUpFrames = 12u;
   uint32_t lag = g_feed_primed ? (now - g_feed_ms) : 1u;
   if (lag > kMaxCatchUpFrames) {
     lag = kMaxCatchUpFrames;

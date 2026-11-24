@@ -1,15 +1,22 @@
 /**
  * @file diagnostics.h
- * @brief Runtime counters and optional CDC/UART status lines for bench bring-up.
+ * @brief Runtime counters and optional CDC/UART status lines for bench
+ * bring-up.
  *
  * Counters always accumulate. Periodic status lines print only when the
  * runtime print flag is on ({@link diagnostics_set_print_enabled}, CLI
  * {@code diag on}) and {@code DIAG_CDC} / {@code DIAG_UART} compile flags
  * allow the transport. ADC min/max/mean/peaks and ring occupancy extrema are
  * cleared after each print so each line reflects the last window.
+ *
+ * The periodic print and its enable flag exist only when
+ * {@code TG_SERIAL_CLI=1} (plan §5.7). Without it the counters accumulate
+ * and the window extrema are not cleared by a print.
  */
 
 #pragma once
+
+#include "app_config.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -97,14 +104,17 @@ typedef struct {
  */
 void diagnostics_init(void);
 
+#if TG_SERIAL_CLI
 /**
  * Enables or disables the ~2 s periodic status dump (CDC and/or UART).
- * Counters keep updating either way. Default after init is off.
+ * Counters keep updating either way. Default after init is off. Built only
+ * with {@code TG_SERIAL_CLI=1}: other builds never write to {@code Serial}.
  */
 void diagnostics_set_print_enabled(bool on);
 
 /** @return {@code true} when periodic diagnostic prints are enabled. */
 bool diagnostics_print_enabled(void);
+#endif
 
 /**
  * @return Pointer to the global counter block (never null). Callers may

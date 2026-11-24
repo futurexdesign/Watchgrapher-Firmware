@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Measure the Timegrapher Stand's crystal error against NTP time.
 
+Legacy: this script drives the serial CLI, which is built only into the
+``*_cli`` envs (``TG_SERIAL_CLI=1``, e.g. ``pico2_pcm1808_cli``). Shipped
+builds have no CLI on the CDC port; use the web app's PC-assisted calibration
+there (docs/build_and_flash.md, docs/TIMEBASE_CALIBRATION.md).
+
 Every clock on the board (µs timer, PCM1808 MCLK, ADC clock) comes from the
 same 12 MHz crystal, so the error of the µs timer is the error of every
 capture path. This script polls the device's ``time`` CLI command over the
@@ -269,7 +274,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(description="\n\n".join(__doc__.split("\n\n")[0:2]))
     p.add_argument("--port", required=True, help="CDC serial port of the device")
     p.add_argument("--duration", type=float, default=1800.0, help="seconds (default 1800)")
     p.add_argument("--interval", type=float, default=2.0, help="seconds between samples")

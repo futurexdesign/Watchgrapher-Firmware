@@ -1,0 +1,374 @@
+{
+  "sample_rate_hz": 48000,
+  "format": "mono S16LE WAV",
+  "lift_angle_deg_reference": 52,
+  "reference": "ChronoPulse, lift angle 52 deg, integration 20 s",
+  "clips": [
+    {
+      "id": "waltham_18000",
+      "source": "18000BPH_Watham.wav",
+      "bph": 18000,
+      "loop_beats": 22,
+      "loop_samples": 211151,
+      "loop_seconds": 4.399,
+      "source_start_s": 20.33,
+      "expected": {
+        "rate_s_day": 20.05,
+        "beat_error_ms_est": 0.509
+      },
+      "recording_fit": {
+        "rate_s_day": 20.1,
+        "window_rate_s_day": 20.1,
+        "beat_error_ms": 0.509,
+        "jitter_us_rms": 373.5,
+        "rate_20s_windows": [
+          18.2,
+          16.9,
+          19.2,
+          21.3,
+          22.6,
+          22.0
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 20.01,
+        "beat_error_ms": 0.188
+      },
+      "chronopulse": {
+        "rate_s_day": 20.9,
+        "beat_error_ms": 0.6,
+        "amp_onset_deg": 309,
+        "amp_peak_deg": 287
+      }
+    },
+    {
+      "id": "m8215_incase_21600",
+      "source": "21600BPH_8215_InCase .wav",
+      "bph": 21600,
+      "loop_beats": 22,
+      "loop_samples": 175992,
+      "loop_seconds": 3.6665,
+      "source_start_s": 39.401,
+      "expected": {
+        "rate_s_day": 3.93,
+        "beat_error_ms_est": 0.737
+      },
+      "recording_fit": {
+        "rate_s_day": 3.86,
+        "window_rate_s_day": 3.93,
+        "beat_error_ms": 0.737,
+        "jitter_us_rms": 204.7,
+        "rate_20s_windows": [
+          3.6,
+          3.8,
+          3.5,
+          3.0,
+          3.8
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 3.96,
+        "beat_error_ms": 0.775
+      },
+      "chronopulse": {
+        "rate_s_day": 4.1,
+        "beat_error_ms": 0.3,
+        "amp_onset_deg": 287,
+        "amp_peak_deg": 278
+      }
+    },
+    {
+      "id": "m8215_jubilee_21600",
+      "source": "21600BPH_8215_jubilee .wav",
+      "bph": 21600,
+      "loop_beats": 26,
+      "loop_samples": 208038,
+      "loop_seconds": 4.3341,
+      "source_start_s": 20.366,
+      "expected": {
+        "rate_s_day": -15.78,
+        "beat_error_ms_est": 0.07
+      },
+      "recording_fit": {
+        "rate_s_day": -15.97,
+        "window_rate_s_day": -15.98,
+        "beat_error_ms": 0.07,
+        "jitter_us_rms": 129.6,
+        "rate_20s_windows": [
+          -15.6,
+          -15.8,
+          -16.1,
+          -16.4,
+          -16.4,
+          -15.8
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": -15.78,
+        "beat_error_ms": 0.107
+      },
+      "chronopulse": {
+        "rate_s_day": -15.5,
+        "beat_error_ms": 0.0,
+        "amp_onset_deg": 300,
+        "amp_peak_deg": 279
+      }
+    },
+    {
+      "id": "nh35_21600",
+      "source": "21600BPH_NH35.wav",
+      "bph": 21600,
+      "loop_beats": 24,
+      "loop_samples": 191991,
+      "loop_seconds": 3.9998,
+      "source_start_s": 10.062,
+      "expected": {
+        "rate_s_day": 4.05,
+        "beat_error_ms_est": 0.466
+      },
+      "recording_fit": {
+        "rate_s_day": 4.08,
+        "window_rate_s_day": 4.12,
+        "beat_error_ms": 0.466,
+        "jitter_us_rms": 163.2,
+        "rate_20s_windows": [
+          2.4,
+          3.2,
+          4.4,
+          4.5,
+          5.2,
+          5.1
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 4.06,
+        "beat_error_ms": 0.356
+      },
+      "chronopulse": {
+        "rate_s_day": 5.5,
+        "beat_error_ms": 0.1,
+        "amp_onset_deg": 261,
+        "amp_peak_deg": 254
+      }
+    },
+    {
+      "id": "nh39a_21600",
+      "source": "21600BPH_NH39A.wav",
+      "bph": 21600,
+      "loop_beats": 22,
+      "loop_samples": 175965,
+      "loop_seconds": 3.6659,
+      "source_start_s": 15.918,
+      "expected": {
+        "rate_s_day": 17.19,
+        "beat_error_ms_est": 0.746
+      },
+      "recording_fit": {
+        "rate_s_day": 17.31,
+        "window_rate_s_day": 17.42,
+        "beat_error_ms": 0.746,
+        "jitter_us_rms": 61.9,
+        "rate_20s_windows": [
+          17.2,
+          17.3,
+          17.3,
+          17.3,
+          17.3,
+          17.5
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 17.18,
+        "beat_error_ms": 0.76
+      },
+      "chronopulse": {
+        "rate_s_day": 17.3,
+        "beat_error_ms": 0.4,
+        "amp_onset_deg": 328,
+        "amp_peak_deg": 318
+      }
+    },
+    {
+      "id": "st3600_21600",
+      "source": "21600BPH_ST3600.wav",
+      "bph": 21600,
+      "loop_beats": 26,
+      "loop_samples": 207971,
+      "loop_seconds": 4.3327,
+      "source_start_s": 6.052,
+      "expected": {
+        "rate_s_day": 12.05,
+        "beat_error_ms_est": 0.62
+      },
+      "recording_fit": {
+        "rate_s_day": 12.03,
+        "window_rate_s_day": 11.12,
+        "beat_error_ms": 0.62,
+        "jitter_us_rms": 320.8,
+        "rate_20s_windows": [
+          12.5,
+          10.7,
+          11.5,
+          12.4,
+          13.1,
+          12.0
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 12.05,
+        "beat_error_ms": 0.706
+      },
+      "chronopulse": {
+        "rate_s_day": 11.9,
+        "beat_error_ms": 0.3,
+        "amp_onset_deg": 327,
+        "amp_peak_deg": 292
+      }
+    },
+    {
+      "id": "r3135_hulk_28800",
+      "source": "28800BPH_3135_hulk.wav",
+      "bph": 28800,
+      "loop_beats": 32,
+      "loop_samples": 191966,
+      "loop_seconds": 3.9993,
+      "source_start_s": 11.712,
+      "expected": {
+        "rate_s_day": 15.3,
+        "beat_error_ms_est": 0.329
+      },
+      "recording_fit": {
+        "rate_s_day": 15.3,
+        "window_rate_s_day": 15.15,
+        "beat_error_ms": 0.329,
+        "jitter_us_rms": 188.6,
+        "rate_20s_windows": [
+          15.5,
+          15.1,
+          14.9,
+          14.9,
+          15.6,
+          15.3
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 15.29,
+        "beat_error_ms": 0.322
+      },
+      "chronopulse": {
+        "rate_s_day": 16.1,
+        "beat_error_ms": 0.0,
+        "amp_onset_deg": 301,
+        "amp_peak_deg": 276
+      }
+    },
+    {
+      "id": "r3235_freesprung_28800",
+      "source": "28800BPH_3235_FreeSprung.wav",
+      "bph": 28800,
+      "loop_beats": 30,
+      "loop_samples": 179989,
+      "loop_seconds": 3.7498,
+      "source_start_s": 17.201,
+      "expected": {
+        "rate_s_day": 5.28,
+        "beat_error_ms_est": 0.163
+      },
+      "recording_fit": {
+        "rate_s_day": 5.28,
+        "window_rate_s_day": 5.32,
+        "beat_error_ms": 0.163,
+        "jitter_us_rms": 216.6,
+        "rate_20s_windows": [
+          5.6,
+          5.3,
+          5.5
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 5.29,
+        "beat_error_ms": 0.255
+      },
+      "chronopulse": {
+        "rate_s_day": 5.2,
+        "beat_error_ms": 0.2,
+        "amp_onset_deg": 240,
+        "amp_peak_deg": 232
+      }
+    },
+    {
+      "id": "r3235_starbucks_28800",
+      "source": "28800BPH_3235_Starbucks.wav",
+      "bph": 28800,
+      "loop_beats": 32,
+      "loop_samples": 191990,
+      "loop_seconds": 3.9998,
+      "source_start_s": 29.958,
+      "expected": {
+        "rate_s_day": 4.5,
+        "beat_error_ms_est": 0.605
+      },
+      "recording_fit": {
+        "rate_s_day": 4.48,
+        "window_rate_s_day": 4.54,
+        "beat_error_ms": 0.605,
+        "jitter_us_rms": 169.2,
+        "rate_20s_windows": [
+          4.3,
+          5.0,
+          5.4,
+          5.5,
+          4.1
+        ]
+      },
+      "loop_check": {
+        "rate_s_day": 4.51,
+        "beat_error_ms": 0.562
+      },
+      "chronopulse": {
+        "rate_s_day": 2.3,
+        "beat_error_ms": 0.2,
+        "amp_onset_deg": 214,
+        "amp_peak_deg": 206
+      }
+    },
+    {
+      "id": "switch_21600_28800",
+      "source": "Switch21600To28800.wav",
+      "bph": null,
+      "loop_samples": 1409384,
+      "loop_seconds": 29.362,
+      "source_start_s": 13.093,
+      "segments": [
+        {
+          "bph": 21600,
+          "from_s": 0.0,
+          "to_s": 12.08,
+          "rate_s_day": null,
+          "rate_s_day_recording": 3.41,
+          "rate_note": "no designed value: the 12 s segment is too short for the onset fit used to cut the clips (it reads +2.4 / +5.4); firmware reads +3.2..+3.8 and the OTG reference +2.8 on the 28,800 part"
+        },
+        {
+          "note": "watch changed over, noise",
+          "from_s": 12.08,
+          "to_s": 17.42
+        },
+        {
+          "bph": 28800,
+          "from_s": 17.42,
+          "to_s": 29.36,
+          "rate_s_day": null,
+          "rate_s_day_recording": 6.79,
+          "rate_note": "no designed value: the 12 s segment is too short for the onset fit used to cut the clips (it reads +2.4 / +5.4); firmware reads +3.2..+3.8 and the OTG reference +2.8 on the 28,800 part"
+        }
+      ],
+      "note": "the loop wraps from 28800 straight back to 21600; rate_s_day_recording is the fit over the whole stretch of that rate in the source recording",
+      "chronopulse": {
+        "rate_s_day": 7.1,
+        "beat_error_ms": 0.0,
+        "amp_onset_deg": 302,
+        "amp_peak_deg": 264
+      }
+    }
+  ]
+}
