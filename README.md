@@ -1,5 +1,10 @@
 # Timegrapher Stand — USB Microphone Firmware
 
+## Important Disclosure 
+This firmware is very much a product of AI assisted development tools.  I'm not going to sit here and pretend I wrote this code.  This was an exploratory project to see what was possible with the hardware and tools.  I feel it is important to disclose the origin, so there is no confusion. 
+
+## Background
+
 PlatformIO firmware for an RP2350/RP2354 board that enumerates as a **USB Audio Class 2 mono microphone** and streams 48 kHz signed 16-bit PCM from either:
 
 - **ADC** — onboard SAR ADC via FIFO + DMA (prototype path for watch-tick capture)
